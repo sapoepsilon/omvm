@@ -34,10 +34,13 @@ Xcode 27.2
 
 - `omvm gui NAME` boots a guest with the paravirtual GPU, which translates Metal
   to Vulkan on the host's M1/M2 GPU, and serves its screen over **VNC**
-  (`vncviewer 127.0.0.1:59xx`). You can log in and use the desktop. Some
-  textures, such as the wallpaper, don't render yet. Software rendering
-  (llvmpipe) does not work. Bake `share/70-desktop.sh` into the image first,
-  which turns off display sleep, Setup Assistant and crash dialogs.
+  (`vncviewer 127.0.0.1:59xx`). With the upstream reims-vgpu stack built
+  ([docs/graphics.md](docs/graphics.md)), the desktop draws without artifacts:
+  wallpaper, Dock, icons, menus and System Settings. The first login takes about
+  2 minutes while shaders compile. Without that stack, `omvm gui` falls back to
+  the older fork, which leaves missing icons and ghost menus. Bake
+  `share/70-desktop.sh` into the image first; it turns off display sleep, Setup
+  Assistant and crash dialogs.
 
 **Not yet:** audio.
 

@@ -1,0 +1,40 @@
+diff --git i/src/asahi/compiler/agx_compile.c w/src/asahi/compiler/agx_compile.c
+index e131bcf..6d6a5f3 100644
+--- i/src/asahi/compiler/agx_compile.c
++++ w/src/asahi/compiler/agx_compile.c
+@@ -1603,6 +1603,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+       return NULL;
+    }
+ 
++   case nir_intrinsic_end_invocation_interlock:
++      /* The pixel is released when the fragment ends (local). */
++      return NULL;
++
+    case nir_intrinsic_ddx:
+    case nir_intrinsic_ddx_coarse:
+    case nir_intrinsic_ddx_fine:
+diff --git i/src/asahi/vulkan/hk_physical_device.c w/src/asahi/vulkan/hk_physical_device.c
+index cc5fd0f..de45912 100644
+--- i/src/asahi/vulkan/hk_physical_device.c
++++ w/src/asahi/vulkan/hk_physical_device.c
+@@ -162,6 +162,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
+       .EXT_extended_dynamic_state2 = true,
+       .EXT_extended_dynamic_state3 = true,
+       .EXT_external_memory_dma_buf = true,
++      .EXT_fragment_shader_interlock = true,
+       .EXT_global_priority = true,
+       .EXT_global_priority_query = true,
+       .EXT_graphics_pipeline_library = true,
+@@ -546,6 +547,12 @@ hk_get_device_features(
+       .extendedDynamicState3RepresentativeFragmentTestEnable = false,
+       .extendedDynamicState3ShadingRateImageEnable = false,
+ 
++      /* VK_EXT_fragment_shader_interlock (local: wait_pix orders a pixel's
++       * fragments, as the gallium driver's spilled render targets rely on) */
++      .fragmentShaderSampleInterlock = false,
++      .fragmentShaderPixelInterlock = true,
++      .fragmentShaderShadingRateInterlock = false,
++
+       /* VK_EXT_graphics_pipeline_library */
+       .graphicsPipelineLibrary = true,
+ 
