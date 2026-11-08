@@ -45,7 +45,11 @@ Xcode 27.2
 - `omvm virt NAME` registers a persistent VM in **virt-manager** (libvirt), so you can
   start, stop and view it from a GUI ([docs/virt-manager.md](docs/virt-manager.md)).
 - **Clipboard** (text) is shared both ways with the Wayland host, and the guest's
-  **resolution follows the viewer window** (`RESOLUTION=WxH` sets the start size).
+  **resolution follows the viewer window** (`RESOLUTION=WxH` sets the start size;
+  `omvm res NAME 2560x1440` changes it from the shell).
+- **Remote control:** `omvm remote start` runs Sunshine, so Moonlight on a phone, tablet
+  or computer can drive the Omarchy desktop or any VM on a virtual monitor sized to the
+  client, with the lid closed too ([docs/streaming.md](docs/streaming.md)).
 - **Keyboard:** `share/hypr-macos-vm.lua` makes Hyprland pass every key, Super = Cmd
   included, to a focused VNC viewer (Ctrl+Alt+Esc releases).
 - **Apple Account sign-in** is not expected to work: the guest has no Secure Enclave

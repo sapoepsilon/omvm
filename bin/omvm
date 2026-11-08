@@ -16,6 +16,8 @@
 #                               RESOLUTION=WxH[@PPI] picks the first mode
 #   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt)
 #   omvm clip NAME [off]        share the text clipboard with the host (on with gui)
+#   omvm res NAME [WxH]         show or change the desktop size (or resize the viewer)
+#   omvm remote start|stop|...  control this laptop and its VMs from Moonlight
 set -euo pipefail
 
 VERSION=0.1.0
@@ -292,7 +294,7 @@ cmd_gui() {
         echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
         echo "$disp" > "$UPSTREAM/artifacts/runs/$name/vnc_display"
         ok "$name: VNC on 127.0.0.1:$((5900+disp)) at ${RESOLUTION:-1920x1080} (login window in ~40 s), SSH: omvm ssh $name"
-        echo "    viewer:  vncviewer 127.0.0.1:$((5900+disp))   (the desktop follows its window; stop: omvm stop $name)"
+        echo "    viewer:  vncviewer -Shared=1 127.0.0.1:$((5900+disp))   (the desktop follows its window, or: omvm res $name WxH)"
         follow_start "$name"
         return
     fi
@@ -407,6 +409,23 @@ HOOK
     echo "    SSH: omvm ssh $name   clipboard: omvm clip $name"
 }
 
+vnc_port_of() { # NAME -> QEMU VNC port (omvm gui run or libvirt domain)
+    local n="$1" f="$UPSTREAM/artifacts/runs/$1/vnc_display" d
+    if [[ -f $f ]]; then echo $((5900 + $(cat "$f"))); return; fi
+    d=$(virsh -c qemu:///session vncdisplay "$n" 2>/dev/null | head -1) || true
+    [[ $d == *:* ]] && { echo $((5900 + ${d##*:})); return; }
+    die "$n: no VNC display (is it running?)"
+}
+
+cmd_res() {
+    local n="${1:?usage: omvm res NAME [WxH]}" port
+    port=$(vnc_port_of "$n")
+    if [[ -z ${2:-} ]]; then python3 "$SHARE/vnc-setsize.py" "$port" 0 0 0 | head -1; return; fi
+    [[ $2 =~ ^([0-9]+)x([0-9]+)$ ]] || die "size must be WxH, e.g. 2560x1440"
+    python3 "$SHARE/vnc-setsize.py" "$port" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" 3 | sed -n 2p
+    ok "$n: asked for $2 (macOS switches in about a second; a VNC viewer with remote resize may change it back when its window resizes)"
+}
+
 cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
 cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
 
@@ -421,6 +440,8 @@ run) shift; cmd_run "$@" ;;
 start) shift; cmd_start "$@" ;;
 gui) shift; cmd_gui "$@"; clip_start "$1" ;;
 clip) shift; cmd_clip "$@" ;;
+res) shift; upstream; cmd_res "$@" ;;
+remote) shift; exec "$SHARE/stream-host.sh" "$@" ;;
 virt) shift; cmd_virt "$@" ;;
 virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1" ;; stopped) clip_stop "$1" ;; esac ;;
 ssh) shift; cmd_ssh "$@" ;;
@@ -428,6 +449,6 @@ stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;
 images) cmd_images ;;
 version|--version) echo "omvm $VERSION" ;;
-help|-h|--help) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+help|-h|--help) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//' ;;
 *) die "unknown command '$1' (omvm help)" ;;
 esac
