@@ -1,54 +1,70 @@
-# Using the macOS VM from a phone or tablet (Moonlight + Sunshine)
+# Remote control from a phone, tablet or another computer (Moonlight + Sunshine)
 
-Sunshine runs on the Linux host, not in the guest. Nothing gets installed in macOS.
+Sunshine runs on the Linux host, and nothing gets installed in macOS. One Sunshine serves two kinds of Moonlight app:
+
+- **Desktop**: the Omarchy desktop itself.
+- **macOS NAME**: one app for each running VM.
 
 ```
-macOS guest ──QEMU VNC 127.0.0.1:59xx──> TigerVNC viewer, full screen on a virtual
-Hyprland monitor "SUNVM" (1440x1080) ──wlr-screencopy──> Sunshine (libx264) ──LAN──> Moonlight
-Moonlight touch/keys ──> Sunshine uinput devices ──> Hyprland ──> viewer ──VNC──> guest
+Moonlight connects (asks for W x H @ FPS)
+  └─ Sunshine prep-cmd: stream-host.sh session-do ...
+       ├─ creates the headless Hyprland monitor REMOTE at exactly W x H @ FPS
+       ├─ Desktop:    lid closed? → built-in screen off, every workspace moves to REMOTE
+       └─ macOS NAME: TigerVNC viewer full screen on REMOTE (-RemoteResize=1)
+                      → QEMU patch 0003 → macOS switches to W x H
+Sunshine captures REMOTE (wlr-screencopy) → libx264 → LAN → Moonlight
+Moonlight touch/keys → Sunshine uinput → Hyprland
+Quit the app in Moonlight → REMOTE removed, built-in screen back
 ```
 
 ## Setup and use
 
 ```sh
-~/Work/omvm/share/stream-host.sh setup          # once: sunshine package, ufw LAN rules, web UI login
-~/Work/omvm/share/stream-host.sh start [5931]   # VNC port of the VM (sb1 = 5931)
-~/Work/omvm/share/stream-host.sh stop
+omvm remote setup      # once: sunshine package, ufw rules (LAN + Tailscale), web UI login
+omvm remote start      # Sunshine + lid inhibitor as user services (this login)
+omvm remote enable     # ... and at every login
+omvm remote status | stop | disable | log
+omvm remote display 2560x1440@60    # resize the live remote monitor
 ```
+
+(`omvm remote` is `share/stream-host.sh`. The list of macOS apps is rebuilt from the running VMs each time Sunshine starts. Run `omvm remote start` again after you start a VM.)
 
 On the phone or tablet:
 
-1. Install **Moonlight** (App Store or Play Store). The phone must be on the same Wi-Fi as the laptop.
-2. Open Moonlight. The host `omarchy-macos-vm` may show up by itself. If it doesn't, tap **+** and enter the laptop's IP address (`start` prints it).
-3. Tap the host. Moonlight shows a 4-digit PIN.
-4. On the laptop, run `stream-host.sh pin <PIN> <device-name>`. You can also open `https://<laptop-ip>:47990` → **PIN**. The login is in `~/.config/sunshine/omvm-webui-login`.
-5. Tap **Desktop**.
-6. Recommended settings: resolution 1440x1080 (or 1080p, with letterboxing), 60 FPS, 10–20 Mbps, H.264.
+1. Install **Moonlight**. It must be on the same network as the laptop, or on the same tailnet.
+2. Add the host. It often appears by itself. Otherwise tap **+** and enter the laptop's IP address, which `start` prints.
+3. Moonlight shows a PIN. On the laptop, run `omvm remote pin <PIN> <device-name>`. You can also do it in the web UI at `https://<ip>:47990` → **PIN**. The login is in `~/.config/sunshine/omvm-webui-login`.
+4. Pick **Desktop** or **macOS NAME**. The resolution and FPS you choose in Moonlight's settings become the size of the remote monitor. For a macOS app, they also become the guest's size.
+5. When you're done, long-press the app and choose **Quit**. Only quitting removes the remote monitor. A plain disconnect leaves the session running so you can reconnect.
 
-Controls:
-- A tap clicks where you touch. Moonlight's trackpad mode also works.
-- Three-finger tap opens the keyboard on Android and iOS.
-- Keys go to the viewer once it has focus. Super works as Cmd, through the omvm `macos-vm` submap.
+## Clamshell (lid closed)
 
-## Measured (loopback Moonlight client on the same laptop, 1440x1080@60)
+`start` and `enable` hold a `handle-lid-switch` inhibitor (unit `omvm-remote-lid`). Closing the lid still locks the session the Omarchy way, but the laptop no longer suspends. Connect with Moonlight, then unlock with your password on the lock screen. If the lid is closed when **Desktop** starts, the built-in screen is switched off for that session, and it comes back when you quit. Set `OMVM_STREAM_KEEP_INTERNAL=1` to keep the built-in screen on. `omvm remote stop` releases the inhibitor, so closing the lid suspends again.
 
-- 59–60 fps were received and rendered, with 0% network drops.
-- Host processing latency averaged 15–22 ms (min 6, max 54).
-- Sunshine used about 2 cores of the M1 Max with libx264 superfast/zerolatency.
+The disk is encrypted (LUKS). After a reboot, someone has to type the passphrase at the laptop, so don't reboot it remotely.
+
+## SSH
+
+`omarchy setup security sshd --gh-keys <github-user>` (or `--key="ssh-ed25519 …"`) sets up the server. It installs and enables sshd, authorizes the keys, turns off password logins and rate-limits port 22 in ufw.
+
+## Tested (loopback Moonlight client on the same laptop)
+
+- Desktop at 1280x720@30: REMOTE was created at 1280x720@30, Sunshine captured it, and REMOTE was removed on quit.
+- macOS at 1600x1000@30: macOS switched to 1600x1000 and drew the full desktop on REMOTE.
+- An earlier version measured 59–60 fps at 1440x1080@60 with 0% drops and 15–22 ms host latency. Sunshine used about 2 cores.
 
 ## Caveats
 
-- The virtual monitor sits to the right of the laptop screen while streaming. The laptop's own cursor can wander onto it.
-- Phone input moves the host's single cursor and keyboard focus. Streaming and using the laptop at the same time interfere with each other.
-- Absolute input only lands correctly while the monitor layout starts at 0,0, with the laptop screen at 0x0 and SUNVM to its right. `start` sets that up.
-- `native_pen_touch` is disabled. Phone touches then arrive as absolute mouse clicks. Hyprland would bind native touch to one monitor, so those touches would land on the wrong screen.
-- Only H.264 is available. Asahi has no hardware encoder.
-- macOS can't run the VM itself here. The guest's resolution is fixed at 1440x1080.
-- Outside the LAN, use Tailscale. Add a ufw rule for `100.64.0.0/10` (same ports).
-- While a stream runs, Sunshine sets the host's default audio sink to its own. It restores the sink when the stream ends.
+- With the lid open, REMOTE sits to the right of the laptop screen, and the laptop's cursor can wander onto it. Phone input and local input share one cursor and one keyboard focus.
+- Absolute input lands correctly only while the layout starts at 0,0. REMOTE is placed at `auto-right`, or at `0x0` when it is the only monitor.
+- `native_pen_touch` is off. Touches arrive as absolute clicks, because Hyprland would bind native touch to one monitor.
+- Video is H.264 software encoding only, because Asahi has no hardware encoder. Above about 1440p the frame rate drops.
+- To reach it from outside the LAN, use Tailscale. `setup` already opens `100.64.0.0/10`.
+- During a stream, Sunshine switches the default audio sink to its own and restores it afterwards.
+- The lock screen on REMOTE when you connect with the lid closed hasn't been tested yet.
 
 ## Alternatives considered
 
-- **Sunshine inside the macOS guest.** It needs a logged-in GUI session plus Screen Recording and Accessibility (TCC) grants clicked in the GUI. The VM has no VideoToolbox hardware encoder, so encoding would be software on 8 vCPUs. Not chosen, and not tested.
-- **Parsec.** It can't host on Linux at all. macOS hosting needs hardware VideoToolbox encode, which this VM lacks. Not viable.
-- **Zero-install fallback.** Enable macOS Screen Sharing (System Settings → General → Sharing). Forward a port with QMP `hostfwd_add net0 tcp:0.0.0.0:5900-:5900` and open it in ufw. Then use a VNC app on the phone (RealVNC Viewer, Jump). Another option is an SSH tunnel to QEMU's own VNC (`ssh -L 5931:127.0.0.1:5931 laptop`). Both are much laggier than Moonlight.
+- **Sunshine inside the macOS guest.** It needs TCC grants clicked in the GUI and would encode in software on 8 vCPUs. Not chosen.
+- **Parsec.** It can't host on Linux, and macOS hosting needs VideoToolbox, which the VM lacks.
+- **Plain VNC.** Use an SSH tunnel to QEMU's VNC (`ssh -L 5931:127.0.0.1:5931 laptop`, then a VNC app). It works, but it's laggier.
