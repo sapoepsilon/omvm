@@ -1,0 +1,29 @@
+# Maintainer: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
+pkgname=omvm-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Run macOS guest VMs under KVM on Omarchy (Apple Silicon); ships no Apple software"
+arch=('any')
+url="https://github.com/sapoepsilon/omvm"
+license=('GPL-2.0-or-later')
+depends=('bash' 'git' 'python' 'openssh' 'gdb' 'socat' 'zstd' 'exfatprogs' 'qemu-img')
+makedepends=('git')
+provides=('omvm')
+conflicts=('omvm')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf "0.1.0.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 bin/omvm "$pkgdir/usr/lib/omvm/bin/omvm"
+  install -Dm644 -t "$pkgdir/usr/lib/omvm/share" share/*.sh
+  install -d "$pkgdir/usr/bin"
+  ln -s /usr/lib/omvm/bin/omvm "$pkgdir/usr/bin/omvm"
+  install -Dm644 -t "$pkgdir/usr/share/doc/omvm" README.md AGENTS.md
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,7 @@
+*.pkg.tar.*
+artifacts/
+*.ipsw
+*.bin
+*.dmg
+*.img
+vm.json
