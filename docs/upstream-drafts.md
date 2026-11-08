@@ -73,3 +73,62 @@ omarchy-mac-pkgs. A kernel PR waits until the patch licence is resolved.
 > pending (steelbrain#1).
 >
 > Happy to open the PR against `main` if this fits the repo's scope.
+
+## 3. Graphics fixes upstream (send these first)
+
+### 3a. Mesa (Asahi/Honeykrisp): merge request
+**Title:** hk: expose VK_EXT_fragment_shader_interlock (pixel interlock)
+
+> The AGX compiler already lowers `begin_invocation_interlock` to `wait_pix`.
+> Gallium uses this to order spilled render-target image load/store. This MR
+> exposes `fragmentShaderPixelInterlock` in Honeykrisp and makes
+> `end_invocation_interlock` a no-op, since the pixel is released when the
+> fragment ends.
+>
+> Use case: reims-vgpu translates macOS guests' Metal framebuffer-fetch
+> shaders to Vulkan. That needs either pixel interlock or
+> rasterization-order attachment access. With this patch, a macOS 26 desktop
+> renders correctly on an M1 Max under KVM.
+>
+> Patch: `patches/graphics/mesa/0003-hk-fragment-shader-interlock.patch`.
+> CTS: TODO, run `dEQP-VK.fragment_shader_interlock.*` before submitting.
+
+### 3b. steelbrain/metal2vulkan: issue + PR
+**Title:** Importer without VK_EXT_external_memory_host (dma-buf route, Honeykrisp)
+
+> Honeykrisp has no host-pointer import, but it does have
+> `EXT_external_memory_dma_buf` and image DRM format modifiers. With this
+> change, the Importer exists when the dma-buf route is available. Pointer
+> imports are refused, and no-copy objects go through udmabuf dma-bufs
+> supplied by reims-vgpu.
+>
+> Patch: `patches/graphics/metal2vulkan/0001-*.patch`.
+
+### 3c. steelbrain/reims-vgpu: issue + PR
+**Title:** Asahi Linux host (Honeykrisp): dma-buf imports, memfd-backed allocations, XR10 opt-in
+
+> On an arm64 Linux KVM host with Honeykrisp, a macOS 26 vmapple guest
+> renders cleanly with four switchable changes:
+> - dma-buf imports instead of host pointers;
+> - memfd-backed `allocate_anywhere` and `allocate_fixed_overwrite`;
+> - extended XR10 formats off unless `REIMS_VGPU_EXTENDED_XR10=1`;
+> - unsupported pipeline states returned as an NSError.
+>
+> Also: the library needs `-C target-cpu=native` (LSE atomics) for
+> `aarch64-unknown-linux-gnu`.
+>
+> Patch: `patches/graphics/reims-vgpu/0001-*.patch`. Screenshots: <link>.
+
+### 3d. aquarat/qemu-reims-vgpu + steelbrain/qemu-reims-vgpu
+> Our port of aquarat's vmapple-on-KVM work onto steelbrain's current pin
+> (`patches/graphics/qemu/0001`).
+>
+> Finding: steelbrain's macOS 27 virtio-blk vendor capability (d235e51310)
+> makes a macOS 26 image's data-protected files unreadable under KVM, so
+> logins and SSH authentication fail. `0002` reverts it for this host. A
+> proper fix probably gates it on the guest version.
+
+### 3e. Kernel PAC VM-key patch: licence request (steelbrain)
+> Could the PAC VM-key KVM patch get a licence (GPL-2.0, like the kernel)?
+> It's the only piece that stops distributions such as Omarchy M from
+> packaging macOS-guest support. It's currently all rights reserved.

@@ -1,0 +1,117 @@
+From f5bb3c8d7489f02d78b9e0be029b5c59cab10f7d Mon Sep 17 00:00:00 2001
+From: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:15:04 -0700
+Subject: [PATCH] Local (Asahi/Honeykrisp): dma-buf-only importer without
+ VK_EXT_external_memory_host; detach backing on Linux
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../metal2vulkan-runtime/src/host_memory.rs   | 38 +++++++++++++++++--
+ .../src/private_properties.rs                 | 14 ++++---
+ 2 files changed, 44 insertions(+), 8 deletions(-)
+
+diff --git a/crates/metal2vulkan-runtime/src/host_memory.rs b/crates/metal2vulkan-runtime/src/host_memory.rs
+index 1efe71c6..b4d641e3 100644
+--- a/crates/metal2vulkan-runtime/src/host_memory.rs
++++ b/crates/metal2vulkan-runtime/src/host_memory.rs
+@@ -1041,6 +1041,9 @@ pub(super) struct Importer {
+     /// the first time a pointer is refused and a source called; `None` where the device makes no
+     /// such buffer.
+     pub(super) sparse_granule: std::sync::OnceLock<Option<u64>>,
++    /// Whether the device imports host pointers (`VK_EXT_external_memory_host`); without it every
++    /// pointer is refused and only the dma-buf route serves no-copy objects.
++    pub(super) host_pointer: bool,
+ }
+ 
+ impl Importer {
+@@ -1063,16 +1066,41 @@ impl Importer {
+         dma_buf: bool,
+         dma_buf_images: bool,
+     ) -> Result<Importer, Unsupported> {
+-        if !enabled
++        let host_pointer = enabled
+             .extensions
+-            .contains(&VkExtension::ExtExternalMemoryHost)
+-        {
++            .contains(&VkExtension::ExtExternalMemoryHost);
++        // Local (Asahi/Honeykrisp): a device with the dma-buf route but no
++        // `VK_EXT_external_memory_host` still gets an importer, whose every pointer import is
++        // refused, so each no-copy object goes to a dma-buf of its pages (`dma_buf.rs`).
++        if !host_pointer && !dma_buf {
+             return Err(Unsupported::needs(
+                 Feature::HostMemory,
+                 metal2vulkan::error::Capability::Extension(VkExtension::ExtExternalMemoryHost),
+             ));
+         }
+         let page = host_page().ok_or_else(|| Unsupported::not_implemented(Feature::HostMemory))?;
++        if !host_pointer {
++            let handle = device.handle();
++            let load = |name: &std::ffi::CStr| {
++                // SAFETY: as below.
++                let function = unsafe {
++                    loader_word.restore();
++                    instance.get_device_proc_addr(handle, name.as_ptr())
++                };
++                function.map_or(std::ptr::null(), |function| function as *const c_void)
++            };
++            let functions = ash::ext::external_memory_host::DeviceFn::load(|_| std::ptr::null());
++            let dma_buf = Some(ash::khr::external_memory_fd::DeviceFn::load(load));
++            return Ok(Importer {
++                functions,
++                page,
++                alignment: page,
++                dma_buf,
++                dma_buf_images,
++                host_pointer: false,
++                sparse_granule: std::sync::OnceLock::new(),
++            });
++        }
+         let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+         let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
+         // SAFETY: the caller's contract; the structure belongs to an enabled extension.
+@@ -1111,6 +1139,7 @@ impl Importer {
+             alignment,
+             dma_buf,
+             dma_buf_images,
++            host_pointer: true,
+             sparse_granule: std::sync::OnceLock::new(),
+         })
+     }
+@@ -1200,6 +1229,9 @@ impl Importer {
+         device: &ash::Device,
+         pointer: NonNull<u8>,
+     ) -> Result<u32, vk::Result> {
++        if !self.host_pointer {
++            return Err(vk::Result::ERROR_INVALID_EXTERNAL_HANDLE);
++        }
+         let mut properties = vk::MemoryHostPointerPropertiesEXT::default();
+         // SAFETY: the caller's contract; the function was loaded for this device.
+         let result = unsafe {
+diff --git a/crates/metal2vulkan-runtime/src/private_properties.rs b/crates/metal2vulkan-runtime/src/private_properties.rs
+index bbcf58ea..68735927 100644
+--- a/crates/metal2vulkan-runtime/src/private_properties.rs
++++ b/crates/metal2vulkan-runtime/src/private_properties.rs
+@@ -661,11 +661,15 @@ impl Answers<'_> {
+                     .are_programmable_sample_positions_supported()
+                     == Ok(true)
+             }
+-            F::SupportsResourceDetachBacking => self
+-                .properties
+-                .description
+-                .extensions
+-                .contains(&VkExtension::ExtExternalMemoryHost),
++            // Local (Asahi/Honeykrisp): the dma-buf route serves detached backings on Linux.
++            F::SupportsResourceDetachBacking => {
++                cfg!(target_os = "linux")
++                    || self
++                        .properties
++                        .description
++                        .extensions
++                        .contains(&VkExtension::ExtExternalMemoryHost)
++            }
+             F::SupportsSharedTextureHandles => true,
+             F::SupportsSimdReduction => {
+                 self.exact(R::SimdReduction) && self.exact(R::QuadReduction)
+-- 
+2.56.0
+

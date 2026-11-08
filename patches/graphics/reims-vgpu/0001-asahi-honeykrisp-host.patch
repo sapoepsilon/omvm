@@ -1,0 +1,172 @@
+From 83aa11924f1ee8ad0163f776e8849d66c3428b87 Mon Sep 17 00:00:00 2001
+From: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 12:15:04 -0700
+Subject: [PATCH] Local (Asahi/Honeykrisp): local metal2vulkan, dma-buf route
+ stands in for host-pointer import, memfd-backed own allocations, XR10 off,
+ soft unsupported states
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.toml                                    |  7 +++++
+ crates/reims-vgpu-vulkan/src/gpu/caps.rs      | 13 ++++++--
+ .../reims-vgpu-vulkan/src/gpu/serialized.rs   |  6 +++-
+ crates/reims-vgpu-vulkan/src/gpu/states.rs    | 13 ++++++++
+ crates/reims-vgpu-vulkan/src/os/linux/vm.rs   | 31 +++++++++++++++++++
+ 5 files changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index b789126e..94e1498d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -137,3 +137,10 @@ debug-assertions = true
+ # suite's `checked` pass leaves them off, and release has none at all (D36).
+ [profile.checked.package.objc2]
+ debug-assertions = false
++
++# Local (Asahi host): metal2vulkan with the dma-buf-only importer (Honeykrisp has no
++# VK_EXT_external_memory_host).
++[patch."https://github.com/steelbrain/metal2vulkan"]
++metal2vulkan = { path = "../metal2vulkan/crates/metal2vulkan" }
++metal2vulkan-runtime = { path = "../metal2vulkan/crates/metal2vulkan-runtime" }
++metal2vulkan-air = { path = "../metal2vulkan/crates/metal2vulkan-air" }
+diff --git a/crates/reims-vgpu-vulkan/src/gpu/caps.rs b/crates/reims-vgpu-vulkan/src/gpu/caps.rs
+index c5dd68fe..f5d0076a 100644
+--- a/crates/reims-vgpu-vulkan/src/gpu/caps.rs
++++ b/crates/reims-vgpu-vulkan/src/gpu/caps.rs
+@@ -275,10 +275,15 @@ fn computed(device: &rt::Device, private: &rt::PrivateProperties) -> (u64, Limit
+         props.supports_vertex_amplification_count(count)
+     });
+     let [simd_reduction, simd_shuffle_and_fill] = simd_rows_exact(device);
++    // Local (Asahi/Honeykrisp): on Linux the dma-buf route (udmabuf views of guest pages)
++    // stands in for `VK_EXT_external_memory_host`, which Honeykrisp lacks; without these the
++    // guest falls back to legacy heaps, whose ops the library does not serve.
+     let imports_host_memory = device
+         .enabled()
+         .extensions
+-        .contains(&VkExtension::ExtExternalMemoryHost);
++        .contains(&VkExtension::ExtExternalMemoryHost)
++        || (cfg!(target_os = "linux")
++            && std::env::var("REIMS_VGPU_DMA_BUF_IMPORTS").map_or(true, |v| v != "0"));
+     let refuses = |feature: Feature| {
+         metal
+             .unsupported_features
+@@ -349,7 +354,11 @@ fn computed(device: &rt::Device, private: &rt::PrivateProperties) -> (u64, Limit
+         supports_compute_compressed_texture_write: flag(F::SupportsComputeCompressedTextureWrite),
+         supports_conditional_load_store: flag(F::SupportsConditionalLoadStore),
+         supports_dynamic_attribute_stride: flag(F::SupportsDynamicAttributeStride),
+-        supports_extended_xr10_formats: stand_in::EXTENDED_XR10_FORMATS,
++        // Local (Asahi/Honeykrisp): the runtime refuses render states into the two-plane XR10
++        // formats there (550), which macOS 26's WindowServer makes when the device offers
++        // them; off unless REIMS_VGPU_EXTENDED_XR10=1.
++        supports_extended_xr10_formats: stand_in::EXTENDED_XR10_FORMATS
++            && std::env::var("REIMS_VGPU_EXTENDED_XR10").is_ok_and(|v| v == "1"),
+         supports_float16_bcubic_filtering: stand_in::FLOAT16_BCUBIC_FILTERING,
+         supports_heap_with_address_ranges: imports_host_memory,
+         supports_image_blocks: stand_in::IMAGE_BLOCKS,
+diff --git a/crates/reims-vgpu-vulkan/src/gpu/serialized.rs b/crates/reims-vgpu-vulkan/src/gpu/serialized.rs
+index 020afe0b..e1f086a2 100644
+--- a/crates/reims-vgpu-vulkan/src/gpu/serialized.rs
++++ b/crates/reims-vgpu-vulkan/src/gpu/serialized.rs
+@@ -665,7 +665,11 @@ impl RawFormat {
+         e: rt::Error,
+     ) -> rt::Error {
+         use metal2vulkan::error::Attachment;
+-        if !crate::gpu::desc::is_format_refusal(&e) {
++        if !crate::gpu::desc::is_format_refusal(&e) || crate::gpu::states::soft_unsupported_states()
++        {
++            if crate::gpu::desc::is_format_refusal(&e) {
++                log::warn!("{sel}: a state the runtime refuses answers an NSError: {e:?}");
++            }
+             return e;
+         }
+         let raw = |f: Option<PixelFormat>| f.map(|f| u64::from(f.as_raw()));
+diff --git a/crates/reims-vgpu-vulkan/src/gpu/states.rs b/crates/reims-vgpu-vulkan/src/gpu/states.rs
+index b37c38a9..cbaf10d5 100644
+--- a/crates/reims-vgpu-vulkan/src/gpu/states.rs
++++ b/crates/reims-vgpu-vulkan/src/gpu/states.rs
+@@ -411,6 +411,14 @@ pub(crate) fn new_depth_stencil_state(
+ ///
+ /// An answer the runtime cannot prove ([`rt::Error::Unproven`]) dies, naming it (`unproven`), as
+ /// does every other refusal.
++/// Local: whether unsupported pipeline states answer an NSError ([`pipeline_error`]).
++pub(crate) fn soft_unsupported_states() -> bool {
++    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
++        std::env::var("REIMS_VGPU_SOFT_UNSUPPORTED_STATES").map_or(true, |v| v != "0")
++    });
++    *ON
++}
++
+ pub(crate) fn pipeline_error(e: &rt::Error) -> Option<NsErrorText> {
+     use metal2vulkan::error::{DescriptorError, Error as Compile, Needs, RuntimeInput};
+     let code = match e {
+@@ -428,6 +436,11 @@ pub(crate) fn pipeline_error(e: &rt::Error) -> Option<NsErrorText> {
+             RuntimeInput::DynamicSymbol { .. } | RuntimeInput::DynamicLibrary { .. },
+         )) => UNDEFINED_SYMBOLS,
+         rt::Error::MetalError(m) => m.code,
++        // Local (Asahi/Honeykrisp): with REIMS_VGPU_SOFT_UNSUPPORTED_STATES=1 (default on), a
++        // state the runtime cannot make on this device (e.g. a blend into a two-plane XR10
++        // attachment, which needs fragment shader interlock or raster-order attachment access)
++        // is Metal's NSError, not the process's death: the guest skips that effect.
++        rt::Error::Unsupported(_) if soft_unsupported_states() => METAL_REFUSES,
+         _ => return None,
+     };
+     Some(NsErrorText {
+diff --git a/crates/reims-vgpu-vulkan/src/os/linux/vm.rs b/crates/reims-vgpu-vulkan/src/os/linux/vm.rs
+index 19cbcc9b..2f5b625f 100644
+--- a/crates/reims-vgpu-vulkan/src/os/linux/vm.rs
++++ b/crates/reims-vgpu-vulkan/src/os/linux/vm.rs
+@@ -449,6 +449,15 @@ pub(super) fn ptr(at: u64) -> *mut libc::c_void {
+ 
+ /// Maps `length` bytes of anonymous zero-filled memory, read and write, at `at` (`MAP_FIXED`)
+ /// or anywhere: its first byte, or the `errno`'s answer.
++/// Local (Asahi/Honeykrisp): whether the library's own allocations are memfd-backed, so a
++/// dma-buf can be made of their pages (on unless `REIMS_VGPU_OWN_FILES=0`).
++fn own_files() -> bool {
++    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
++        std::env::var("REIMS_VGPU_OWN_FILES").map_or(true, |v| v != "0")
++    });
++    *ON
++}
++
+ pub(super) fn anonymous(at: Option<u64>, length: u64, what: &str) -> Result<u64, KernReturn> {
+     let fixed = if at.is_some() { libc::MAP_FIXED } else { 0 };
+     // SAFETY: a fresh private mapping; at a fixed address, replacing that range is the caller's
+@@ -1031,6 +1040,20 @@ impl HostVm for LinuxVm {
+         if length == 0 {
+             return Ok(HostAddr::NULL);
+         }
++        // Local (Asahi/Honeykrisp): with no host-pointer import every no-copy buffer goes
++        // through a dma-buf of its pages, which needs a file behind them, so this memory is a
++        // shared mapping of a memfd of its own, recorded in the backing table.
++        if own_files() {
++            let at = reclaiming(|| {
++                let fd = memfd(length).map_err(|_| NO_SPACE)?;
++                let backing = Backing { fd, offset: 0 };
++                let prot = libc::PROT_READ | libc::PROT_WRITE;
++                let at = file(None, length, &backing, prot)?;
++                files::record(at, length, backing, prot);
++                Ok(at)
++            })?;
++            return Ok(HostAddr::from_addr(at.to_usize()));
++        }
+         let at = reclaiming(|| anonymous(None, length, "allocate_anywhere"))?;
+         files::forget(at, length);
+         Ok(HostAddr::from_addr(at.to_usize()))
+@@ -1045,6 +1068,14 @@ impl HostVm for LinuxVm {
+         }
+         reclaiming(|| {
+             let _views = views();
++            if own_files() {
++                let fd = memfd(length).map_err(|_| NO_SPACE)?;
++                let backing = Backing { fd, offset: 0 };
++                let prot = libc::PROT_READ | libc::PROT_WRITE;
++                file(Some(first), length, &backing, prot)?;
++                files::record(first, length, backing, prot);
++                return Ok(());
++            }
+             anonymous(Some(first), length, "allocate_fixed_overwrite")?;
+             files::forget(first, length);
+             Ok(())
+-- 
+2.56.0
+

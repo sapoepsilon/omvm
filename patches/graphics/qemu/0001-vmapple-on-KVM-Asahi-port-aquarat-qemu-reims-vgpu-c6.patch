@@ -1,0 +1,1520 @@
+From f11d58c101112b8b53550a3ceb8fab3dc5806ab1 Mon Sep 17 00:00:00 2001
+From: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 10:51:12 -0700
+Subject: [PATCH 1/2] vmapple on KVM (Asahi): port aquarat/qemu-reims-vgpu
+ c6d87a8406's KVM work onto steelbrain 1b41f5f5db
+
+This is a whole-file port of the vmapple-on-KVM work in
+https://github.com/aquarat/qemu-reims-vgpu (c6d87a8406), including Anees
+Iqbal's original vmapple KVM commit (7f39007f9a) and Mohamed Mediouni's
+RFC v7 "vmapple: make it work on the latest macOS release". Authorship of
+that code stays with them; this patch only rebases it onto
+steelbrain/qemu-reims-vgpu 1b41f5f5db. GPL-2.0-or-later, as QEMU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/intc/arm_gicv2m.c         |   4 +
+ hw/virtio/trace-events       |   4 +
+ hw/virtio/virtio.c           |  37 +++
+ hw/vmapple/Kconfig           |  10 +-
+ hw/vmapple/avp-rtc.c         | 186 ++++++++++++++
+ hw/vmapple/bdif.c            |  17 +-
+ hw/vmapple/meson.build       |   1 +
+ hw/vmapple/trace-events      |   4 +
+ hw/vmapple/vmapple.c         | 455 ++++++++++++++++++-----------------
+ include/hw/virtio/virtio.h   |   1 +
+ include/hw/vmapple/vmapple.h |   4 +
+ include/qemu/mmap-alloc.h    |   9 +
+ system/physmem.c             |   4 +
+ target/arm/kvm-vmapple.c     | 230 ++++++++++++++++++
+ target/arm/kvm.c             |  12 +
+ target/arm/kvm_arm.h         |   8 +
+ target/arm/meson.build       |   2 +-
+ util/mmap-alloc.c            |  26 ++
+ util/oslib-posix.c           |   3 +-
+ 19 files changed, 791 insertions(+), 226 deletions(-)
+ create mode 100644 hw/vmapple/avp-rtc.c
+ create mode 100644 target/arm/kvm-vmapple.c
+
+diff --git a/hw/intc/arm_gicv2m.c b/hw/intc/arm_gicv2m.c
+index ead1d9d079..1613f4c3ae 100644
+--- a/hw/intc/arm_gicv2m.c
++++ b/hw/intc/arm_gicv2m.c
+@@ -82,6 +82,10 @@ static uint64_t gicv2m_read(void *opaque, hwaddr offset,
+     case V2M_MSI_TYPER:
+         val = (s->base_spi + 32) << 16;
+         val |= s->num_spi;
++        /*
++         * The macOS guest quirk, from Mohamed Mediouni's qemu-devel RFC v7
++         * vmapple series (patch 6).
++         */
+         if (s->macos_compat) {
+             val |= BIT(31);
+         }
+diff --git a/hw/virtio/trace-events b/hw/virtio/trace-events
+index 2a57edc21e..b9563a05ed 100644
+--- a/hw/virtio/trace-events
++++ b/hw/virtio/trace-events
+@@ -85,6 +85,7 @@ virtio_queue_notify(void *vdev, int n, void *vq) "vdev %p n %d vq %p"
+ virtio_notify_irqfd_deferred_fn(void *vdev, void *vq) "vdev %p vq %p"
+ virtio_notify(void *vdev, void *vq) "vdev %p vq %p"
+ virtio_set_status(void *vdev, uint8_t val) "vdev %p val %u"
++virtio_queue_fixup_used(void *vdev, int n, uint64_t used, uint64_t fixed) "vdev %p queue %d used 0x%" PRIx64 " -> 0x%" PRIx64
+ 
+ # virtio-rng.c
+ virtio_rng_guest_not_ready(void *rng) "rng %p: guest not ready"
+@@ -101,6 +102,9 @@ virtio_balloon_handle_output(const char *name, uint64_t gpa) "section name: %s g
+ virtio_balloon_get_config(uint32_t num_pages, uint32_t actual) "num_pages: %d actual: %d"
+ virtio_balloon_set_config(uint32_t actual, uint32_t oldactual) "actual: %d oldactual: %d"
+ virtio_balloon_to_target(uint64_t target, uint32_t num_pages) "balloon target: 0x%"PRIx64" num_pages: %d"
++virtio_balloon_macos_buf(int inflate, uint32_t pfns, uint32_t actual, uint32_t held) "inflate %d pfns %u actual %u held %u"
++virtio_balloon_macos_release(uint32_t pfns, uint32_t held) "pfns %u held %u"
++virtio_balloon_macos_config(uint32_t target, uint32_t actual, uint32_t held, uint32_t num_pages) "target %u actual %u held %u num_pages %u"
+ 
+ # virtio-mmio.c
+ virtio_mmio_read(uint64_t offset) "virtio_mmio_read offset 0x%" PRIx64
+diff --git a/hw/virtio/virtio.c b/hw/virtio/virtio.c
+index c9f9e5b511..6622b29278 100644
+--- a/hw/virtio/virtio.c
++++ b/hw/virtio/virtio.c
+@@ -2406,12 +2406,47 @@ hwaddr virtio_queue_get_addr(VirtIODevice *vdev, int n)
+     return vdev->vq[n].vring.desc;
+ }
+ 
++/*
++ * A split ring's used ring must not overlap its available ring.  macOS'
++ * AppleVirtIO driver (macOS 26) lays a ring out in one physically
++ * contiguous buffer with no alignment of its own: descriptors, then the
++ * available ring, and reads the used ring at the legacy offset
++ * ALIGN_UP(end of the available ring, 4096).  When the available ring
++ * straddles a 4 KiB boundary, the used ring address it programs into the
++ * device is that boundary, inside the available ring, so the device writes
++ * used entries where the driver never looks and the first request on the
++ * queue never completes.  With x-fix-overlapping-used, move such a used ring
++ * to where the driver reads it.
++ */
++static hwaddr virtio_queue_fixup_used(VirtIODevice *vdev, int n, hwaddr avail,
++                                      hwaddr used)
++{
++    unsigned int num = vdev->vq[n].vring.num;
++    hwaddr avail_end = avail + offsetof(VRingAvail, ring[num]) +
++                       sizeof(uint16_t); /* used_event */
++    hwaddr fixed;
++
++    if (!vdev->fix_overlapping_used ||
++        virtio_vdev_has_feature(vdev, VIRTIO_F_RING_PACKED) ||
++        used < avail || used >= avail_end) {
++        return used;
++    }
++    fixed = QEMU_ALIGN_UP(avail_end, VIRTIO_PCI_VRING_ALIGN);
++    qemu_log_mask(LOG_GUEST_ERROR,
++                  "%s: queue %d: used ring 0x%" HWADDR_PRIx " overlaps the "
++                  "available ring at 0x%" HWADDR_PRIx ", using 0x%" HWADDR_PRIx
++                  "\n", vdev->name, n, used, avail, fixed);
++    trace_virtio_queue_fixup_used(vdev, n, used, fixed);
++    return fixed;
++}
++
+ void virtio_queue_set_rings(VirtIODevice *vdev, int n, hwaddr desc,
+                             hwaddr avail, hwaddr used)
+ {
+     if (!vdev->vq[n].vring.num) {
+         return;
+     }
++    used = virtio_queue_fixup_used(vdev, n, avail, used);
+     vdev->vq[n].vring.desc = desc;
+     vdev->vq[n].vring.avail = avail;
+     vdev->vq[n].vring.used = used;
+@@ -4352,6 +4387,8 @@ static const Property virtio_properties[] = {
+     DEFINE_PROP_BOOL("use-disabled-flag", VirtIODevice, use_disabled_flag, true),
+     DEFINE_PROP_BOOL("x-disable-legacy-check", VirtIODevice,
+                      disable_legacy_check, false),
++    DEFINE_PROP_BOOL("x-fix-overlapping-used", VirtIODevice,
++                     fix_overlapping_used, false),
+ };
+ 
+ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index 37c27473e2..c8721ad055 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -3,6 +3,9 @@
+ config VMAPPLE_AES
+     bool
+ 
++config VMAPPLE_AVP_RTC
++    bool
++
+ config VMAPPLE_BDIF
+     bool
+ 
+@@ -14,10 +17,10 @@ config VMAPPLE_VIRTIO_BLK
+ 
+ config VMAPPLE
+     bool
+-    depends on ARM
+-    depends on HVF
++    depends on AARCH64
++    depends on TCG || HVF || KVM
+     depends on MAC_PVG
+-    default y if ARM
++    default y
+     imply PCI_DEVICES
+     select ARM_GICV3
+     select PLATFORM_BUS
+@@ -29,6 +32,7 @@ config VMAPPLE
+     select GPIO_PWR
+     select PVPANIC_MMIO
+     select VMAPPLE_AES
++    select VMAPPLE_AVP_RTC
+     select VMAPPLE_BDIF
+     select VMAPPLE_CFG
+     select MAC_PVG_MMIO
+diff --git a/hw/vmapple/avp-rtc.c b/hw/vmapple/avp-rtc.c
+new file mode 100644
+index 0000000000..63c56d43cf
+--- /dev/null
++++ b/hw/vmapple/avp-rtc.c
+@@ -0,0 +1,186 @@
++/*
++ * VMApple "avp,rtc" real-time clock
++ *
++ * The clock Virtualization.framework gives macOS guests. Without it the
++ * guest only has the PL031, macOS reports "RTC reset likely", timed may
++ * adopt the image's last filesystem timestamp, and boots can stall.
++ *
++ * Layout reverse-engineered from macOS 26.4 (AppleVirtualPlatformRTC in
++ * com.apple.driver.AppleVirtualPlatform, and iBootStage2 for vma2):
++ *
++ *   0x00  R   64-bit time in microseconds; the guest's wall clock is this
++ *             plus the offset it keeps in NVRAM com.apple.System.rtc-offset
++ *             (zero if never set), so it counts from the Unix epoch here
++ *   0x18  RW  control, bit 0 = enable (set by the driver at start)
++ *   0x20  RW  interrupt enable mask (driver writes 0, later 0x6)
++ *   0x30  R   interrupt status (bit 1, bit 2: events forwarded to timed)
++ *   0x38  W   interrupt acknowledge, write-1-to-clear
++ *   0x40  R   ID: iBoot keeps the avp-rtc device tree node (and deletes
++ *             pl031-rtc) only if this reads 0xf001
++ *
++ * This model never raises an interrupt: host time changes are not signalled.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "hw/core/irq.h"
++#include "hw/core/sysbus.h"
++#include "hw/vmapple/vmapple.h"
++#include "migration/vmstate.h"
++#include "trace.h"
++
++OBJECT_DECLARE_SIMPLE_TYPE(VMAppleAvpRtcState, VMAPPLE_AVP_RTC)
++
++#define AVP_RTC_TIME        0x00
++#define AVP_RTC_CONTROL     0x18
++#define AVP_RTC_IRQ_ENABLE  0x20
++#define AVP_RTC_IRQ_STATUS  0x30
++#define AVP_RTC_IRQ_ACK     0x38
++#define AVP_RTC_ID          0x40
++#define AVP_RTC_ID_VALUE    0xf001
++
++struct VMAppleAvpRtcState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion iomem;
++    qemu_irq irq;
++    uint64_t control;
++    uint64_t irq_enable;
++    uint64_t irq_status;
++};
++
++static void avp_rtc_update_irq(VMAppleAvpRtcState *s)
++{
++    qemu_set_irq(s->irq, !!(s->irq_status & s->irq_enable));
++}
++
++static uint64_t avp_rtc_read(void *opaque, hwaddr offset, unsigned size)
++{
++    VMAppleAvpRtcState *s = opaque;
++    uint64_t val;
++
++    switch (offset) {
++    case AVP_RTC_TIME:
++        val = (uint64_t)qemu_clock_get_us(QEMU_CLOCK_HOST);
++        break;
++    case AVP_RTC_CONTROL:
++        val = s->control;
++        break;
++    case AVP_RTC_IRQ_ENABLE:
++        val = s->irq_enable;
++        break;
++    case AVP_RTC_IRQ_STATUS:
++        val = s->irq_status;
++        break;
++    case AVP_RTC_ID:
++        val = AVP_RTC_ID_VALUE;
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "%s: unimplemented read @ 0x%" HWADDR_PRIx
++                      " size %u\n", __func__, offset, size);
++        val = 0;
++        break;
++    }
++    trace_avp_rtc_read(offset, size, val);
++    return val;
++}
++
++static void avp_rtc_write(void *opaque, hwaddr offset, uint64_t val,
++                          unsigned size)
++{
++    VMAppleAvpRtcState *s = opaque;
++
++    trace_avp_rtc_write(offset, size, val);
++    switch (offset) {
++    case AVP_RTC_CONTROL:
++        s->control = val;
++        break;
++    case AVP_RTC_IRQ_ENABLE:
++        s->irq_enable = val;
++        avp_rtc_update_irq(s);
++        break;
++    case AVP_RTC_IRQ_ACK:
++        s->irq_status &= ~val;
++        avp_rtc_update_irq(s);
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "%s: unimplemented write @ 0x%" HWADDR_PRIx
++                      " size %u value 0x%" PRIx64 "\n", __func__, offset, size,
++                      val);
++        break;
++    }
++}
++
++static const MemoryRegionOps avp_rtc_ops = {
++    .read = avp_rtc_read,
++    .write = avp_rtc_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++    .impl = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++};
++
++static void avp_rtc_reset(DeviceState *dev)
++{
++    VMAppleAvpRtcState *s = VMAPPLE_AVP_RTC(dev);
++
++    s->control = 0;
++    s->irq_enable = 0;
++    s->irq_status = 0;
++}
++
++static void avp_rtc_init(Object *obj)
++{
++    VMAppleAvpRtcState *s = VMAPPLE_AVP_RTC(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    memory_region_init_io(&s->iomem, obj, &avp_rtc_ops, s,
++                          TYPE_VMAPPLE_AVP_RTC, 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++}
++
++static const VMStateDescription vmstate_avp_rtc = {
++    .name = TYPE_VMAPPLE_AVP_RTC,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT64(control, VMAppleAvpRtcState),
++        VMSTATE_UINT64(irq_enable, VMAppleAvpRtcState),
++        VMSTATE_UINT64(irq_status, VMAppleAvpRtcState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static void avp_rtc_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    device_class_set_legacy_reset(dc, avp_rtc_reset);
++    dc->vmsd = &vmstate_avp_rtc;
++    dc->desc = "VMApple real-time clock (avp,rtc)";
++}
++
++static const TypeInfo avp_rtc_info = {
++    .name          = TYPE_VMAPPLE_AVP_RTC,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(VMAppleAvpRtcState),
++    .instance_init = avp_rtc_init,
++    .class_init    = avp_rtc_class_init,
++};
++
++static void avp_rtc_register_types(void)
++{
++    type_register_static(&avp_rtc_info);
++}
++
++type_init(avp_rtc_register_types)
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 4dc10c151d..c967cece5e 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -75,8 +75,21 @@ typedef struct VblkReq {
+ #define VBLK_RET_SUCCESS  0
+ #define VBLK_RET_FAILED   1
+ 
++/*
++ * REG_NEXT_DEVICE reports a device's size in 512-byte sectors. It used to be
++ * hard-coded to 64 GiB (root) and 32 MiB (aux), so the booter rejects a root
++ * disk of any other size (its GPT disagrees). Report the backing size.
++ */
++static uint64_t bdif_sectors(BlockBackend *blk, uint64_t fallback)
++{
++    int64_t len = blk ? blk_getlength(blk) : -1;
++
++    return len > 0 ? (uint64_t)len / 512 : fallback;
++}
++
+ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+ {
++    VMAppleBdifState *s = opaque;
+     uint64_t ret = -1;
+     uint64_t devid = offset & REG_DEVID_MASK;
+ 
+@@ -102,10 +115,10 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+     case REG_NEXT_DEVICE:
+         switch (devid) {
+         case DEVID_ROOT:
+-            ret = 0x8000000;
++            ret = bdif_sectors(s->root, 0x8000000);
+             break;
+         case DEVID_AUX:
+-            ret = 0x10000;
++            ret = bdif_sectors(s->aux, 0x10000);
+             break;
+         }
+         break;
+diff --git a/hw/vmapple/meson.build b/hw/vmapple/meson.build
+index 23bc4c999e..95455113d7 100644
+--- a/hw/vmapple/meson.build
++++ b/hw/vmapple/meson.build
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ system_ss.add(when: 'CONFIG_VMAPPLE_AES',  if_true: files('aes.c'))
++system_ss.add(when: 'CONFIG_VMAPPLE_AVP_RTC', if_true: files('avp-rtc.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_BDIF', if_true: files('bdif.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_CFG',  if_true: files('cfg.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_BLK',  if_true: files('virtio-blk.c'))
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 93380ede14..3458922304 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -19,3 +19,7 @@ aes_dump_data(const char *desc, const char *hex) "%s%s"
+ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
++
++# avp-rtc.c
++avp_rtc_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=%u value=0x%"PRIx64
++avp_rtc_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=%u value=0x%"PRIx64
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 2e055b01bd..0444d6d7bf 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -15,9 +15,8 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/target-info.h"
+ #include "qemu/bitops.h"
+-#include "qemu/cacheflush.h"
+-#include "qemu/cutils.h"
+ #include "qemu/datadir.h"
+ #include "qemu/error-report.h"
+ #include "qemu/guest-random.h"
+@@ -26,6 +25,7 @@
+ #include "qemu/module.h"
+ #include "qemu/option.h"
+ #include "qemu/units.h"
++#include "qemu/sockets.h"
+ #include "monitor/qdev.h"
+ #include "hw/core/boards.h"
+ #include "hw/core/irq.h"
+@@ -33,6 +33,7 @@
+ #include "hw/core/qdev-properties.h"
+ #include "hw/core/sysbus.h"
+ #include "hw/usb/usb.h"
++#include "hw/arm/bsa.h"
+ #include "hw/arm/boot.h"
+ #include "hw/char/pl011.h"
+ #include "hw/intc/arm_gic.h"
+@@ -44,18 +45,20 @@
+ #include "hw/vmapple/vmapple.h"
+ #include "net/net.h"
+ #include "qapi/error.h"
++#include "qapi/util.h"
+ #include "qapi/visitor.h"
+ #include "qapi/qapi-visit-common.h"
+ #include "qobject/qlist.h"
+ #include "standard-headers/linux/input.h"
+ #include "system/hvf.h"
+-#include "system/hvf_int.h"
++#include "system/hw_accel.h"
++#include "system/kvm.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
+ #include "target/arm/gtimer.h"
+ #include "target/arm/cpu.h"
+-#include "target/arm/hvf_arm.h"
++#include "kvm_arm.h"
+ 
+ struct VMAppleMachineState {
+     MachineState parent;
+@@ -72,12 +75,56 @@ struct VMAppleMachineState {
+     MemoryRegion fw_mr;
+     MemoryRegion ecam_alias;
+     uint64_t uuid;
+-    char *tablet;
++    int gpu;                /* VMAPPLE_GPU_* */
++    bool avp_rtc;
++    uint32_t max_instances;
++    int instance_fd;
+ };
+ 
+ #define TYPE_VMAPPLE_MACHINE   MACHINE_TYPE_NAME("vmapple")
+ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleMachineState, VMAPPLE_MACHINE)
+ 
++/*
++ * What fills the paravirtual GPU slot (gfx-device=): Apple's
++ * ParavirtualizedGraphics on a macOS host, a device model in a separate
++ * process (apv-gpu-proxy), or nothing for guests that need no Metal.
++ */
++enum {
++    VMAPPLE_GPU_APPLE_GFX,
++    VMAPPLE_GPU_PROXY,
++    VMAPPLE_GPU_NONE,
++    VMAPPLE_GPU__MAX,
++};
++
++static const char *const vmapple_gpu_names[VMAPPLE_GPU__MAX] = {
++    [VMAPPLE_GPU_APPLE_GFX] = "apple-gfx-mmio",
++    [VMAPPLE_GPU_PROXY] = "apv-gpu-proxy",
++    [VMAPPLE_GPU_NONE] = "none",
++};
++
++static const QEnumLookup vmapple_gpu_lookup = {
++    .array = vmapple_gpu_names,
++    .size = VMAPPLE_GPU__MAX,
++};
++
++bool vmapple_read_current_xreg(unsigned int index, uint64_t *value)
++{
++    CPUState *cs = current_cpu;
++    CPUARMState *env;
++
++    /* The vCPU whose MMIO access is being served, and no other. */
++    if (!cs || !value) {
++        return false;
++    }
++    env = &ARM_CPU(cs)->env;
++    if (index >= ARRAY_SIZE(env->xregs)) {
++        return false;
++    }
++    cpu_synchronize_state(cs);
++    *value = env->xregs[index];
++    return true;
++}
++
+ /* Number of external interrupt lines to configure the GIC with */
+ #define NUM_IRQS 256
+ 
+@@ -99,6 +146,7 @@ enum {
+     VMAPPLE_APV_IOSFC,
+     VMAPPLE_AES_1,
+     VMAPPLE_AES_2,
++    VMAPPLE_AVP_RTC,
+     VMAPPLE_BDOOR,
+     VMAPPLE_MEMMAP_LAST,
+ };
+@@ -120,6 +168,7 @@ static const MemMapEntry memmap[] = {
+     [VMAPPLE_APV_IOSFC] =          { 0x30210000, 0x00010000 },
+     [VMAPPLE_AES_1] =              { 0x30220000, 0x00004000 },
+     [VMAPPLE_AES_2] =              { 0x30230000, 0x00004000 },
++    [VMAPPLE_AVP_RTC] =            { 0x30240000, 0x00001000 },
+     [VMAPPLE_PCIE_ECAM] =          { 0x40000000, 0x10000000 },
+     [VMAPPLE_PCIE_MMIO] =          { 0x50000000, 0x1fff0000 },
+ 
+@@ -134,6 +183,7 @@ static const int irqmap[] = {
+     [VMAPPLE_APV_IOSFC] = 0x10,
+     [VMAPPLE_APV_GFX] = 0x11,
+     [VMAPPLE_AES_1] = 0x12,
++    [VMAPPLE_AVP_RTC] = 0x13,
+     [VMAPPLE_PCIE] = 0x20,
+     [VMAPPLE_GICV2M] = 0x80
+ };
+@@ -213,16 +263,32 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+ 
+ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
+-    int irq_gfx = vms->irqmap[VMAPPLE_APV_GFX];
+-    int irq_iosfc = vms->irqmap[VMAPPLE_APV_IOSFC];
+-    SysBusDevice *gfx;
++    SysBusDevice *gpu;
+ 
+-    gfx = SYS_BUS_DEVICE(qdev_new("apple-gfx-mmio"));
+-    sysbus_mmio_map(gfx, 0, vms->memmap[VMAPPLE_APV_GFX].base);
+-    sysbus_mmio_map(gfx, 1, vms->memmap[VMAPPLE_APV_IOSFC].base);
+-    sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
+-    sysbus_connect_irq(gfx, 1, qdev_get_gpio_in(vms->gic, irq_iosfc));
+-    sysbus_realize_and_unref(gfx, &error_fatal);
++    if (vms->gpu == VMAPPLE_GPU_NONE) {
++        return;
++    }
++    /* The slot: mmio 0 / irq 0 = gfx window, mmio 1 / irq 1 = IOSurface mapper. */
++    gpu = SYS_BUS_DEVICE(qdev_new(vmapple_gpu_names[vms->gpu]));
++    DEVICE(gpu)->id = g_strdup("gpu");
++    sysbus_mmio_map(gpu, 0, vms->memmap[VMAPPLE_APV_GFX].base);
++    sysbus_mmio_map(gpu, 1, vms->memmap[VMAPPLE_APV_IOSFC].base);
++    sysbus_connect_irq(gpu, 0,
++                       qdev_get_gpio_in(vms->gic, vms->irqmap[VMAPPLE_APV_GFX]));
++    sysbus_connect_irq(gpu, 1,
++                       qdev_get_gpio_in(vms->gic, vms->irqmap[VMAPPLE_APV_IOSFC]));
++    sysbus_realize_and_unref(gpu, &error_fatal);
++}
++
++/*
++ * The avp,rtc clock. iBoot keeps the guest's avp-rtc device tree node (and
++ * deletes pl031-rtc) when this device answers its ID probe; the PL031 stays
++ * mapped for guests and booters that do not probe.
++ */
++static void create_avp_rtc(VMAppleMachineState *vms)
++{
++    sysbus_create_simple(TYPE_VMAPPLE_AVP_RTC, vms->memmap[VMAPPLE_AVP_RTC].base,
++                         qdev_get_gpio_in(vms->gic, vms->irqmap[VMAPPLE_AVP_RTC]));
+ }
+ 
+ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+@@ -242,6 +308,45 @@ static int arm_gic_ppi_index(int cpu_nr, int ppi_index)
+     return NUM_IRQS + cpu_nr * GIC_INTERNAL + ppi_index;
+ }
+ 
++/*
++ * A CPU's private interrupt outputs to their GIC PPIs, at the numbers the
++ * Arm base system architecture assigns: the four generic timers, the
++ * GICv3 maintenance interrupt and the PMU. KVM also needs to be told which
++ * PPI its in-kernel PMU raises, and to initialise it, before the vCPU runs.
++ */
++static void vmapple_connect_cpu_ppis(VMAppleMachineState *vms, int cpu,
++                                     DeviceState *cpudev)
++{
++    static const struct {
++        int gtimer;
++        int ppi;
++    } timers[] = {
++        { GTIMER_PHYS, ARCH_TIMER_NS_EL1_IRQ },
++        { GTIMER_VIRT, ARCH_TIMER_VIRT_IRQ },
++        { GTIMER_HYP, ARCH_TIMER_NS_EL2_IRQ },
++        { GTIMER_SEC, ARCH_TIMER_S_EL1_IRQ },
++    };
++    size_t t;
++
++    for (t = 0; t < ARRAY_SIZE(timers); t++) {
++        qdev_connect_gpio_out(cpudev, timers[t].gtimer,
++                              qdev_get_gpio_in(vms->gic,
++                                  arm_gic_ppi_index(cpu, timers[t].ppi)));
++    }
++    qdev_connect_gpio_out_named(cpudev, "gicv3-maintenance-interrupt", 0,
++                                qdev_get_gpio_in(vms->gic,
++                                    arm_gic_ppi_index(cpu, ARCH_GIC_MAINT_IRQ)));
++    qdev_connect_gpio_out_named(cpudev, "pmu-interrupt", 0,
++                                qdev_get_gpio_in(vms->gic,
++                                    arm_gic_ppi_index(cpu, VIRTUAL_PMU_IRQ)));
++    if (kvm_enabled()) {
++        ARMCPU *arm = ARM_CPU(cpudev);
++
++        kvm_arm_pmu_set_irq(arm, VIRTUAL_PMU_IRQ);
++        kvm_arm_pmu_init(arm);
++    }
++}
++
+ static void create_gic(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
+     MachineState *ms = MACHINE(vms);
+@@ -281,10 +386,7 @@ static void create_gic(VMAppleMachineState *vms, MemoryRegion *mem)
+     for (i = 0; i < smp_cpus; i++) {
+         DeviceState *cpudev = DEVICE(qemu_get_cpu(i));
+ 
+-        /* Map the virt timer to PPI 27 */
+-        qdev_connect_gpio_out(cpudev, GTIMER_VIRT,
+-                              qdev_get_gpio_in(vms->gic,
+-                                               arm_gic_ppi_index(i, 27)));
++        vmapple_connect_cpu_ppis(vms, i, cpudev);
+ 
+         /* Map the GIC IRQ and FIQ lines to CPU */
+         sysbus_connect_irq(gicbusdev, i, qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
+@@ -293,6 +395,11 @@ static void create_gic(VMAppleMachineState *vms, MemoryRegion *mem)
+     }
+ }
+ 
++/*
++ * The GICv2m MSI frame and its macOS quirk come from Mohamed Mediouni's
++ * qemu-devel RFC v7 series "vmapple: make it work on the latest macOS
++ * release" (patches 5 and 6), applied to this fork in e181197cc2.
++ */
+ #define NUM_GICV2M_SPIS       128
+ 
+ static void create_gicv2m(VMAppleMachineState *vms)
+@@ -455,163 +562,65 @@ static void create_pcie(VMAppleMachineState *vms)
+         usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
+                                                           &error_fatal));
+         usb_create_simple(usb_bus, "usb-kbd");
+-        /* The user names the tablet, which may not realize on its own. */
+-        usb_realize_and_unref(USB_DEVICE(qdev_new(vms->tablet)), usb_bus,
+-                              &error_fatal);
++        usb_create_simple(usb_bus, "usb-vmapple-tablet");
+     }
+ }
+ 
+-/*
+- * macOS 14 and later need two changes to the kernel's memory to boot here,
+- * made when iBoot enters the kernel. From reset, RAM is not executable: each
+- * page iBoot runs becomes executable on its first instruction fetch, until a
+- * fetch lands in the kernel's memory with x0 at the boot arguments. Only the
+- * boot CPU runs then. The changes leave macOS 13 as it was.
+- */
+-
+-/* A host pointer to [pa, pa + len), if guest RAM holds all of it. */
+-static uint8_t *vmapple_ram(VMAppleMachineState *vms, uint64_t pa,
+-                            uint64_t len)
+-{
+-    MachineState *ms = MACHINE(vms);
+-    uint64_t off = pa - vms->memmap[VMAPPLE_MEM].base;
+-
+-    if (pa < vms->memmap[VMAPPLE_MEM].base || off > ms->ram_size ||
+-        len > ms->ram_size - off) {
+-        return NULL;
+-    }
+-    return (uint8_t *)memory_region_get_ram_ptr(ms->ram) + off;
+-}
+-
+-/*
+- * Hypervisor.framework fails the kernel's pointer authentication hypercalls,
+- * and from macOS 14 on the kernel spins on each failure with
+- * "hvc #0; cbnz x0, .". Take out the spins: the kernel then runs on the
+- * firmware's keys, as macOS 13's does.
+- */
+-static void vmapple_skip_pac_waits(uint8_t *mem, uint64_t size)
+-{
+-    for (uint64_t off = 4; off + 4 <= size; off += 4) {
+-        if (ldl_le_p(mem + off) == 0xb5000000 &&      /* cbnz x0, . */
+-            ldl_le_p(mem + off - 4) == 0xd4000002) {  /* hvc #0 */
+-            stl_le_p(mem + off, 0xd503201f);          /* nop */
+-            flush_idcache_range((uintptr_t)mem + off, (uintptr_t)mem + off,
+-                                4);
+-        }
+-    }
+-}
+-
+-/*
+- * A device tree node: a property count, a child count, its properties, then
+- * its children. A property is a 32-byte name, a 32-bit length whose top bit
+- * is a flag, and its value, padded to 4 bytes.
+- */
+-static const struct QEMU_PACKED {
+-    uint32_t props, children;
+-    struct QEMU_PACKED {
+-        char name[32];
+-        uint32_t len;
+-        char value[12];
+-    } name;
+-    struct QEMU_PACKED {
+-        char name[32];
+-        uint32_t len, value;
+-    } no_sep;
+-} vmapple_filesystems = {
+-    const_le32(2), 0,
+-    { "name", const_le32(12), "filesystems" },
+-    { "DoNotUseSEP", const_le32(4), const_le32(1) },
+-};
+-
+-/*
+- * The machine has no Secure Enclave, and from macOS 15 on APFS panics on the
+- * unencrypted data volume unless the device tree has /filesystems/DoNotUseSEP.
+- * If the tree has no /filesystems, append that node as the root's last child,
+- * in the zeroes that pad the tree to its last 16 KiB page, and cover it with
+- * the tree's length in the boot arguments.
+- */
+-static void vmapple_no_sep(VMAppleMachineState *vms, uint8_t *args)
+-{
+-    /* deviceTreeP - virtBase + physBase, and deviceTreeLength */
+-    uint64_t pa = ldq_le_p(args + 0x60) - ldq_le_p(args + 8) +
+-                  ldq_le_p(args + 16);
+-    uint64_t len = ldl_le_p(args + 0x68), end = 0, nodes, props;
+-    uint64_t room = ROUND_UP(pa + len, 16 * KiB) - pa;
+-    uint64_t size = sizeof(vmapple_filesystems);
+-    uint8_t *dt = vmapple_ram(vms, pa, room);
+-
+-    if (!dt) {
+-        return;
+-    }
+-    /* The tree's end: its nodes come in order, each before its children */
+-    for (nodes = 1; nodes; nodes--) {
+-        if (end + 8 > len) {
+-            return;
+-        }
+-        props = ldl_le_p(dt + end);
+-        nodes += ldl_le_p(dt + end + 4);
+-        for (end += 8; props; props--) {
+-            if (end + 36 > len) {
+-                return;
+-            }
+-            end += 36 + ROUND_UP(ldl_le_p(dt + end + 32) & INT32_MAX, 4);
+-        }
+-    }
+-    if (end + size > room || !buffer_is_zero(dt + end, size) ||
+-        memmem(dt, end, &vmapple_filesystems.name,
+-               sizeof(vmapple_filesystems.name))) {
+-        return;
+-    }
+-    memcpy(dt + end, &vmapple_filesystems, size);
+-    stl_le_p(dt + 4, ldl_le_p(dt + 4) + 1);
+-    stl_le_p(args + 0x68, MAX(len, end + size));
+-}
+-
+-static bool vmapple_exec_fault(CPUState *cpu, hwaddr ipa)
+-{
+-    VMAppleMachineState *vms = VMAPPLE_MACHINE(qdev_get_machine());
+-    uint64_t x0, base = 0, top = 0;
+-    uint8_t *args, *kernel;
+-
+-    if (!vmapple_ram(vms, ipa, 1)) {
+-        return false;
+-    }
+-    /* XNU's boot_args, version 2: physBase and topOfKernelData */
+-    assert_hvf_ok(hv_vcpu_get_reg(cpu->accel->fd, HV_REG_X0, &x0));
+-    args = vmapple_ram(vms, x0, 0x70);
+-    if (args && lduw_le_p(args + 2) == 2) {
+-        base = ldq_le_p(args + 16);
+-        top = ldq_le_p(args + 32);
+-    }
+-    kernel = vmapple_ram(vms, base, top - base);
+-    if (ipa < base || ipa >= top || !kernel) {
+-        /* Still in iBoot */
+-        assert_hvf_ok(hv_vm_protect(ipa & qemu_real_host_page_mask(),
+-                                    qemu_real_host_page_size(),
+-                                    HV_MEMORY_READ | HV_MEMORY_WRITE |
+-                                    HV_MEMORY_EXEC));
+-        return true;
+-    }
+-    vmapple_no_sep(vms, args);
+-    vmapple_skip_pac_waits(kernel, top - base);
+-    hvf_arm_exec_fault = NULL;
+-    assert_hvf_ok(hv_vm_protect(vms->memmap[VMAPPLE_MEM].base,
+-                                MACHINE(vms)->ram_size,
+-                                HV_MEMORY_READ | HV_MEMORY_WRITE |
+-                                HV_MEMORY_EXEC));
+-    return true;
+-}
+-
+ static void vmapple_reset(void *opaque)
+ {
+     VMAppleMachineState *vms = opaque;
+     hwaddr base = vms->memmap[VMAPPLE_FIRMWARE].base;
+ 
+     cpu_set_pc(first_cpu, base);
+-    hvf_arm_exec_fault = vmapple_exec_fault;
+-    assert_hvf_ok(hv_vm_protect(vms->memmap[VMAPPLE_MEM].base,
+-                                MACHINE(vms)->ram_size,
+-                                HV_MEMORY_READ | HV_MEMORY_WRITE));
++}
++
++/*
++ * Apple's macOS licence allows at most two additional virtualised instances
++ * of macOS per Mac. On Linux hosts, claim one of max-instances host-wide
++ * slots before building the machine: slot N is the abstract Unix socket
++ * "@vmapple-macos-instance-N", bound for the life of the process. The kernel
++ * releases it when QEMU exits, however it exits, and a name can be bound only
++ * once per network namespace, whichever user runs QEMU. Taken slots show up
++ * in /proc/net/unix, which scripts can read to wait for a free one.
++ * max-instances=0 disables the check.
++ */
++static void vmapple_claim_instance_slot(VMAppleMachineState *vms)
++{
++#ifdef __linux__
++    uint32_t n;
++
++    vms->instance_fd = -1;
++    if (!vms->max_instances) {
++        return;
++    }
++    for (n = 0; n < vms->max_instances; n++) {
++        struct sockaddr_un sa = { .sun_family = AF_UNIX };
++        int len = snprintf(sa.sun_path + 1, sizeof(sa.sun_path) - 1,
++                           "vmapple-macos-instance-%u", n);
++        int fd = qemu_socket(AF_UNIX, SOCK_STREAM, 0);
++
++        if (fd < 0) {
++            error_report("vmapple: cannot create the instance-slot socket: %s",
++                         strerror(errno));
++            exit(1);
++        }
++        if (bind(fd, (struct sockaddr *)&sa,
++                 offsetof(struct sockaddr_un, sun_path) + 1 + len) == 0) {
++            vms->instance_fd = fd;
++            return;
++        }
++        close(fd);
++        if (errno != EADDRINUSE) {
++            error_report("vmapple: cannot bind the instance-slot socket: %s",
++                         strerror(errno));
++            exit(1);
++        }
++    }
++    error_report("vmapple: %u macOS guests are already running on this host "
++                 "(machine property max-instances; Apple's licence allows two "
++                 "per Mac)", vms->max_instances);
++    exit(1);
++#endif
+ }
+ 
+ static void mach_vmapple_init(MachineState *machine)
+@@ -624,6 +633,7 @@ static void mach_vmapple_init(MachineState *machine)
+     unsigned int smp_cpus = machine->smp.cpus;
+     unsigned int max_cpus = machine->smp.max_cpus;
+ 
++    vmapple_claim_instance_slot(vms);
+     vms->memmap = memmap;
+     machine->usb = true;
+ 
+@@ -657,16 +667,14 @@ static void mach_vmapple_init(MachineState *machine)
+                                 &error_fatal);
+ 
+         /*
+-         * macOS asks the hypervisor to program its pointer authentication
+-         * keys, through the paravirtualized calls SMCCC 0xC1000000 to
+-         * 0xC1000006. Hypervisor.framework answers them itself, without an
+-         * exit to QEMU, and programs no key: the guest runs on the keys
+-         * each CPU holds. The boot firmware sets them on the boot CPU
+-         * only, so start each CPU the guest powers on with the keys of
+-         * the CPU that powers it on, and all CPUs share them.
++         * PSCI 1.1, the version HVF and TCG implement. A recent KVM offers
++         * 1.2 or newer by default, and Ventura's PSCI driver will not attach
++         * to a version newer than 1.1. Fixed before the vCPU is created.
+          */
+-        object_property_set_bool(cpu, "cpu-on-copies-pauth-keys", true,
+-                                 &error_fatal);
++        if (kvm_enabled()) {
++            object_property_set_str(cpu, "kvm-psci-version", "1.1",
++                                    &error_fatal);
++        }
+ 
+         /* Secondary CPUs start in PSCI powered-down state */
+         if (n > 0) {
+@@ -690,6 +698,9 @@ static void mach_vmapple_init(MachineState *machine)
+     create_gfx(vms, sysmem);
+     create_uart(vms, VMAPPLE_UART, sysmem, serial_hd(0));
+     create_rtc(vms);
++    if (vms->avp_rtc) {
++        create_avp_rtc(vms);
++    }
+     create_pcie(vms);
+ 
+     create_gpio_devices(vms, VMAPPLE_GPIO, sysmem);
+@@ -750,14 +761,6 @@ static const CPUArchIdList *vmapple_possible_cpu_arch_ids(MachineState *ms)
+     return ms->possible_cpus;
+ }
+ 
+-static bool vmapple_get_vgic_bases(const MachineState *ms,
+-                                   uint64_t *dist_base, uint64_t *redist_base)
+-{
+-    *dist_base = memmap[VMAPPLE_GIC_DIST].base;
+-    *redist_base = memmap[VMAPPLE_GIC_REDIST].base;
+-    return true;
+-}
+-
+ static GlobalProperty vmapple_compat_defaults[] = {
+     { TYPE_VIRTIO_PCI, "disable-legacy", "on" },
+     /*
+@@ -766,6 +769,11 @@ static GlobalProperty vmapple_compat_defaults[] = {
+      * mapping in the XHCI controller works around the problem.
+      */
+     { TYPE_XHCI_PCI, "conditional-intr-mapping", "on" },
++    /*
++     * macOS' virtio driver can program a used ring address that overlaps
++     * the available ring; see virtio_queue_fixup_used().
++     */
++    { TYPE_VIRTIO_DEVICE, "x-fix-overlapping-used", "on" },
+     /*
+      * macOS 27's virtio PCI transport never starts a device whose
+      * capabilities are linked from high offsets to low.
+@@ -773,27 +781,6 @@ static GlobalProperty vmapple_compat_defaults[] = {
+     { "virtio-net-pci-base", "x-ascending-capabilities", "on" },
+ };
+ 
+-static char *vmapple_get_tablet(Object *obj, Error **errp)
+-{
+-    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+-
+-    return g_strdup(vms->tablet);
+-}
+-
+-static void vmapple_set_tablet(Object *obj, const char *value, Error **errp)
+-{
+-    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+-    ObjectClass *oc = object_class_by_name(value);
+-
+-    if (!oc || object_class_is_abstract(oc) ||
+-        !object_class_dynamic_cast(oc, TYPE_USB_DEVICE)) {
+-        error_setg(errp, "tablet: '%s' is not a USB device", value);
+-        return;
+-    }
+-    g_free(vms->tablet);
+-    vms->tablet = g_strdup(value);
+-}
+-
+ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+ {
+     MachineClass *mc = MACHINE_CLASS(oc);
+@@ -808,20 +795,31 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+     mc->cpu_index_to_instance_props = vmapple_cpu_index_to_props;
+     mc->default_cpu_type = ARM_CPU_TYPE_NAME("host");
+     mc->get_default_cpu_node_id = vmapple_get_default_cpu_node_id;
+-    mc->get_vgic_bases = vmapple_get_vgic_bases;
+     mc->default_ram_id = "mach-vmapple.ram";
+     mc->desc = "Apple aarch64 Virtual Machine";
+ 
+     compat_props_add(mc->compat_props, vmapple_compat_defaults,
+                      G_N_ELEMENTS(vmapple_compat_defaults));
++}
+ 
+-    object_class_property_add_str(oc, "tablet", vmapple_get_tablet,
+-                                  vmapple_set_tablet);
+-    object_class_property_set_description(oc, "tablet",
+-                                          "The USB pointing device: "
+-                                          "usb-vmapple-tablet (default), "
+-                                          "or another USB device such as "
+-                                          "usb-tablet");
++static int vmapple_get_gpu(Object *obj, Error **errp)
++{
++    return VMAPPLE_MACHINE(obj)->gpu;
++}
++
++static void vmapple_set_gpu(Object *obj, int value, Error **errp)
++{
++    VMAPPLE_MACHINE(obj)->gpu = value;
++}
++
++static bool vmapple_get_avp_rtc(Object *obj, Error **errp)
++{
++    return VMAPPLE_MACHINE(obj)->avp_rtc;
++}
++
++static void vmapple_set_avp_rtc(Object *obj, bool value, Error **errp)
++{
++    VMAPPLE_MACHINE(obj)->avp_rtc = value;
+ }
+ 
+ static void vmapple_instance_init(Object *obj)
+@@ -829,22 +827,41 @@ static void vmapple_instance_init(Object *obj)
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+ 
+     vms->irqmap = irqmap;
+-    /*
+-     * macOS drives Virtualization.framework's USB tablet with its own
+-     * driver, which takes smooth scrolling.
+-     */
+-    vms->tablet = g_strdup("usb-vmapple-tablet");
++    vms->gpu = VMAPPLE_GPU_APPLE_GFX;
++    vms->avp_rtc = true;
++    vms->max_instances = 2;
++    vms->instance_fd = -1;
+ 
+     object_property_add_uint64_ptr(obj, "uuid", &vms->uuid,
+                                    OBJ_PROP_FLAG_READWRITE);
+     object_property_set_description(obj, "uuid", "Machine UUID (SDOM)");
++    object_property_add_enum(obj, "gfx-device", "VMAppleGpu",
++                             &vmapple_gpu_lookup, vmapple_get_gpu,
++                             vmapple_set_gpu);
++    object_property_set_description(obj, "gfx-device",
++                                    "Paravirtual GPU device in the GPU slot "
++                                    "(apple-gfx-mmio | apv-gpu-proxy | none)");
++    object_property_add_bool(obj, "avp-rtc", vmapple_get_avp_rtc,
++                             vmapple_set_avp_rtc);
++    object_property_set_description(obj, "avp-rtc",
++                                    "Provide the avp,rtc clock macOS expects "
++                                    "(default on; off leaves only the PL031)");
++    object_property_add_uint32_ptr(obj, "max-instances", &vms->max_instances,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_set_description(obj, "max-instances",
++                                    "Refuse to start when this many vmapple "
++                                    "guests already run on the host (Linux; "
++                                    "default 2, the macOS licence limit; 0 "
++                                    "disables the check)");
+ }
+ 
+ static void vmapple_instance_finalize(Object *obj)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+ 
+-    g_free(vms->tablet);
++    if (vms->instance_fd >= 0) {
++        close(vms->instance_fd);
++    }
+ }
+ 
+ static const TypeInfo vmapple_machine_info = {
+@@ -854,6 +871,7 @@ static const TypeInfo vmapple_machine_info = {
+     .class_init    = vmapple_machine_class_init,
+     .instance_init = vmapple_instance_init,
+     .instance_finalize = vmapple_instance_finalize,
++    .is_available  = target_aarch64,
+ };
+ 
+ static void machvmapple_machine_init(void)
+@@ -861,4 +879,3 @@ static void machvmapple_machine_init(void)
+     type_register_static(&vmapple_machine_info);
+ }
+ type_init(machvmapple_machine_init);
+-
+diff --git a/include/hw/virtio/virtio.h b/include/hw/virtio/virtio.h
+index 27c5fe3a6b..6990f23246 100644
+--- a/include/hw/virtio/virtio.h
++++ b/include/hw/virtio/virtio.h
+@@ -190,6 +190,7 @@ struct VirtIODevice
+     bool started;
+     bool start_on_kick; /* when virtio 1.0 feature has not been negotiated */
+     bool disable_legacy_check;
++    bool fix_overlapping_used; /* see virtio_queue_fixup_used() */
+     bool vhost_started;
+     VMChangeStateEntry *vmstate;
+     char *bus_name;
+diff --git a/include/hw/vmapple/vmapple.h b/include/hw/vmapple/vmapple.h
+index 9c1ad1bd8c..52146b67ae 100644
+--- a/include/hw/vmapple/vmapple.h
++++ b/include/hw/vmapple/vmapple.h
+@@ -14,10 +14,14 @@
+ 
+ #define TYPE_APPLE_AES "apple-aes"
+ 
++#define TYPE_VMAPPLE_AVP_RTC "vmapple-avp-rtc"
++
+ #define TYPE_VMAPPLE_BDIF "vmapple-bdif"
+ 
+ #define TYPE_VMAPPLE_CFG "vmapple-cfg"
+ 
+ #define TYPE_VMAPPLE_VIRTIO_BLK_PCI "vmapple-virtio-blk-pci"
+ 
++bool vmapple_read_current_xreg(unsigned int index, uint64_t *value);
++
+ #endif /* HW_VMAPPLE_VMAPPLE_H */
+diff --git a/include/qemu/mmap-alloc.h b/include/qemu/mmap-alloc.h
+index 8344daaa03..bec22fb5b7 100644
+--- a/include/qemu/mmap-alloc.h
++++ b/include/qemu/mmap-alloc.h
+@@ -11,6 +11,15 @@ typedef enum {
+ size_t qemu_fd_getpagesize(int fd);
+ QemuFsType qemu_fd_getfs(int fd);
+ 
++/*
++ * qemu_ram_thp_align: alignment for guest RAM mappings backed by ordinary
++ * pages (anonymous memory, tmpfs/memfd), so that transparent huge pages and
++ * KVM stage-2 block mappings can cover them. That is the host's THP PMD size
++ * (2 MiB with 4 KiB pages, 32 MiB with 16 KiB pages, 512 MiB with 64 KiB
++ * pages), never less than QEMU_VMALLOC_ALIGN.
++ */
++size_t qemu_ram_thp_align(void);
++
+ /**
+  * qemu_ram_mmap: mmap anonymous memory, the specified file or device.
+  *
+diff --git a/system/physmem.c b/system/physmem.c
+index 806e026e0c..32d3adf0bb 100644
+--- a/system/physmem.c
++++ b/system/physmem.c
+@@ -1765,6 +1765,10 @@ static void *file_ram_alloc(RAMBlock *block,
+      * offset in a huge page; at the base page's alignment it never does.
+      */
+     block->mr->align = MAX(block->mr->align, QEMU_VMALLOC_ALIGN);
++    if (block->page_size == qemu_real_host_page_size()) {
++        /* 16 KiB-page hosts: the THP PMD size is 32 MiB (aquarat 03fe7581c7) */
++        block->mr->align = MAX(block->mr->align, qemu_ram_thp_align());
++    }
+ #endif
+ 
+     if (memory < block->page_size) {
+diff --git a/target/arm/kvm-vmapple.c b/target/arm/kvm-vmapple.c
+new file mode 100644
+index 0000000000..3c042761d2
+--- /dev/null
++++ b/target/arm/kvm-vmapple.c
+@@ -0,0 +1,230 @@
++/*
++ * VMApple guests under KVM: the platform's pointer-authentication hypercalls.
++ *
++ * Copyright (c) 2026 aquarat
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ *
++ * macOS on the vmapple platform manages its pointer-authentication keys
++ * through vendor hypercalls in the SMCCC range 0xc1000000..0xc10000ff,
++ * which Apple's hypervisor implements. Under KVM they are forwarded to
++ * userspace (an SMCCC filter set at VM creation) and served here by writing
++ * the guest's key registers. Two of those registers (APCTL_EL12 and the
++ * kernel key pair) are Apple implementation-defined and exist only on
++ * hosts whose kernel exposes them to KVM.
++ *
++ * Function numbers (the low byte of the call):
++ *   0  set the initial state: keys to their defaults, EL0 keys not shared
++ *   1  report the default A, B, EL0 and G keys in x1..x4
++ *   2  set the A keys from x1        3  set the B keys from x1
++ *   4  set the EL0 key from x1       5  set the EL0 key from x2 and whether
++ *                                       EL0 shares the EL1 keys from x1
++ *   6  set the G key from x1
++ * A key "from x" fills its register group with x, x+1, ... in order.
++ * The status goes back in x0: arm64 KVM does not read run->hypercall.ret.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/error-report.h"
++#include "qemu/log.h"
++#include "qom/object.h"
++#include "hw/core/boards.h"
++#include "system/kvm.h"
++#include "cpu.h"
++#include "kvm_arm.h"
++
++#define VMAPPLE_HVC_FIRST 0xc1000000u
++#define VMAPPLE_HVC_COUNT 0x100u
++
++#define CORE_REG(x) (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE | \
++                     KVM_REG_ARM_CORE_REG(x))
++
++/* The platform's default keys, all derived from one constant. */
++#define DEFAULT_KEY_BASE 0xfeedfacefeedfacfULL
++
++enum {
++    KEY_A,
++    KEY_B,
++    KEY_EL0,
++    KEY_G,
++    KEY_GROUPS
++};
++
++static const uint64_t default_key[KEY_GROUPS] = {
++    [KEY_A] = DEFAULT_KEY_BASE + 6,
++    [KEY_B] = DEFAULT_KEY_BASE,
++    [KEY_EL0] = DEFAULT_KEY_BASE + 4,
++    [KEY_G] = DEFAULT_KEY_BASE + 10,
++};
++
++/* Register groups, in fill order. */
++static const uint64_t key_regs_a[] = {
++    ARM64_SYS_REG(3, 0, 2, 1, 0),   /* APIAKeyLo_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 1, 1),   /* APIAKeyHi_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 2, 0),   /* APDAKeyLo_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 2, 1),   /* APDAKeyHi_EL1 */
++};
++static const uint64_t key_regs_b[] = {
++    ARM64_SYS_REG(3, 0, 2, 1, 2),   /* APIBKeyLo_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 1, 3),   /* APIBKeyHi_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 2, 2),   /* APDBKeyLo_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 2, 3),   /* APDBKeyHi_EL1 */
++};
++static const uint64_t key_regs_el0[] = {
++    ARM64_SYS_REG(3, 6, 15, 2, 3),  /* Apple kernel key lo, EL12 view */
++    ARM64_SYS_REG(3, 6, 15, 2, 4),  /* Apple kernel key hi, EL12 view */
++};
++static const uint64_t key_regs_g[] = {
++    ARM64_SYS_REG(3, 0, 2, 3, 0),   /* APGAKeyLo_EL1 */
++    ARM64_SYS_REG(3, 0, 2, 3, 1),   /* APGAKeyHi_EL1 */
++};
++
++static const struct {
++    const uint64_t *regs;
++    size_t n;
++} key_group[KEY_GROUPS] = {
++    [KEY_A] = { key_regs_a, ARRAY_SIZE(key_regs_a) },
++    [KEY_B] = { key_regs_b, ARRAY_SIZE(key_regs_b) },
++    [KEY_EL0] = { key_regs_el0, ARRAY_SIZE(key_regs_el0) },
++    [KEY_G] = { key_regs_g, ARRAY_SIZE(key_regs_g) },
++};
++
++/* Apple's pointer-authentication control register, EL12 view. */
++#define APCTL_EL12 ARM64_SYS_REG(3, 6, 15, 15, 0)
++#define APCTL_BASE 0x19
++#define APCTL_EL0_SHARES_EL1_KEYS 0x2
++
++static bool vmapple_hvc_enabled;
++
++static int set_key(CPUState *cs, int group, uint64_t key)
++{
++    size_t i;
++    int ret;
++
++    for (i = 0; i < key_group[group].n; i++) {
++        uint64_t v = key + i;
++
++        ret = kvm_set_one_reg(cs, key_group[group].regs[i], &v);
++        if (ret) {
++            return ret;
++        }
++    }
++    return 0;
++}
++
++static int set_apctl(CPUState *cs, bool el0_shares_el1_keys)
++{
++    uint64_t v = APCTL_BASE |
++                 (el0_shares_el1_keys ? APCTL_EL0_SHARES_EL1_KEYS : 0);
++
++    return kvm_set_one_reg(cs, APCTL_EL12, &v);
++}
++
++static int get_x(CPUState *cs, int n, uint64_t *v)
++{
++    return kvm_get_one_reg(cs, CORE_REG(regs.regs[n]), v);
++}
++
++static int set_x(CPUState *cs, int n, uint64_t v)
++{
++    return kvm_set_one_reg(cs, CORE_REG(regs.regs[n]), &v);
++}
++
++static int vmapple_pac_call(CPUState *cs, unsigned fn)
++{
++    uint64_t x1 = 0, x2 = 0;
++    int ret, g;
++
++    if (fn >= 2 && fn <= 6) {
++        ret = get_x(cs, 1, &x1);
++        if (!ret && fn == 5) {
++            ret = get_x(cs, 2, &x2);
++        }
++        if (ret) {
++            return ret;
++        }
++    }
++    switch (fn) {
++    case 0:
++        ret = set_apctl(cs, false);
++        if (!ret) {
++            ret = set_key(cs, KEY_B, default_key[KEY_B]);
++        }
++        if (!ret) {
++            ret = set_key(cs, KEY_EL0, default_key[KEY_EL0]);
++        }
++        if (!ret) {
++            ret = set_key(cs, KEY_A, default_key[KEY_A]);
++        }
++        if (!ret) {
++            ret = set_key(cs, KEY_G, default_key[KEY_G]);
++        }
++        return ret;
++    case 1:
++        for (g = 0, ret = 0; g < KEY_GROUPS && !ret; g++) {
++            ret = set_x(cs, 1 + g, default_key[g]);
++        }
++        return ret;
++    case 2:
++        return set_key(cs, KEY_A, x1);
++    case 3:
++        return set_key(cs, KEY_B, x1);
++    case 4:
++        return set_key(cs, KEY_EL0, x1);
++    case 5:
++        ret = set_key(cs, KEY_EL0, x2);
++        return ret ? ret : set_apctl(cs, x1 != 0);
++    case 6:
++        return set_key(cs, KEY_G, x1);
++    default:
++        qemu_log_mask(LOG_UNIMP, "vmapple: unhandled platform hypercall "
++                      "%#x\n", VMAPPLE_HVC_FIRST + fn);
++        return 0;
++    }
++}
++
++int kvm_arm_vmapple_init(MachineState *ms, KVMState *s)
++{
++    struct kvm_smccc_filter filter = {
++        .base = VMAPPLE_HVC_FIRST,
++        .nr_functions = VMAPPLE_HVC_COUNT,
++        .action = KVM_SMCCC_FILTER_FWD_TO_USER,
++    };
++    struct kvm_device_attr attr = {
++        .group = KVM_ARM_VM_SMCCC_CTRL,
++        .attr = KVM_ARM_VM_SMCCC_FILTER,
++        .addr = (uintptr_t)&filter,
++    };
++    int ret;
++
++    if (!g_str_has_prefix(object_get_typename(OBJECT(ms)), "vmapple") &&
++        !g_getenv("QEMU_VMAPPLE_KVM_HVC")) {
++        return 0;
++    }
++    ret = kvm_vm_ioctl(s, KVM_SET_DEVICE_ATTR, &attr);
++    if (ret < 0) {
++        error_report("vmapple: cannot forward the platform hypercalls to "
++                     "userspace: %s", strerror(-ret));
++        return ret;
++    }
++    vmapple_hvc_enabled = true;
++    return 0;
++}
++
++bool kvm_arm_vmapple_hypercall(CPUState *cs, struct kvm_run *run, int *ret)
++{
++    uint64_t nr = run->hypercall.nr;
++
++    if (!vmapple_hvc_enabled || nr < VMAPPLE_HVC_FIRST ||
++        nr >= VMAPPLE_HVC_FIRST + VMAPPLE_HVC_COUNT) {
++        return false;
++    }
++    *ret = vmapple_pac_call(cs, nr - VMAPPLE_HVC_FIRST);
++    if (!*ret) {
++        *ret = set_x(cs, 0, 0);
++    }
++    if (*ret) {
++        error_report("vmapple: platform hypercall %#" PRIx64 " failed: %s",
++                     nr, strerror(-*ret));
++    }
++    return true;
++}
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 3d905f8565..cb74171569 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -653,6 +653,11 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
+ 
+     cap_has_mp_state = kvm_check_extension(s, KVM_CAP_MP_STATE);
+ 
++    ret = kvm_arm_vmapple_init(ms, s);
++    if (ret < 0) {
++        return ret;
++    }
++
+     /* Check whether user space can specify guest syndrome value */
+     cap_has_inject_serror_esr =
+         kvm_check_extension(s, KVM_CAP_ARM_INJECT_SERROR_ESR);
+@@ -1594,6 +1599,13 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
+     int ret = 0;
+ 
+     switch (run->exit_reason) {
++    case KVM_EXIT_HYPERCALL:
++        if (kvm_arm_vmapple_hypercall(cs, run, &ret)) {
++            break;
++        }
++        qemu_log_mask(LOG_UNIMP, "%s: unhandled hypercall %#" PRIx64 "\n",
++                      __func__, (uint64_t)run->hypercall.nr);
++        break;
+     case KVM_EXIT_DEBUG:
+         if (kvm_arm_handle_debug(cpu, &run->debug.arch)) {
+             ret = EXCP_DEBUG;
+diff --git a/target/arm/kvm_arm.h b/target/arm/kvm_arm.h
+index e7c40fb003..083a5ef748 100644
+--- a/target/arm/kvm_arm.h
++++ b/target/arm/kvm_arm.h
+@@ -212,6 +212,14 @@ int kvm_arm_get_max_vm_ipa_size(MachineState *ms, bool *fixed_ipa);
+ int kvm_arm_vgic_probe(void);
+ 
+ void kvm_arm_pmu_init(ARMCPU *cpu);
++
++/*
++ * vmapple guests: forward the platform's pointer-authentication hypercalls
++ * to userspace (at VM creation, for a vmapple machine) and serve them.
++ * kvm_arm_vmapple_hypercall returns true when it handled the exit.
++ */
++int kvm_arm_vmapple_init(MachineState *ms, KVMState *s);
++bool kvm_arm_vmapple_hypercall(CPUState *cs, struct kvm_run *run, int *ret);
+ void kvm_arm_pmu_set_irq(ARMCPU *cpu, int irq);
+ 
+ /**
+diff --git a/target/arm/meson.build b/target/arm/meson.build
+index 0369f96b4c..d52e8e3c82 100644
+--- a/target/arm/meson.build
++++ b/target/arm/meson.build
+@@ -31,7 +31,7 @@ arm_common_user_system_ss.add(when: 'TARGET_AARCH64', if_true: files(
+ arm_common_system_ss.add(files(
+   'arm-qmp-cmds.c',
+ ))
+-arm_system_ss.add(when: 'CONFIG_KVM', if_true: files('hyp_gdbstub.c', 'kvm.c'))
++arm_system_ss.add(when: 'CONFIG_KVM', if_true: files('hyp_gdbstub.c', 'kvm.c', 'kvm-vmapple.c'))
+ arm_system_ss.add(when: 'CONFIG_HVF', if_true: files('hyp_gdbstub.c'))
+ 
+ arm_user_ss.add(files('cpu.c'))
+diff --git a/util/mmap-alloc.c b/util/mmap-alloc.c
+index ed14f9c64d..09500c4b00 100644
+--- a/util/mmap-alloc.c
++++ b/util/mmap-alloc.c
+@@ -21,6 +21,7 @@
+ #include "qemu/mmap-alloc.h"
+ #include "qemu/host-utils.h"
+ #include "qemu/cutils.h"
++#include "qemu/units.h"
+ #include "qemu/error-report.h"
+ 
+ #define HUGETLBFS_MAGIC       0x958458f6
+@@ -81,6 +82,31 @@ size_t qemu_fd_getpagesize(int fd)
+     return qemu_real_host_page_size();
+ }
+ 
++#define HPAGE_PMD_SIZE_PATH "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size"
++size_t qemu_ram_thp_align(void)
++{
++    static size_t align;
++
++    if (!align) {
++        size_t pmd = 0;
++#if defined(__linux__)
++        gchar *content = NULL;
++        const char *endptr;
++        uint64_t tmp;
++
++        if (g_file_get_contents(HPAGE_PMD_SIZE_PATH, &content, NULL, NULL) &&
++            !qemu_strtou64(content, &endptr, 0, &tmp) &&
++            (!endptr || *endptr == '\n') && is_power_of_2(tmp) &&
++            tmp <= 1 * GiB) {
++            pmd = tmp;
++        }
++        g_free(content);
++#endif
++        align = MAX(pmd, QEMU_VMALLOC_ALIGN);
++    }
++    return align;
++}
++
+ #define OVERCOMMIT_MEMORY_PATH "/proc/sys/vm/overcommit_memory"
+ static bool map_noreserve_effective(int fd, uint32_t qemu_map_flags)
+ {
+diff --git a/util/oslib-posix.c b/util/oslib-posix.c
+index dc001da66d..06f92387ce 100644
+--- a/util/oslib-posix.c
++++ b/util/oslib-posix.c
+@@ -210,8 +210,8 @@ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment, bool shared,
+ {
+     const uint32_t qemu_map_flags = (shared ? QEMU_MAP_SHARED : 0) |
+                                     (noreserve ? QEMU_MAP_NORESERVE : 0);
+-    size_t align = QEMU_VMALLOC_ALIGN;
+ #ifndef EMSCRIPTEN
++    size_t align = qemu_ram_thp_align();
+     void *ptr = qemu_ram_mmap(-1, size, align, qemu_map_flags, 0);
+ 
+     if (ptr == MAP_FAILED) {
+@@ -224,6 +224,7 @@ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment, bool shared,
+      * space on Emscripten, and shared is ignored as there is no other
+      * processes on Emscripten.
+      */
++    size_t align = QEMU_VMALLOC_ALIGN;
+     void *ptr = qemu_memalign(align, size);
+ #endif
+ 
+-- 
+2.56.0
+
