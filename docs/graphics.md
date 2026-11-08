@@ -67,7 +67,7 @@ Tested on 26.4 over VNC. The VM started at 1728x1117 and was then resized to 128
 
 ## Known limits
 
-- The first login takes about 2 minutes while shaders compile, because the pipeline cache starts empty.
+- The very first login (cold pipeline cache, e.g. after a new Mesa or library build) takes about 2 minutes while shaders compile. Later boots use the cache: the desktop is complete about 30 s after login.
 - App launches can stall for about 2 seconds.
 - 10-bit extended-range (XR10) formats are off. They may work now that interlock exists, but that's untested.
 - Sizes wider than about 5000 pixels may run HiDPI, because the guest's scale for them wasn't measured.
