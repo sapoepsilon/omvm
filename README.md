@@ -32,8 +32,14 @@ Xcode 27.2
 - At most **two** macOS guests can run at once. That's Apple's licence limit,
   and the QEMU fork enforces it.
 
-**Not yet:** a usable desktop. Guests have no display without the GPU path,
-which is still experimental. Audio isn't supported either.
+- `omvm gui NAME` boots a guest with the paravirtual GPU, which translates Metal
+  to Vulkan on the host's M1/M2 GPU, and serves its screen over **VNC**
+  (`vncviewer 127.0.0.1:59xx`). You can log in and use the desktop. Some
+  textures, such as the wallpaper, don't render yet. Software rendering
+  (llvmpipe) does not work. Bake `share/70-desktop.sh` into the image first,
+  which turns off display sleep, Setup Assistant and crash dialogs.
+
+**Not yet:** audio.
 
 ## Requirements
 

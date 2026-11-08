@@ -12,6 +12,7 @@
 #   omvm setup [--xcode]        create account/SSH, headless layer, Xcode
 #   omvm run [IMAGE] -- CMD     run CMD in a throwaway guest (SSH)
 #   omvm start NAME [IMAGE] | ssh NAME | stop NAME | list | images
+#   omvm gui NAME [IMAGE]       desktop over VNC (paravirtual GPU on the host GPU)
 set -euo pipefail
 
 VERSION=0.1.0
@@ -258,6 +259,35 @@ cmd_stop() {
     rm -rf "$run"; ok "stopped $n"
 }
 
+cmd_gui() {
+    # Paravirtual GPU (Reims, out of process) on the host GPU + QEMU VNC.
+    upstream
+    local name="${1:?usage: omvm gui NAME [IMAGE]}" img; img="$(resolve_image "${2:-}")"
+    local oop="$UPSTREAM/build/qemu-oop"
+    if ! test -x "$oop/qemu/build/qemu-system-aarch64" || ! test -x "$oop/reims/target/release/reims-vgpu-backend"; then
+        say "building the GPU-path QEMU + Reims backend (once, ~15 min)"
+        (cd "$UPSTREAM" && MODE=oop scripts/build-qemu.sh) >/dev/null
+    fi
+    local icd="${VK_DRIVER_FILES:-}"
+    if [ -z "$icd" ]; then
+        icd="$HOME/opt/mesa-honeykrisp/share/vulkan/icd.d/asahi_icd.aarch64.json"   # patched Mesa (best)
+        [ -f "$icd" ] || icd=/usr/share/vulkan/icd.d/asahi_icd.aarch64.json       # Omarchy's Mesa
+    fi
+    local disp="${VNC_DISPLAY:-}"
+    if [ -z "$disp" ]; then for disp in $(seq 10 40); do ss -ltn | grep -q ":$((5900+disp)) " || break; done; fi
+    local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
+    export GFX=reims; guest_env
+    (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" \
+        VK_DRIVER_FILES="$icd" QEMU_BIN="$oop/qemu/build/qemu-system-aarch64" \
+        GPU_BACKEND_BIN="$oop/reims/target/release/reims-vgpu-backend" \
+        QEMU_EXTRA_ARGS="-L $oop/qemu/build/qemu-bundle/usr/local/share/qemu -vnc 127.0.0.1:$disp" \
+        scripts/vm-run.sh start "$name")
+    echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
+    echo "$disp" > "$UPSTREAM/artifacts/runs/$name/vnc_display"
+    ok "$name: VNC on 127.0.0.1:$((5900+disp)) (login window in ~40 s), SSH: omvm ssh $name"
+    echo "    viewer:  vncviewer 127.0.0.1:$((5900+disp))   (stop: omvm stop $name)"
+}
+
 cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
 cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
 
@@ -270,6 +300,7 @@ ingest) shift; cmd_ingest "$@" ;;
 setup) shift; cmd_setup "$@" ;;
 run) shift; cmd_run "$@" ;;
 start) shift; cmd_start "$@" ;;
+gui) shift; cmd_gui "$@" ;;
 ssh) shift; cmd_ssh "$@" ;;
 stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;
