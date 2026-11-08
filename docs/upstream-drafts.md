@@ -132,3 +132,10 @@ omarchy-mac-pkgs. A kernel PR waits until the patch licence is resolved.
 > Could the PAC VM-key KVM patch get a licence (GPL-2.0, like the kernel)?
 > It's the only piece that stops distributions such as Omarchy M from
 > packaging macOS-guest support. It's currently all rights reserved.
+
+## Posted (2026-11-08)
+- Omarchy Discussion: https://github.com/omacom/omarchy/discussions/18195
+- omarchy-mac-pkgs proposal: https://github.com/omacom/omarchy-mac-pkgs/issues/107
+- steelbrain/reims-vgpu#150, steelbrain/metal2vulkan#12, aquarat/apple-macos-arm64-vm-guest#1
+- PAC licence request, +1 comment: steelbrain/experiment-macOS-arm64-on-asahi-linux-arm64#1
+- Not posted: the Mesa MR (needs a gitlab.freedesktop.org account; run the CTS first).
