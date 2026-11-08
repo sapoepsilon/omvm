@@ -1,0 +1,373 @@
+From e30ada01597690038f7d524f06be345ce784663e Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Sun, 8 Nov 2026 13:15:31 -0700
+Subject: [PATCH] hw/display/apple-gfx: headless displays follow the UI's size;
+ resolution headless
+
+A headless apple-gfx display (no library window: REIMS_VGPU_WINDOW=0 or a
+QEMU UI) now implements GraphicHwOps.ui_info, so VNC's SetDesktopSize
+(TigerVNC's remote resize) and GTK/SDL window resizes reach the guest: the
+requested size (even, clamped to 640x480..7680x4320), after 500 ms without
+another request, becomes the display's only mode, set from a pool thread
+(rvg_display_set_modes may call back into mode_change, which takes the BQL).
+
+Offered alone because macOS 26.4, given a list, runs the mode closest to the
+display's told proportions rather than the first (2560x1440 first on a
+1728x1117-sized display ran 2304x1440).
+
+The resolution property now applies headless too: that mode first; with
+follow-ui-size (new, default on) alone, on a display as wide as 3840x2160
+(or the mode, if larger) at 110 ppi so that every size a UI asks for up to
+~5000 px runs at 1x (at 1728x1117's 400 mm, 2560x1440 ran HiDPI); with
+@<ppi>, at that density. With follow-ui-size off, the standard modes inside
+it follow it on a display as wide as the mode at 110 ppi. Without
+resolution, a following display starts at 1920x1080 (was the 3 default
+modes on a 400x300 mm display, where the guest ran 1440x1080).
+
+Tested on a macOS 26.4 guest under KVM: launch at 1728x1117, then
+SetDesktopSize to 1280x800, 3008x1692, 1728x1117, 2560x1600, 1920x1200,
+2560x1440, 1440x900, 2304x1296: each runs 1x at the asked size. Growing
+the mode is sometimes ignored by macOS (it keeps a mode still derivable
+from the new one, or its saved one); omvm's guest agent covers that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/display/apple-gfx-mmio.c |  10 +-
+ hw/display/apple-gfx-pci.c  |  10 +-
+ hw/display/apple-gfx.c      | 194 +++++++++++++++++++++++++++++++++++-
+ hw/display/apple-gfx.h      |  17 ++++
+ hw/display/trace-events     |   1 +
+ 5 files changed, 226 insertions(+), 6 deletions(-)
+
+diff --git a/hw/display/apple-gfx-mmio.c b/hw/display/apple-gfx-mmio.c
+index 240569ec1b..c0ede1c4a4 100644
+--- a/hw/display/apple-gfx-mmio.c
++++ b/hw/display/apple-gfx-mmio.c
+@@ -194,12 +194,20 @@ static const Property apple_gfx_mmio_properties[] = {
+     /* The guest's display ports, 1 to RVG_MAX_DISPLAY_PORTS. */
+     DEFINE_PROP_UINT32("displays", AppleGFXMMIOState, common.num_displays, 1),
+     /*
+-     * In window mode, the mode the guest runs first, scaled by the window:
++     * The mode the guest runs first; in window mode scaled by the window,
++     * headless offered alone (follow-ui-size) or with the standard modes
++     * inside it:
+      * "<width>x<height>" (default 1920x1080), at 1x or followed by "@<ppi>",
+      * the density the guest is told for it, or "host" for the host screen's
+      * own modes at its density.
+      */
+     DEFINE_PROP_STRING("resolution", AppleGFXMMIOState, common.resolution),
++    /*
++     * Headless (no window), without display-modes: a UI's size requests
++     * (VNC's SetDesktopSize, a GTK window's size) become the guest's mode.
++     */
++    DEFINE_PROP_BOOL("follow-ui-size",
++                     AppleGFXMMIOState, common.follow_ui_size, true),
+ };
+ 
+ static void apple_gfx_mmio_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/display/apple-gfx-pci.c b/hw/display/apple-gfx-pci.c
+index 34228552f3..2a11cda519 100644
+--- a/hw/display/apple-gfx-pci.c
++++ b/hw/display/apple-gfx-pci.c
+@@ -211,12 +211,20 @@ static const Property apple_gfx_pci_properties[] = {
+     /* The guest's display ports, 1 to RVG_MAX_DISPLAY_PORTS. */
+     DEFINE_PROP_UINT32("displays", AppleGFXPCIState, common.num_displays, 1),
+     /*
+-     * In window mode, the mode the guest runs first, scaled by the window:
++     * The mode the guest runs first; in window mode scaled by the window,
++     * headless offered alone (follow-ui-size) or with the standard modes
++     * inside it:
+      * "<width>x<height>" (default 1920x1080), at 1x or followed by "@<ppi>",
+      * the density the guest is told for it, or "host" for the host screen's
+      * own modes at its density.
+      */
+     DEFINE_PROP_STRING("resolution", AppleGFXPCIState, common.resolution),
++    /*
++     * Headless (no window), without display-modes: a UI's size requests
++     * (VNC's SetDesktopSize, a GTK window's size) become the guest's mode.
++     */
++    DEFINE_PROP_BOOL("follow-ui-size",
++                     AppleGFXPCIState, common.follow_ui_size, true),
+     /* BAR 2, the EFI framebuffer's window for guests without a driver */
+     DEFINE_PROP_BOOL("efi-framebuffer-bar", AppleGFXPCIState, efi_fb_bar, true),
+ };
+diff --git a/hw/display/apple-gfx.c b/hw/display/apple-gfx.c
+index d84140e2cc..e5ba3ab829 100644
+--- a/hw/display/apple-gfx.c
++++ b/hw/display/apple-gfx.c
+@@ -228,10 +228,19 @@ static bool apple_gfx_fb_update_display(void *opaque)
+     return !apple_gfx_render_new_frame(d);
+ }
+ 
++static void apple_gfx_ui_info(void *opaque, uint32_t head,
++                              QemuUIInfo *info);
++
+ static const GraphicHwOps apple_gfx_fb_ops = {
+     .gfx_update = apple_gfx_fb_update_display,
+ };
+ 
++/* Headless displays that follow a UI's size also take its size requests. */
++static const GraphicHwOps apple_gfx_fb_resizable_ops = {
++    .gfx_update = apple_gfx_fb_update_display,
++    .ui_info = apple_gfx_ui_info,
++};
++
+ /* ------ Mouse cursor and display mode setting ------ */
+ 
+ static void set_mode(AppleGFXDisplay *d, uint32_t width, uint32_t height)
+@@ -937,6 +946,139 @@ static RvgDisplayMode *apple_gfx_new_display_modes(
+     return modes;
+ }
+ 
++/*
++ * Common sizes a headless display offers below its first mode, so that the
++ * guest's Displays settings list some; only those that fit inside the first
++ * are offered, in this order.
++ */
++static const AppleGFXDisplayMode apple_gfx_standard_modes[] = {
++    { 3840, 2160, 60 }, { 3456, 2160, 60 }, { 3024, 1964, 60 },
++    { 2880, 1800, 60 }, { 2560, 1600, 60 }, { 2560, 1440, 60 },
++    { 2304, 1440, 60 }, { 2048, 1152, 60 }, { 1920, 1200, 60 },
++    { 1920, 1080, 60 }, { 1728, 1117, 60 }, { 1680, 1050, 60 },
++    { 1600, 900, 60 }, { 1512, 982, 60 }, { 1440, 900, 60 },
++    { 1280, 800, 60 }, { 1280, 720, 60 }, { 1024, 768, 60 },
++};
++
++/* The sizes a UI may ask a headless display for. */
++#define APPLE_GFX_UI_MIN_WIDTH   640
++#define APPLE_GFX_UI_MIN_HEIGHT  480
++#define APPLE_GFX_UI_MAX_WIDTH   7680
++#define APPLE_GFX_UI_MAX_HEIGHT  4320
++/* A UI's requests that come closer together than this make one change. */
++#define APPLE_GFX_UI_SETTLE_MS   500
++
++/*
++ * The modes a headless display offers for a first mode of @width x @height:
++ * that mode, then, unless @single, each standard mode that fits inside it.
++ * *@count gets their number. macOS does not always run the first mode of a
++ * list: measured on 26.4, offered 2560x1440 first with the standard modes on
++ * a display told 1728x1117's size, it ran 2304x1440, the mode closest to the
++ * display's proportions. Offered alone, a mode is the one it runs.
++ */
++static RvgDisplayMode *apple_gfx_new_modes_for(uint16_t width, uint16_t height,
++                                               bool single, size_t *count)
++{
++    RvgDisplayMode *modes = g_new0(RvgDisplayMode,
++                                   ARRAY_SIZE(apple_gfx_standard_modes) + 1);
++    size_t n = 0;
++
++    modes[n++] = (RvgDisplayMode) {
++        .width = width, .height = height, .refresh_rate_hz = 60,
++    };
++    for (size_t i = 0; i < ARRAY_SIZE(apple_gfx_standard_modes); i++) {
++        const AppleGFXDisplayMode *m = &apple_gfx_standard_modes[i];
++
++        if (single || m->width_px > width || m->height_px > height ||
++            (m->width_px == width && m->height_px == height)) {
++            continue;
++        }
++        modes[n++] = (RvgDisplayMode) {
++            .width = m->width_px, .height = m->height_px,
++            .refresh_rate_hz = m->refresh_rate_hz,
++        };
++    }
++    for (size_t i = 0; i < n; i++) {
++        trace_apple_gfx_display_mode(i, modes[i].width, modes[i].height);
++    }
++    *count = n;
++    return modes;
++}
++
++typedef struct AppleGFXModesJob {
++    RvgDisplay *pgdisp;
++    RvgDisplayMode *modes;
++    size_t count;
++} AppleGFXModesJob;
++
++static void apple_gfx_modes_job_free(void *opaque)
++{
++    AppleGFXModesJob *job = opaque;
++
++    g_free(job->modes);
++    g_free(job);
++}
++
++/*
++ * On a pool thread, without the BQL: the change may call back, and the
++ * mode_change callback takes the BQL.
++ */
++static int apple_gfx_do_set_modes(void *opaque)
++{
++    AppleGFXModesJob *job = opaque;
++
++    rvg_display_set_modes(job->pgdisp, job->modes, job->count);
++    return 0;
++}
++
++/* Offers the guest the UI's last requested size as its first mode. */
++static void apple_gfx_resize_timer_cb(void *opaque)
++{
++    AppleGFXDisplay *d = opaque;
++    AppleGFXModesJob *job;
++
++    assert(bql_locked());
++    if (d->ui_width == 0 || (d->ui_width == d->offered_width &&
++                             d->ui_height == d->offered_height)) {
++        return;
++    }
++    trace_apple_gfx_ui_resize(d->ui_width, d->ui_height);
++    d->offered_width = d->ui_width;
++    d->offered_height = d->ui_height;
++    job = g_new0(AppleGFXModesJob, 1);
++    job->pgdisp = d->pgdisp;
++    job->modes = apple_gfx_new_modes_for(d->ui_width, d->ui_height, true,
++                                         &job->count);
++    thread_pool_submit(d->state->pool, apple_gfx_do_set_modes, job,
++                       apple_gfx_modes_job_free);
++}
++
++/*
++ * A UI asks for the display's size (VNC's SetDesktopSize, a GTK or SDL
++ * window resized): rounded down to even pixels and clamped, it becomes the
++ * display's only mode once the requests settle. macOS 26.4 switches to it
++ * when the mode it runs is no longer offered; offered a larger one, it
++ * mostly switches too, but at times keeps its mode (still one of the scaled
++ * modes it derives from the new one) or goes back to the mode saved for the
++ * display, so a guest agent sets the new mode where that matters.
++ */
++static void apple_gfx_ui_info(void *opaque, uint32_t head, QemuUIInfo *info)
++{
++    AppleGFXDisplay *d = opaque;
++    uint32_t width = info->width & ~1u;
++    uint32_t height = info->height & ~1u;
++
++    if (width == 0 || height == 0) {
++        return;
++    }
++    d->ui_width = MIN(MAX(width, APPLE_GFX_UI_MIN_WIDTH),
++                      APPLE_GFX_UI_MAX_WIDTH);
++    d->ui_height = MIN(MAX(height, APPLE_GFX_UI_MIN_HEIGHT),
++                       APPLE_GFX_UI_MAX_HEIGHT);
++    timer_mod(d->resize_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
++                               APPLE_GFX_UI_SETTLE_MS);
++}
++
+ /*
+  * Window mode: under -display none, QEMU shows no display of its own, and the
+  * library opens a window for each, unless REIMS_VGPU_WINDOW is "0".
+@@ -1189,7 +1331,40 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
+         display_modes = s->display_modes;
+         num_display_modes = s->num_display_modes;
+     }
+-    if (!s->window || modes_property) {
++    if (!s->window && !modes_property &&
++        (s->resolution || s->follow_ui_size) &&
++        window_config.mode_width != 0) {
++        /*
++         * Headless with a resolution, or following a UI's size (1920x1080
++         * first without one): the display is as wide as the mode at
++         * the density named. Without one, a display that follows a UI's size
++         * offers the mode alone (apple_gfx_new_modes_for says why), on a
++         * display as wide as 3840x2160, or the mode if larger, at 110 ppi:
++         * the guest runs every size a UI asks for at 1x, below the 146.67
++         * ppi at which it turns HiDPI ("A chosen density's boundary"), up
++         * to some 5000 pixels across. Otherwise the standard modes inside it
++         * follow the mode, on a display as wide as it at 110 ppi (1x).
++         */
++        double ppi = window_config.mode_pixels_per_inch;
++        bool follow = s->follow_ui_size;
++        uint16_t mm_width = window_config.mode_width;
++        uint16_t mm_height = window_config.mode_height;
++        size_t count;
++
++        if (ppi == 0 && follow) {
++            mm_width = MAX(mm_width, 3840);
++            mm_height = MAX(mm_height, 2160);
++        }
++        if (ppi == 0) {
++            ppi = 110.;
++        }
++        display_config.width_millimeters = mm_width * 25.46 / ppi;
++        display_config.height_millimeters = mm_height * 25.46 / ppi;
++        modes = apple_gfx_new_modes_for(window_config.mode_width,
++                                        window_config.mode_height, follow,
++                                        &count);
++        num_display_modes = count;
++    } else if (!s->window || modes_property) {
+         modes = apple_gfx_new_display_modes(display_modes, num_display_modes);
+     }
+ 
+@@ -1220,9 +1395,20 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
+     }
+ 
+     for (i = 0; i < s->num_displays; i++) {
+-        s->displays[i].con = qemu_graphic_console_create(dev, i,
+-                                                         &apple_gfx_fb_ops,
+-                                                         &s->displays[i]);
++        AppleGFXDisplay *d = &s->displays[i];
++        bool resizable = !s->window && !modes_property && s->follow_ui_size;
++
++        if (resizable) {
++            d->resize_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
++                                           apple_gfx_resize_timer_cb, d);
++            d->offered_width = modes ? modes[0].width : 0;
++            d->offered_height = modes ? modes[0].height : 0;
++        }
++        d->con = qemu_graphic_console_create(dev, i,
++                                             resizable ?
++                                             &apple_gfx_fb_resizable_ops :
++                                             &apple_gfx_fb_ops,
++                                             d);
+     }
+ 
+     /* App Nap would slow the VM while no window of QEMU's is seen. */
+diff --git a/hw/display/apple-gfx.h b/hw/display/apple-gfx.h
+index 928638a1bc..acca2e2c4c 100644
+--- a/hw/display/apple-gfx.h
++++ b/hw/display/apple-gfx.h
+@@ -48,6 +48,18 @@ typedef struct AppleGFXDisplay {
+     /* Until then, on QEMU_CLOCK_REALTIME, a listener shows the surface */
+     int64_t watched_until_ms;
+     bool cursor_show;
++
++    /*
++     * Headless (no window): the size a UI asked the display to be (VNC's
++     * SetDesktopSize, a GTK window's size), offered to the guest as its
++     * first mode once resize_timer fires, so that a burst of requests while
++     * a window is dragged makes one change. 0x0: none yet.
++     */
++    QEMUTimer *resize_timer;
++    uint16_t ui_width;
++    uint16_t ui_height;
++    uint16_t offered_width; /* The first mode last offered */
++    uint16_t offered_height;
+ } AppleGFXDisplay;
+ 
+ /* Callbacks' work for the BQL, in the order the callbacks came. */
+@@ -74,6 +86,11 @@ struct AppleGFXState {
+      * or "host" for the host screen's own modes; NULL is 1920x1080.
+      */
+     char *resolution;
++    /*
++     * Headless, without display-modes: offer the guest the size a UI asks
++     * for (follow-ui-size, on by default).
++     */
++    bool follow_ui_size;
+     /*
+      * Each display has a window of the library's, which draws its frames
+      * and sends its input (-display none, unless REIMS_VGPU_WINDOW=0).
+diff --git a/hw/display/trace-events b/hw/display/trace-events
+index 2d7f70938f..3e577e438f 100644
+--- a/hw/display/trace-events
++++ b/hw/display/trace-events
+@@ -210,6 +210,7 @@ apple_gfx_cursor_move(void) ""
+ apple_gfx_common_init(const char *device_name, size_t mmio_size) "device: %s; MMIO size: %zu bytes"
+ apple_gfx_common_realize_modes_property(uint32_t num_modes) "using %u modes supplied by 'display-modes' device property"
+ apple_gfx_display_mode(uint32_t mode_idx, uint16_t width_px, uint16_t height_px) "mode %2"PRIu32": %4"PRIu16"x%4"PRIu16
++apple_gfx_ui_resize(uint16_t width, uint16_t height) "a UI asked for %"PRIu16"x%"PRIu16": offered first"
+ apple_gfx_memory_range(uint64_t gpa, uint64_t len, void *host, int fd, uint64_t offset) "gpa=0x%"PRIx64" len=0x%"PRIx64" host=%p fd=%d offset=0x%"PRIx64
+ 
+ # apple-gfx-mmio.c
+-- 
+2.56.0
+

@@ -12,7 +12,10 @@
 #   omvm setup [--xcode]        create account/SSH, headless layer, Xcode
 #   omvm run [IMAGE] -- CMD     run CMD in a throwaway guest (SSH)
 #   omvm start NAME [IMAGE] | ssh NAME | stop NAME | list | images
-#   omvm gui NAME [IMAGE]       desktop over VNC (paravirtual GPU on the host GPU)
+#   omvm gui NAME [IMAGE]       desktop over VNC (paravirtual GPU on the host GPU);
+#                               RESOLUTION=WxH[@PPI] picks the first mode
+#   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt)
+#   omvm clip NAME [off]        share the text clipboard with the host (on with gui)
 set -euo pipefail
 
 VERSION=0.1.0
@@ -237,7 +240,7 @@ cmd_run() {
     (cd "$UPSTREAM" && GOLDEN="$img" CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-job.sh "$*")
 }
 
-port_of() { cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/null || die "no running VM '$1'"; }
+port_of() { cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/null || cat "$IMAGES/vms/$1/ssh_port" 2>/dev/null || die "no VM '$1'"; }
 
 cmd_start() {
     upstream; guest_env
@@ -253,6 +256,7 @@ cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; shift; exec ssh "${ssh_opts[@
 
 cmd_stop() {
     local n="${1:?usage: omvm stop NAME}" run="$UPSTREAM/artifacts/runs/$1"
+    clip_stop "$n"
     ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
     (cd "$UPSTREAM" && scripts/vm-run.sh quit "$n") >/dev/null 2>&1 || true
@@ -283,12 +287,13 @@ cmd_gui() {
     if [ "${OMVM_GFX_STACK:-sb}" = sb ] && [ -x "$sb/qemu-system-aarch64" ] && [ -f "$sbicd" ]; then
         (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" \
             REIMS_VGPU_WINDOW=0 VK_DRIVER_FILES="${VK_DRIVER_FILES:-$sbicd}" QEMU_BIN="$sb/qemu-system-aarch64" \
-            QEMU_EXTRA_ARGS="-L $sb/qemu-bundle/usr/local/share/qemu -machine aux-ram-share=on -vnc 127.0.0.1:$disp" \
+            QEMU_EXTRA_ARGS="-L $sb/qemu-bundle/usr/local/share/qemu -machine aux-ram-share=on -vnc 127.0.0.1:$disp${RESOLUTION:+ -global apple-gfx-mmio.resolution=$RESOLUTION}" \
             scripts/vm-run.sh start "$name")
         echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
         echo "$disp" > "$UPSTREAM/artifacts/runs/$name/vnc_display"
-        ok "$name: VNC on 127.0.0.1:$((5900+disp)) (login window in ~40 s), SSH: omvm ssh $name"
-        echo "    viewer:  vncviewer 127.0.0.1:$((5900+disp))   (stop: omvm stop $name)"
+        ok "$name: VNC on 127.0.0.1:$((5900+disp)) at ${RESOLUTION:-1920x1080} (login window in ~40 s), SSH: omvm ssh $name"
+        echo "    viewer:  vncviewer 127.0.0.1:$((5900+disp))   (the desktop follows its window; stop: omvm stop $name)"
+        follow_start "$name"
         return
     fi
     (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" \
@@ -300,6 +305,106 @@ cmd_gui() {
     echo "$disp" > "$UPSTREAM/artifacts/runs/$name/vnc_display"
     ok "$name: VNC on 127.0.0.1:$((5900+disp)) (login window in ~40 s), SSH: omvm ssh $name"
     echo "    viewer:  vncviewer 127.0.0.1:$((5900+disp))   (stop: omvm stop $name)"
+}
+
+# The guest's LaunchAgent that keeps the desktop at the size the VNC viewer asks for
+# (share/omvm-display-follow.*): installed over SSH once the guest is up, in the background.
+# A VM's state directory: a throwaway run, or a persistent (virt) VM.
+run_dir() {
+    local d="$UPSTREAM/artifacts/runs/$1"
+    [ -d "$d" ] || d="$IMAGES/vms/$1"
+    mkdir -p "$d/logs"; echo "$d"
+}
+
+follow_start() {
+    [ "${OMVM_DISPLAY_FOLLOW:-1}" = 1 ] || return 0
+    local n="$1" run port; run="$(run_dir "$1")"; port="$(port_of "$1")"
+    setsid nohup bash -c '
+        ssh=(ssh "${@:3}" -p "$1" aquarat@127.0.0.1)
+        for _ in $(seq 120); do "${ssh[@]}" true 2>/dev/null && break; sleep 5; done
+        "${ssh[@]}" "mkdir -p ~/Library/omvm && cat > ~/Library/omvm/omvm-display-follow.swift.new &&
+            { cmp -s ~/Library/omvm/omvm-display-follow.swift.new ~/Library/omvm/omvm-display-follow.swift &&
+              rm ~/Library/omvm/omvm-display-follow.swift.new ||
+              mv ~/Library/omvm/omvm-display-follow.swift.new ~/Library/omvm/omvm-display-follow.swift; }" \
+            < "$2/omvm-display-follow.swift" &&
+        "${ssh[@]}" bash -s < "$2/omvm-display-follow.sh"
+    ' _ "$port" "$SHARE" "${ssh_opts[@]}" >"$run/logs/display-follow.log" 2>&1 </dev/null &
+}
+
+# Two-way text clipboard with the host (Wayland), over SSH; runs until the VM stops.
+clip_start() {
+    local n="$1" run; run="$(run_dir "$1")"
+    command -v wl-paste >/dev/null || { warn "no wl-clipboard: clipboard sharing off"; return 0; }
+    clip_stop "$n"
+    setsid nohup python3 "$SHARE/omvm-clip.py" "$(port_of "$n")" "$KEY" >"$run/logs/clip.log" 2>&1 </dev/null &
+    echo $! > "$run/clip.pid"
+}
+clip_stop() {
+    local f pid; f="$(run_dir "$1")/clip.pid"
+    pid="$(cat "$f" 2>/dev/null)" || return 0
+    # Only our bridge: after a host reboot the PID may belong to something else.
+    if { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null | grep -q omvm-clip; then kill "$pid" 2>/dev/null || true; fi
+    rm -f "$f"
+}
+cmd_clip() {
+    local n="${1:?usage: omvm clip NAME [off]}"
+    if [ "${2:-}" = off ]; then clip_stop "$n"; ok "$n: clipboard sharing off"; else clip_start "$n"; ok "$n: clipboard shared with the host"; fi
+}
+
+# A persistent VM managed by libvirt (qemu:///session): shows up in virt-manager,
+# which starts/stops it and shows its screen. Disk lives in $IMAGES/vms/NAME.
+cmd_virt() {
+    upstream
+    local name="${1:?usage: omvm virt NAME [IMAGE] | omvm virt rm NAME}" img
+    if [ "$name" = rm ]; then
+        name="${2:?usage: omvm virt rm NAME}"
+        virsh -q -c qemu:///session destroy "$name" >/dev/null 2>&1 || true
+        virsh -q -c qemu:///session undefine "$name" >/dev/null && ok "removed $name from libvirt (disk kept in $IMAGES/vms/$name)"
+        return
+    fi
+    command -v virsh >/dev/null || die "install libvirt and virt-manager first: omarchy pkg add libvirt virt-manager"
+    img="$(resolve_image "${2:-}")"
+    local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port
+    [ -x "$qemu" ] || die "build the graphics stack first (docs/graphics.md)"
+    if [ ! -f "$dir/disk.img" ]; then
+        mkdir -p "$dir"
+        for f in disk.img aux.img.trimmed vm.json; do cp --reflink=auto "$img/guest/$f" "$dir/$f"; chmod u+w "$dir/$f"; done
+        ok "$name: disk cloned from $(basename "$img")"
+    fi
+    port="$(cat "$dir/ssh_port" 2>/dev/null || python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
+    echo "$port" > "$dir/ssh_port"
+    guest_env
+    python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
+        "$("$UPSTREAM/scripts/extract-ecid.py" "$dir/vm.json")" "$port" "${CPUS:-8}" "${RAM_GIB:-16}" > "$dir/domain.xml"
+    virsh -q -c qemu:///session define "$dir/domain.xml" >/dev/null
+    # Clipboard + display-follow start/stop with the VM, however it is started.
+    mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks"
+    {
+        echo '#!/bin/sh'
+        echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
+        echo "[ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0"
+        echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY'"
+        echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-wayland-1}'"
+        echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" >/dev/null 2>&1 </dev/null"
+    } > "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
+    chmod +x "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
+    # libvirt reads hooks only from /etc/libvirt/hooks, also for per-user daemons:
+    # a system hook that hands the event to the user's own hook (once, needs sudo).
+    if ! grep -qs omvm /etc/libvirt/hooks/qemu; then
+        say "installing /etc/libvirt/hooks/qemu (hands VM start/stop to your own hook)"
+        sudo install -Dm755 /dev/stdin /etc/libvirt/hooks/qemu <<'HOOK'
+#!/bin/sh
+# omvm: hand libvirt QEMU events to the per-user hook (session daemons run as the user).
+h="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
+[ "$(id -u)" != 0 ] && [ -x "$h" ] && exec "$h" "$@"
+exit 0
+HOOK
+    fi
+    # Let virt-manager show the per-user connection.
+    gsettings set org.virt-manager.virt-manager.connections uris "['qemu:///session']" 2>/dev/null || true
+    gsettings set org.virt-manager.virt-manager.connections autoconnect "['qemu:///session']" 2>/dev/null || true
+    ok "$name: in virt-manager (QEMU/KVM User session). Start it there or: virsh -c qemu:///session start $name"
+    echo "    SSH: omvm ssh $name   clipboard: omvm clip $name"
 }
 
 cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
@@ -314,12 +419,15 @@ ingest) shift; cmd_ingest "$@" ;;
 setup) shift; cmd_setup "$@" ;;
 run) shift; cmd_run "$@" ;;
 start) shift; cmd_start "$@" ;;
-gui) shift; cmd_gui "$@" ;;
+gui) shift; cmd_gui "$@"; clip_start "$1" ;;
+clip) shift; cmd_clip "$@" ;;
+virt) shift; cmd_virt "$@" ;;
+virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1" ;; stopped) clip_stop "$1" ;; esac ;;
 ssh) shift; cmd_ssh "$@" ;;
 stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;
 images) cmd_images ;;
 version|--version) echo "omvm $VERSION" ;;
-help|-h|--help) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+help|-h|--help) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//' ;;
 *) die "unknown command '$1' (omvm help)" ;;
 esac
