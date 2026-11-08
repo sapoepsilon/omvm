@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# omvm: run macOS guest VMs under KVM on Omarchy (Apple Silicon), built on
+# aquarat/apple-macos-arm64-vm-guest. Ships no Apple software: the boot ROM
+# (AVPBooter), restore image (IPSW) and Xcode come from the user's own Mac.
+#
+#   omvm doctor                 check this host
+#   omvm kernel build|install|default|revert
+#   omvm qemu build             build the vmapple QEMU fork
+#   omvm macos-step             stage the one-time macOS script on the ESP
+#   omvm ingest                 import the VM restored in macOS (VMXFER)
+#   omvm setup [--xcode]        create account/SSH, headless layer, Xcode
+#   omvm run [IMAGE] -- CMD     run CMD in a throwaway guest (SSH)
+#   omvm start NAME [IMAGE] | ssh NAME | stop NAME | list | images
+set -euo pipefail
+
+VERSION=0.1.0
+UPSTREAM_URL="${OMVM_UPSTREAM_URL:-https://github.com/aquarat/apple-macos-arm64-vm-guest.git}"
+UPSTREAM_REF="${OMVM_UPSTREAM_REF:-2ec3cb8745e81c368276852b0a2a8688875e5325}"
+PKGS_URL="${OMVM_PKGS_URL:-https://github.com/omacom/omarchy-pkgs.git}"
+AURORA_URL="${OMVM_AURORA_URL:-https://github.com/omacom/linux-aurora.git}"
+DATA="${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}"
+UPSTREAM="${OMVM_UPSTREAM:-$DATA/upstream}"
+IMAGES="${OMVM_IMAGES:-$DATA/images}"
+KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
+SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
+BUNDLE=tahoe-26.4-25E246
+KPKG=linux-aurora-vmapple
+
+c_b=$'\e[1m'; c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_b=; c_g=; c_r=; c_y=; c_0=; }
+say()  { printf '%s==>%s %s\n' "$c_b" "$c_0" "$*"; }
+ok()   { printf '  %s✓%s %s\n' "$c_g" "$c_0" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$c_r" "$c_0" "$*"; }
+warn() { printf '  %s!%s %s\n' "$c_y" "$c_0" "$*"; }
+die()  { printf '%serror:%s %s\n' "$c_r" "$c_0" "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "missing '$1' (sudo pacman -S --needed $2)"; }
+
+ssh_opts=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+upstream() {
+    if ! test -d "$UPSTREAM/.git"; then
+        say "fetching $UPSTREAM_URL"
+        git clone -q "$UPSTREAM_URL" "$UPSTREAM"
+    fi
+    git -C "$UPSTREAM" cat-file -e "$UPSTREAM_REF^{commit}" 2>/dev/null || git -C "$UPSTREAM" fetch -q origin
+    git -C "$UPSTREAM" checkout -q "$UPSTREAM_REF"
+}
+
+latest_image() { ls -d "$IMAGES/$BUNDLE"-v* 2>/dev/null | sort -V | tail -1; }
+
+guest_env() {
+    local booter
+    booter="$(ls "$UPSTREAM"/artifacts/firmware/AVPBooter.vmapple2.*.bin 2>/dev/null | head -1 || true)"
+    test -n "$booter" || die "no AVPBooter yet: run 'omvm ingest'"
+    export AVPBOOTER="$booter" RUNNER_KEY="$KEY" GFX="${GFX:-none}"
+}
+
+# ---------------------------------------------------------------- doctor
+cmd_doctor() {
+    local fails=0
+    say "omvm $VERSION host check"
+    if [ "$(uname -m)" = aarch64 ] && grep -qs 'apple,arm-platform' /proc/device-tree/compatible; then
+        ok "Apple Silicon: $(tr '\0' ' ' </proc/device-tree/compatible | awk '{print $2}')"
+    else bad "not an Apple Silicon Mac running Linux"; fails=1; fi
+    if pacman -Q linux-aurora >/dev/null 2>&1; then ok "Omarchy kernel: $(pacman -Q linux-aurora)"
+    else warn "linux-aurora not installed (non-Omarchy hosts: build the kernel yourself)"; fi
+    [ "$(getconf PAGESIZE)" = 16384 ] && ok "16K pages" || { bad "need a 16K-page kernel"; fails=1; }
+    { [ -r /dev/kvm ] && [ -w /dev/kvm ]; } && ok "/dev/kvm accessible" || { bad "no /dev/kvm access"; fails=1; }
+    if [ -e /sys/module/kvm/parameters/emulate_nisv_ldst ]; then ok "running the patched kernel ($(uname -r))"
+    elif pacman -Q "$KPKG" >/dev/null 2>&1; then warn "$KPKG installed but not booted: reboot into it"
+    else bad "macOS-guest KVM patches missing: omvm kernel build && omvm kernel install"; fails=1; fi
+    local q="$UPSTREAM/build/qemu-fleet/vendor/qemu/build/qemu-system-aarch64"
+    [ -x "$q" ] && ok "QEMU fork built" || { bad "QEMU fork missing: omvm qemu build"; fails=1; }
+    ls "$UPSTREAM"/artifacts/firmware/AVPBooter.vmapple2.*.bin >/dev/null 2>&1 && ok "AVPBooter present (user-supplied)" \
+        || warn "no AVPBooter yet (omvm macos-step, then omvm ingest)"
+    local img; img="$(latest_image)"
+    [ -n "$img" ] && ok "guest image: $(basename "$img")" || warn "no guest image yet"
+    for t in gdb socat python3 zstd; do command -v $t >/dev/null || { bad "missing $t"; fails=1; }; done
+    return $fails
+}
+
+# ---------------------------------------------------------------- kernel
+aurora_commit_for() {   # $1 = installed linux-aurora version, e.g. 7.2.11.aurora14-1
+    local rel="${1#*.aurora}"; rel="${rel%%-*}"
+    local pk="$DATA/omarchy-pkgs"
+    test -d "$pk/.git" || git clone -q "$PKGS_URL" "$pk"
+    git -C "$pk" fetch -q origin
+    local c
+    for c in $(git -C "$pk" log --format=%H origin/HEAD -- pkgbuilds/linux-aurora/PKGBUILD); do
+        if git -C "$pk" show "$c:pkgbuilds/linux-aurora/PKGBUILD" | grep -qx "_aurorarel=$rel"; then
+            echo "$c"; return 0
+        fi
+    done
+    return 1
+}
+
+cmd_kernel() {
+    case "${1:-}" in
+    build)
+        need makepkg base-devel; need git git
+        upstream
+        local inst pk_commit dir
+        inst="$(pacman -Q linux-aurora | awk '{print $2}')" || die "linux-aurora not installed"
+        say "matching the installed linux-aurora $inst"
+        pk_commit="$(aurora_commit_for "$inst")" || die "cannot find PKGBUILD for $inst in omarchy-pkgs"
+        dir="$DATA/kernel"; rm -rf "$dir"; mkdir -p "$dir"
+        git -C "$DATA/omarchy-pkgs" archive "$pk_commit" pkgbuilds/linux-aurora | tar -x -C "$dir" --strip-components=2
+        cat "$UPSTREAM"/patches/linux-7.1.13-vmapple-pac-vmkey.patch "$UPSTREAM"/patches/linux-7.1.13-kvm-nisv-ldst.patch > "$dir/vmapple-kvm.patch"
+        python3 - "$dir/PKGBUILD" "$dir/vmapple-kvm.patch" <<'PY'
+import sys, re, hashlib
+p, patch = sys.argv[1], sys.argv[2]
+s = open(p).read()
+sha = hashlib.sha256(open(patch, 'rb').read()).hexdigest()
+s = re.sub(r'^_aurorarel=(\S+)$', r'_aurorarel=\1vmapple', s, count=1, flags=re.M)
+s = s.replace('pkgbase=linux-aurora\n', 'pkgbase=linux-aurora-vmapple\n', 1)
+s = re.sub(r'(source=\([^)]*?)\)', r'\1 vmapple-kvm.patch)', s, count=1, flags=re.S)
+s = re.sub(r"(sha256sums=\([^)]*?)\)", r"\1\n            '%s')" % sha, s, count=1, flags=re.S)
+s = re.sub(r'  provides=\(WIREGUARD-MODULE linux-asahi=\$\{pkgver\}\)\n  conflicts=\(linux-asahi\)\n',
+           '  provides=(WIREGUARD-MODULE)\n', s)
+s = s.replace('"$pkgdir/usr/lib/linux-aurora/extract-mesa-calibration"', '"$pkgdir/usr/lib/$pkgbase/extract-mesa-calibration"')
+s = s.replace('pkgname=("$pkgbase" "$pkgbase-headers")', 'pkgname=("$pkgbase")')
+for must in ('vmapple-kvm.patch)', 'pkgbase=linux-aurora-vmapple', 'vmapple\n'):
+    assert must in s, must
+open(p, 'w').write(s)
+PY
+        say "installing build dependencies"
+        sudo pacman -S --needed --noconfirm base-devel bc dtc kmod libelf pahole cpio perl rustup clang llvm lld clang18 llvm18 lld18 tar xz xmlto python git patch
+        say "building $KPKG (30-60 min)"
+        (cd "$dir" && makepkg -f --noconfirm) || die "kernel build failed (see $dir)"
+        ls "$dir"/$KPKG-*.pkg.tar.*
+        ;;
+    install)
+        local pkg; pkg="$(ls "$DATA"/kernel/$KPKG-*.pkg.tar.* 2>/dev/null | tail -1)"
+        test -n "$pkg" || die "build it first: omvm kernel build"
+        say "pinning m1n1 device trees to the stock kernel"
+        if ! grep -q 'omvm:' /etc/default/update-m1n1 2>/dev/null; then
+            sudo cp /etc/default/update-m1n1 /etc/default/update-m1n1.pre-omvm
+            sudo tee -a /etc/default/update-m1n1 >/dev/null <<'EOF'
+
+# omvm: m1n1's device trees always come from the newest stock kernel, never
+# linux-aurora-vmapple. Remove this block (and the kernel) to undo.
+_stock_mods="$(/bin/ls -d /lib/modules/*-ARCH | grep -v vmapple | sort -rV | head -1)"
+if [ -n "$_stock_mods" ]; then DTBS="$_stock_mods/dtbs/*.dtb"; fi
+EOF
+        fi
+        sudo pacman -U --noconfirm "$pkg"
+        sudo omarchy-apple-silicon-boot-check || warn "boot check reported a problem (see above)"
+        ok "installed; pick '$KPKG' in Limine, or run: omvm kernel default"
+        ;;
+    default)
+        grep -q "^BOOT_ORDER=\"$KPKG," /etc/default/limine && { ok "already default"; return; }
+        sudo cp /etc/default/limine /etc/default/limine.pre-omvm
+        sudo sed -i "s/^BOOT_ORDER=\"/BOOT_ORDER=\"$KPKG, /" /etc/default/limine
+        sudo limine-update >/dev/null && ok "$KPKG is now the default Limine entry (stock kernel stays in the menu)"
+        warn "run 'omarchy update' from the stock kernel: its boot check expects linux-aurora"
+        ;;
+    revert)
+        test -f /etc/default/limine.pre-omvm && sudo cp /etc/default/limine.pre-omvm /etc/default/limine && sudo limine-update >/dev/null
+        ok "stock linux-aurora is the default again (remove the kernel with: sudo pacman -R $KPKG)"
+        ;;
+    *) die "usage: omvm kernel build|install|default|revert" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- qemu
+cmd_qemu() {
+    [ "${1:-}" = build ] || die "usage: omvm qemu build"
+    upstream
+    sudo pacman -S --needed --noconfirm git rustup ninja meson glib2 pixman gtk3 vulkan-icd-loader vulkan-headers \
+        libslirp dtc zlib libepoxy wayland libxkbcommon gnutls nettle gdb socat python-distlib qemu-img zstd
+    rustup default >/dev/null 2>&1 || rustup default stable
+    (cd "$UPSTREAM" && scripts/build-qemu.sh) && (cd "$UPSTREAM" && scripts/check-host.sh)
+}
+
+# ---------------------------------------------------------------- macOS step
+cmd_macos_step() {
+    sudo mkdir -p /boot/efi/omvm
+    sudo cp "$SHARE/run-on-macos.sh" /boot/efi/omvm/run-on-macos.sh
+    local label; label="$(lsblk -rno LABEL "$(findmnt -no SOURCE /boot/efi)" | sed 's/\\x20/ /g')"
+    cat <<EOF
+${c_b}The one-time macOS step${c_0} (restores the VM with Apple's own Virtualization
+framework; Linux cannot do this part, and Linux cannot read macOS's encrypted disk).
+
+1. Boot macOS once:     sudo asahi-bless --set-boot-macos --next -y && sudo systemctl reboot
+2. In macOS Terminal:   sudo diskutil mount "$label" && bash "/Volumes/$label/omvm/run-on-macos.sh"
+   It shrinks macOS to (used + 100 GB), creates an exFAT partition VMXFER, downloads
+   Apple's restore image from Apple, restores the VM, copies your installed Xcode.app,
+   then reboots back here (asks before resizing anything).
+3. Back in Omarchy:     omvm ingest && omvm setup --xcode
+EOF
+}
+
+# ---------------------------------------------------------------- ingest
+cmd_ingest() {
+    upstream
+    OMVM_ART="$IMAGES" OMVM_REPO="$UPSTREAM" OMVM_ENVF="$DATA/vm.env" bash "$SHARE/ingest-vmxfer.sh"
+}
+
+# ---------------------------------------------------------------- setup
+cmd_setup() {
+    upstream; guest_env
+    test -f "$KEY" || ssh-keygen -q -t ed25519 -N '' -C omvm -f "$KEY"
+    local src="$IMAGES/$BUNDLE-restore" v0="$IMAGES/$BUNDLE-v0" v1="$IMAGES/$BUNDLE-v1" v2="$IMAGES/$BUNDLE-v2"
+    test -d "$src" || die "no restored bundle: run 'omvm ingest' first"
+    test -e /sys/module/kvm/parameters/emulate_nisv_ldst || die "boot the patched kernel first (omvm doctor)"
+    if ! test -d "$v0"; then
+        local pwf="$DATA/guest-password"
+        (umask 077; test -f "$pwf" || python3 -c 'import secrets;print(secrets.token_urlsafe(18))' > "$pwf")
+        say "creating guest account 'aquarat' + SSH (single-user boot, ~3 min); password in $pwf"
+        (cd "$UPSTREAM" && GUEST_PASSWORD="$(cat "$pwf")" images/host/create-account.sh "$src" "$v0" "$KEY.pub")
+    fi
+    if ! test -d "$v1"; then
+        say "headless settings + Command Line Tools (~5 min)"
+        local tz; tz="$(timedatectl show -p Timezone --value 2>/dev/null || echo UTC)"
+        (cd "$UPSTREAM" && scripts/bake-golden.sh "$v0" "$v1" "headless settings, CLT, TZ $tz" \
+            "env CLT_VERSION=any GUEST_TZ=$tz bash -s" < images/10-headless-clt.sh)
+    fi
+    if [ "${1:-}" = --xcode ] && ! test -d "$v2"; then
+        test -f "$IMAGES/Xcode.dmg" || die "no Xcode.dmg (the macOS step copies your installed Xcode.app)"
+        say "installing Xcode (~15 min)"
+        OMVM_REPO="$UPSTREAM" bash "$SHARE/bake-xcode-dmg.sh" "$v1" "$v2" "$IMAGES/Xcode.dmg"
+    fi
+    ok "ready: omvm run -- 'sw_vers; xcodebuild -version'"
+}
+
+# ---------------------------------------------------------------- run/start/ssh/stop
+resolve_image() { local i="${1:-}"; [ -z "$i" ] && i="$(latest_image)"; [ -d "$i" ] || i="$IMAGES/$i"; [ -d "$i" ] || die "no such image: ${1:-<none>}"; echo "$i"; }
+
+cmd_run() {
+    upstream; guest_env
+    local img=""; [ "${1:-}" != -- ] && { img="$1"; shift; }; [ "${1:-}" = -- ] && shift
+    [ $# -gt 0 ] || die "usage: omvm run [IMAGE] -- COMMAND"
+    img="$(resolve_image "$img")"
+    (cd "$UPSTREAM" && GOLDEN="$img" CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-job.sh "$*")
+}
+
+port_of() { cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/null || die "no running VM '$1'"; }
+
+cmd_start() {
+    upstream; guest_env
+    local name="${1:?usage: omvm start NAME [IMAGE]}" img; img="$(resolve_image "${2:-}")"
+    local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
+    (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-run.sh start "$name")
+    echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
+    for _ in $(seq 1 90); do timeout 5 ssh -n "${ssh_opts[@]}" -p "$port" aquarat@127.0.0.1 true 2>/dev/null && break; sleep 2; done
+    ok "$name is up: omvm ssh $name   (stop: omvm stop $name; changes are discarded on stop)"
+}
+
+cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 "$@"; }
+
+cmd_stop() {
+    local n="${1:?usage: omvm stop NAME}" run="$UPSTREAM/artifacts/runs/$1"
+    ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+    for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
+    (cd "$UPSTREAM" && scripts/vm-run.sh quit "$n") >/dev/null 2>&1 || true
+    rm -rf "$run"; ok "stopped $n"
+}
+
+cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
+cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
+
+case "${1:-help}" in
+doctor) shift; cmd_doctor "$@" ;;
+kernel) shift; cmd_kernel "$@" ;;
+qemu) shift; cmd_qemu "$@" ;;
+macos-step) shift; cmd_macos_step "$@" ;;
+ingest) shift; cmd_ingest "$@" ;;
+setup) shift; cmd_setup "$@" ;;
+run) shift; cmd_run "$@" ;;
+start) shift; cmd_start "$@" ;;
+ssh) shift; cmd_ssh "$@" ;;
+stop) shift; cmd_stop "$@" ;;
+list) cmd_list ;;
+images) cmd_images ;;
+version|--version) echo "omvm $VERSION" ;;
+help|-h|--help) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+*) die "unknown command '$1' (omvm help)" ;;
+esac
