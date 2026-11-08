@@ -42,6 +42,15 @@ Xcode 27.2
   `share/70-desktop.sh` into the image first; it turns off display sleep, Setup
   Assistant and crash dialogs.
 
+- `omvm virt NAME` registers a persistent VM in **virt-manager** (libvirt), so you can
+  start, stop and view it from a GUI ([docs/virt-manager.md](docs/virt-manager.md)).
+- **Clipboard** (text) is shared both ways with the Wayland host, and the guest's
+  **resolution follows the viewer window** (`RESOLUTION=WxH` sets the start size).
+- **Keyboard:** `share/hypr-macos-vm.lua` makes Hyprland pass every key, Super = Cmd
+  included, to a focused VNC viewer (Ctrl+Alt+Esc releases).
+- **Apple Account sign-in** is not expected to work: the guest has no Secure Enclave
+  identity. See docs for what Xcode can do without it.
+
 **Not yet:** audio.
 
 ## Requirements

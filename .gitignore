@@ -5,3 +5,4 @@ artifacts/
 *.dmg
 *.img
 vm.json
+__pycache__/
