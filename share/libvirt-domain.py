@@ -34,6 +34,11 @@ args = [
     "-device", "vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on",
     "-netdev", f"user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
     "-device", f"virtio-net-pci,netdev=net0,mac={mac}",
+    # libvirt runs QEMU with -nodefaults, which drops vmapple's default USB
+    # keyboard and tablet: add them back.
+    "-device", "qemu-xhci,id=omvm-usb",
+    "-device", "usb-kbd,bus=omvm-usb.0",
+    "-device", "usb-vmapple-tablet,bus=omvm-usb.0",
     "-audiodev", "none,id=snd0",
     "-device", "virtio-sound-pci,audiodev=snd0,streams=1",
 ]
