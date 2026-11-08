@@ -277,6 +277,20 @@ cmd_gui() {
     if [ -z "$disp" ]; then for disp in $(seq 10 40); do ss -ltn | grep -q ":$((5900+disp)) " || break; done; fi
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     export GFX=reims; guest_env
+    # Upstream reims-vgpu stack (in-process apple-gfx-mmio + interlock-patched Honeykrisp):
+    # renders the desktop without artifacts. See docs/graphics.md.
+    local sb="$UPSTREAM/build/qemu-sb/build" sbicd="$HOME/opt/mesa-honeykrisp-sb/share/vulkan/icd.d/asahi_icd.aarch64.json"
+    if [ "${OMVM_GFX_STACK:-sb}" = sb ] && [ -x "$sb/qemu-system-aarch64" ] && [ -f "$sbicd" ]; then
+        (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" \
+            REIMS_VGPU_WINDOW=0 VK_DRIVER_FILES="${VK_DRIVER_FILES:-$sbicd}" QEMU_BIN="$sb/qemu-system-aarch64" \
+            QEMU_EXTRA_ARGS="-L $sb/qemu-bundle/usr/local/share/qemu -machine aux-ram-share=on -vnc 127.0.0.1:$disp" \
+            scripts/vm-run.sh start "$name")
+        echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
+        echo "$disp" > "$UPSTREAM/artifacts/runs/$name/vnc_display"
+        ok "$name: VNC on 127.0.0.1:$((5900+disp)) (login window in ~40 s), SSH: omvm ssh $name"
+        echo "    viewer:  vncviewer 127.0.0.1:$((5900+disp))   (stop: omvm stop $name)"
+        return
+    fi
     (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" \
         VK_DRIVER_FILES="$icd" QEMU_BIN="$oop/qemu/build/qemu-system-aarch64" \
         GPU_BACKEND_BIN="$oop/reims/target/release/reims-vgpu-backend" \
