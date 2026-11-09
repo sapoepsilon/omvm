@@ -5,6 +5,22 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **Final Cut Pro in `macos`: runs, but stops at the Creator Studio paywall; one GPU
+  gap kills the VM.** Apple dropped the 90-day FCP trial (apple.com/final-cut-pro/trial
+  301s to /final-cut-pro/, "Try it free" is the App Store's Creator Studio, which needs
+  an Apple Account). The owner's App Store FCP 12.4 copied into the guest verifies
+  (`spctl`: Mac App Store), launches and draws its UI with no Metal errors, then asks
+  for $12.99/month and "Sign in to your Apple Account", which this VM can't do; import,
+  playback, effects and export in FCP are untested. The same work through AVFoundation
+  + a Metal CIContext (colour + Gaussian blur + overlay) exports 30 s of 4K H.264 to
+  1080p H.264 in 26.6 s, 4K H.264 in 30.2 s, ProRes 422 in 27.2 s; VideoToolbox is
+  software-only (no hardware decode for H.264/HEVC/ProRes, no
+  `AppleM2ScalerParavirtDriver`). A 10-bit ProRes 1080p -> H.264 export killed the VM:
+  `reims-vgpu: fatal: platform call dispatchThreadgroups:threadsPerThreadgroup:: ...
+  Format VK_FORMAT_R8G8B8A8_UNORM, usage: SampledImage` (GAP-1, repro and suggested
+  fix in `docs/fcp.md`). Guest GUI driven from the host (grim + ydotool relative
+  motion), since guest `screencapture` has no TCC grant over SSH.
+
 - **`omvm perf always|ac|off`: the governor switch is a setting.** Default `always`
   (performance while a local-mode VM runs, on AC and battery), kept in
   `~/.config/omvm/perf`; `OMVM_LOCAL_GOVERNOR` still overrides it. `ac` installs a udev
