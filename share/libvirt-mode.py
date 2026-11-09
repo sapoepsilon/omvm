@@ -26,6 +26,7 @@ so QEMU finds PipeWire's socket.
 Only what one mode adds is touched, so local -> remote gives back the domain
 `omvm virt` made (libvirt normalises the rest).
 """
+import os
 import sys
 import xml.etree.ElementTree as ET
 
@@ -36,7 +37,8 @@ ET.register_namespace("omvm", OMVM_NS)
 Q = "{%s}" % QEMU_NS
 # Environment that local mode adds (and remote mode removes).
 LOCAL_ENV = ("REIMS_VGPU_WINDOW_REFRESH", "REIMS_VGPU_WINDOW_BORDERLESS",
-             "WAYLAND_DISPLAY", "REIMS_VGPU_STATS")
+             "WAYLAND_DISPLAY", "REIMS_VGPU_STATS", "REIMS_VGPU_TRACE",
+             "REIMS_VGPU_TRACE_GATE", "REIMS_VGPU_TUNE")
 RES_PREFIX = "apple-gfx-mmio.resolution="
 SAVED_ICD = "OMVM_REMOTE_VK_DRIVER_FILES"
 # reims-vgpu's cap on the display modes and VBL it offers the guest (qemu-fleet's
@@ -144,6 +146,13 @@ def main():
         set_env(c, "REIMS_VGPU_WINDOW_BORDERLESS", "1")
         set_env(c, "WAYLAND_DISPLAY", wl)
         set_env(c, "XDG_RUNTIME_DIR", xdg)
+        # Latency tooling (docs/graphics.md "Pointer latency"): reims-vgpu writes its
+        # trace only while the gate file exists, and reads run-time settings (the
+        # window's present mode) from the tune file.
+        cache = os.path.expanduser("~/.cache/reims-vgpu")
+        set_env(c, "REIMS_VGPU_TRACE", f"{cache}/trace.log")
+        set_env(c, "REIMS_VGPU_TRACE_GATE", f"{cache}/trace.on")
+        set_env(c, "REIMS_VGPU_TUNE", f"{cache}/tune")
         if len(sys.argv) > 7 and sys.argv[7] == "1":   # frame rates, once a second, in the libvirt log
             set_env(c, "REIMS_VGPU_STATS", "1")
     elif what == "remote":

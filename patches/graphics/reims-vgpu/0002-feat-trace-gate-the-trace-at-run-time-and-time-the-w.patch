@@ -1,0 +1,222 @@
+From 94e33cf7c559da040cf486cd99d1cc77b42e8786 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 16:54:39 -0700
+Subject: [PATCH 2/3] feat(trace): gate the trace at run time and time the
+ window path
+
+Local (Asahi/Honeykrisp) latency tooling.
+
+- REIMS_VGPU_TRACE_GATE names a file: with REIMS_VGPU_TRACE set, events
+  are written only while it exists (looked at every 200 ms), so a
+  long-running VM keeps the variable and traces a window of interest.
+- REIMS_VGPU_TUNE names a key=value file read at run time
+  (trace::tune); the window's swapchain takes `present_mode`
+  (mailbox, fifo, immediate, fifo_relaxed) from it where the surface
+  offers it, and is made again in that mode.
+- Window events: wnew (the guest presented), wdraw (the render thread
+  takes the draw), wacq (image taken, fence waited), wsched (frame
+  scheduled), wpres (vkQueuePresentKHR returned). The offered present
+  modes are logged at info.
+---
+ crates/reims-vgpu-core/src/trace.rs           | 59 ++++++++++++++++++-
+ crates/reims-vgpu-vulkan/src/swapchain.rs     | 41 +++++++++++++
+ .../src/native/linux/render.rs                |  4 ++
+ 3 files changed, 102 insertions(+), 2 deletions(-)
+
+diff --git a/crates/reims-vgpu-core/src/trace.rs b/crates/reims-vgpu-core/src/trace.rs
+index 8574a92b..497b7e1c 100644
+--- a/crates/reims-vgpu-core/src/trace.rs
++++ b/crates/reims-vgpu-core/src/trace.rs
+@@ -58,9 +58,64 @@ pub fn now() -> u64 {
+     CLOCK.get().map_or(0, |clock| clock())
+ }
+ 
+-/// Whether events are written.
++/// Whether events are written: with the clock and the file, and, where
++/// `REIMS_VGPU_TRACE_GATE` names a path, only while that path exists (looked at every
++/// [`GATE_NS`] at most), so a long-running process can keep the variable set and trace
++/// a window of interest.
+ pub fn on() -> bool {
+-    CLOCK.get().is_some() && writer().is_some()
++    CLOCK.get().is_some() && writer().is_some() && gate()
++}
++
++/// The environment variable naming the gate file.
++pub const GATE_VAR: &str = "REIMS_VGPU_TRACE_GATE";
++
++/// How often the gate file is looked at, in nanoseconds.
++const GATE_NS: u64 = 200_000_000;
++
++static GATE: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
++static GATE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static GATE_LOOKED: AtomicU64 = AtomicU64::new(0);
++
++fn gate() -> bool {
++    let Some(path) = GATE
++        .get_or_init(|| std::env::var_os(GATE_VAR).map(Into::into))
++        .as_ref()
++    else {
++        return true;
++    };
++    let t = now();
++    let looked = GATE_LOOKED.load(Ordering::Relaxed);
++    if t.saturating_sub(looked) >= GATE_NS
++        && GATE_LOOKED
++            .compare_exchange(looked, t, Ordering::Relaxed, Ordering::Relaxed)
++            .is_ok()
++    {
++        GATE_OPEN.store(path.exists(), Ordering::Relaxed);
++    }
++    GATE_OPEN.load(Ordering::Relaxed)
++}
++
++/// A setting read at run time from the file `REIMS_VGPU_TUNE` names (`key=value` lines,
++/// read again at most every [`GATE_NS`]): for measuring choices without restarting the
++/// process. `None` without the variable, the file or the key.
++pub fn tune(key: &str) -> Option<String> {
++    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
++    static CACHE: Mutex<(u64, Vec<(String, String)>)> = Mutex::new((0, Vec::new()));
++    let path = PATH
++        .get_or_init(|| std::env::var_os("REIMS_VGPU_TUNE").map(Into::into))
++        .as_ref()?;
++    let t = now();
++    let mut c = CACHE.lock();
++    if c.0 == 0 || t.saturating_sub(c.0) >= GATE_NS {
++        c.0 = t.max(1);
++        c.1 = std::fs::read_to_string(path)
++            .unwrap_or_default()
++            .lines()
++            .filter_map(|l| l.split_once('='))
++            .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
++            .collect();
++    }
++    c.1.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+ }
+ 
+ fn writer() -> Option<&'static Mutex<Writer>> {
+diff --git a/crates/reims-vgpu-vulkan/src/swapchain.rs b/crates/reims-vgpu-vulkan/src/swapchain.rs
+index 8067f1a8..ed428970 100644
+--- a/crates/reims-vgpu-vulkan/src/swapchain.rs
++++ b/crates/reims-vgpu-vulkan/src/swapchain.rs
+@@ -468,6 +468,8 @@ pub struct Swapchain {
+     surface: vk::SurfaceKHR,
+     /// The present mode.
+     mode: vk::PresentModeKHR,
++    /// The present modes the surface offers.
++    offered: Vec<vk::PresentModeKHR>,
+     /// The fence each image is taken with.
+     fence: vk::Fence,
+     /// The swapchain, once made.
+@@ -563,6 +565,18 @@ fn take_image(
+ 
+ /// The present mode of a swapchain over a surface offering `modes` (the module doc): MAILBOX
+ /// where offered, else FIFO, which every surface offers.
++/// The present mode `REIMS_VGPU_TUNE`'s `present_mode` names, where the surface offers it.
++fn tuned_present_mode(modes: &[vk::PresentModeKHR]) -> Option<vk::PresentModeKHR> {
++    let mode = match reims_vgpu_core::trace::tune("present_mode")?.as_str() {
++        "mailbox" => vk::PresentModeKHR::MAILBOX,
++        "fifo" => vk::PresentModeKHR::FIFO,
++        "immediate" => vk::PresentModeKHR::IMMEDIATE,
++        "fifo_relaxed" => vk::PresentModeKHR::FIFO_RELAXED,
++        _ => return None,
++    };
++    modes.contains(&mode).then_some(mode)
++}
++
+ fn present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+     if modes.contains(&vk::PresentModeKHR::MAILBOX) {
+         vk::PresentModeKHR::MAILBOX
+@@ -671,6 +685,12 @@ impl Swapchain {
+             unsafe { surface_api.get_physical_device_surface_present_modes(physical, surface) }
+                 .map_err(|e| destroy(refused("vkGetPhysicalDeviceSurfacePresentModesKHR", e)))?;
+         let mode = present_mode(&modes);
++        log::info!(
++            target: "reims_vgpu_vulkan::swapchain",
++            "present modes offered (0 immediate, 1 mailbox, 2 fifo, 3 fifo_relaxed): {:?}, taking {}",
++            modes.iter().map(|m| m.as_raw()).collect::<Vec<_>>(),
++            mode.as_raw()
++        );
+         // SAFETY: a valid create info, on the runtime's live device.
+         let fence = unsafe { vk.create_fence(&vk::FenceCreateInfo::default(), None) }
+             .map_err(|e| destroy(refused("vkCreateFence", e)))?;
+@@ -688,6 +708,7 @@ impl Swapchain {
+             drawables,
+             surface,
+             mode,
++            offered: modes.clone(),
+             fence,
+             chain: None,
+             retired: Vec::new(),
+@@ -753,6 +774,20 @@ impl Swapchain {
+         if size.0 == 0 || size.1 == 0 {
+             return Acquired::Retry;
+         }
++        // REIMS_VGPU_TUNE's `present_mode` (mailbox, fifo, immediate) picks another mode the
++        // surface offers, at run time: the swapchain is made again in it.
++        let wanted =
++            tuned_present_mode(&self.offered).unwrap_or_else(|| present_mode(&self.offered));
++        if wanted != self.mode && self.held.is_none() && self.pending.is_none() {
++            log::info!(
++                target: "reims_vgpu_vulkan::swapchain",
++                "present mode {} -> {}",
++                self.mode.as_raw(),
++                wanted.as_raw()
++            );
++            self.mode = wanted;
++            self.stale = true;
++        }
+         let current = self.chain.as_ref().map(|c| c.size);
+         if self.stale || current != Some(size) {
+             match self.remake(size) {
+@@ -841,6 +876,8 @@ impl Swapchain {
+                     return Acquired::Failed;
+                 }
+                 self.pending = None;
++                // wacq: the image is taken, its fence waited for
++                reims_vgpu_core::trace::event("wacq", &[u64::from(index)]);
+                 self.held = Some(index);
+                 self.taken_again(index);
+                 self.collect();
+@@ -925,6 +962,8 @@ impl Swapchain {
+             self.stale = true;
+             return;
+         }
++        // wsched: the window's frame is scheduled on the GPU
++        reims_vgpu_core::trace::event("wsched", &[]);
+         let Some(chain) = self.chain.as_mut() else {
+             return;
+         };
+@@ -958,6 +997,8 @@ impl Swapchain {
+                 .with_vk_queue(|q, _| api.queue_present(q, &info))
+         };
+         drop(wsi);
++        // wpres: vkQueuePresentKHR returned
++        reims_vgpu_core::trace::event("wpres", &[u64::from(frame.index)]);
+         image.last = Some(command_buffer);
+         // Numbered whatever the compositor answers: a present it rejects still waits on its
+         // semaphore (the module doc).
+diff --git a/crates/reims-vgpu-window/src/native/linux/render.rs b/crates/reims-vgpu-window/src/native/linux/render.rs
+index cd397faf..4af28b39 100644
+--- a/crates/reims-vgpu-window/src/native/linux/render.rs
++++ b/crates/reims-vgpu-window/src/native/linux/render.rs
+@@ -185,6 +185,8 @@ impl Surface {
+ 
+     /// The guest presented a frame: it is drawn.
+     pub(crate) fn request_draw(&self) {
++        // wnew: the guest presented a frame
++        reims_vgpu_core::trace::event("wnew", &[]);
+         self.update(|s| s.dirty = true);
+     }
+ 
+@@ -238,6 +240,8 @@ fn run(window: &Window) {
+     let mut presenting = Presenting::default();
+     let mut retry = None;
+     while let Some(work) = surface.next(retry.take()) {
++        // wdraw: the render thread takes a draw
++        reims_vgpu_core::trace::event("wdraw", &[]);
+         if presenting.needs_presenter() {
+             // The sink is copied out of the window's lock: none is held while it answers.
+             let Some(sink) = window.sink() else {
+-- 
+2.56.0
+

@@ -5,8 +5,8 @@
 | Piece | Source | Local patches (`patches/graphics/`) |
 |---|---|---|
 | QEMU | [steelbrain/qemu-reims-vgpu](https://github.com/steelbrain/qemu-reims-vgpu) `1b41f5f5db` (reims-vgpu's `vendor/qemu` pin) | `qemu/0001`: aquarat's vmapple-on-KVM work, rebased. `qemu/0002`: macOS 26 disk compatibility (keeps the guest's protected files readable). `qemu/0003`: the desktop follows the VNC viewer's window size, and `resolution` works headless ("Resolution", below). `qemu/0004`-`0007`: macOS 27 ("macOS 27 updates", below) |
-| GPU library | [steelbrain/reims-vgpu](https://github.com/steelbrain/reims-vgpu) `1fe0acb6` | `reims-vgpu/0001`: dma-buf imports instead of host pointers, memfd-backed own allocations, 10-bit extended-range formats off, unsupported pipelines answered as NSErrors. Each change has an environment switch |
-| Shader translator | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) `219f0136` | `metal2vulkan/0001`: an importer that works without `VK_EXT_external_memory_host`. `metal2vulkan/0002`: a cubic sampler in an argument buffer filters bilinearly instead of refusing the draw (the iOS Simulator needs it; `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0` refuses again) |
+| GPU library | [steelbrain/reims-vgpu](https://github.com/steelbrain/reims-vgpu) `1fe0acb6` | `reims-vgpu/0001`: dma-buf imports instead of host pointers, memfd-backed own allocations, 10-bit extended-range formats off, unsupported pipelines answered as NSErrors. Each change has an environment switch. `reims-vgpu/0002`: a run-time trace gate and tune file, and the window's latency stages ("Pointer latency"). `reims-vgpu/0003`: a dispatch the runtime refuses as unsupported is skipped, not the VM's end |
+| Shader translator | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) `219f0136` | `metal2vulkan/0001`: an importer that works without `VK_EXT_external_memory_host`. `metal2vulkan/0002`: a cubic sampler in an argument buffer filters bilinearly instead of refusing the draw (the iOS Simulator needs it; `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0` refuses again). `metal2vulkan/0003`: logs what a binding view refused for want of `SAMPLED` is |
 | Vulkan driver | Mesa (Honeykrisp) 26.2.6 (the tested version), plus aquarat's `patches/mesa/0001-0002` | `mesa/0003`: exposes `VK_EXT_fragment_shader_interlock`, which macOS's framebuffer-fetch shaders need |
 
 ## Build (about 40 minutes)
@@ -151,6 +151,53 @@ move took 51 ms to show in the guest's image (10 ms to reach the guest); with `p
 drawn by Hyprland, 13 ms (26 ms with schedutil). Measured 2026-11-09 with a uinput mouse,
 a guest window that flips colour on the mouse-moved event and `grim` polling a pixel
 (docs/log.md).
+
+**Where the ~20 ms goes** (2026-11-09, `macos` on 27.2, 120 Hz, window full screen; medians,
+`share/latency/lat.py --no-pixel --trace` for the guest and reims stages, `floor2.py` for the
+compositor):
+
+| Stage | Time | Notes |
+|---|---|---|
+| uinput move -> the guest's NSEvent | 1.3-1.6 ms | Hyprland, SDL, QEMU's tablet, xHCI |
+| NSEvent -> the guest presents its frame | 5.5 ms (p90 ~14) | WindowServer waits for its own 120 Hz tick, ~2 ms of GPU for the frame, ~1 ms in the guest between the GPU's completion and the present; a missed tick adds 8.3 ms |
+| guest present -> `vkQueuePresentKHR` | 0.4-0.5 ms | reims-vgpu: new-frame signal, render thread, image, encode |
+| the window's copy on the GPU | ~0.9 ms | 3024x1964, before Hyprland can latch the buffer |
+| Hyprland + DCP: commit -> scanout | 11-13 ms (min 10.9, spikes to 30+) | a plain shm client measures the same: one composite frame plus one flip |
+
+So reims-vgpu's own share is ~1.4 ms; the rest is the guest's compositor and Hyprland/DCP,
+each paced by its own 120 Hz clock. Tried and not kept: a 240 Hz guest mode
+(`REIMS_VGPU_WINDOW_REFRESH=240`: NSEvent -> present got slower, 7.8-8.5 ms); `IMMEDIATE`
+present mode with tearing (Hyprland refuses tearing at scale 2: "Tearing commit requested but
+scale factor is not 1"); direct scanout (blocked by the bar/dock/notification layers and the
+software cursor); Hyprland's `render:new_render_scheduling` (no change), `render:async_commit`
+(commit -> scanout ~21 ms), `render:cm_enabled`/`use_fp16` (no change); disabling the CPUs' deep
+idle state (no change). Per-command GPU round trip from the guest is not the problem:
+`share/latency/metalbench.swift` measures 0.25 ms for a one-threadgroup compute or a small
+render pass (commit to `waitUntilCompleted`), 0.05 ms per 1080p render pass pipelined,
+~320 GB/s copies and ~1.2 TFLOP/s FMA, and 2.8 ms for the first use of a new pipeline.
+
+**Tools** (`share/latency/`, `build.sh` builds the host helpers into `~/.cache/omvm-latency`):
+
+- `lat.py [N] [label] [--trace FILE] [--no-pixel]`: a uinput mouse crosses the window;
+  the guest's `latprobe` (`latprobe.swift`, built in the guest as `~/bin/latprobe`) flips its
+  full-screen window on the mouse-moved event; `pixpoll` (one persistent wlr-screencopy
+  client) reports the first composited frame with the new colour. Continuous screencopy keeps
+  Hyprland near 100 % CPU and delays input and composition itself (guest-event latency went
+  from 1.4 to 8-10 ms under it on a busy afternoon), so take stage timings with `--no-pixel`.
+- reims-vgpu's trace (`reims-vgpu/0002`): local mode sets `REIMS_VGPU_TRACE`,
+  `REIMS_VGPU_TRACE_GATE` and `REIMS_VGPU_TUNE` (under `~/.cache/reims-vgpu`); events are
+  written only while `trace.on` exists (`touch` it, run, `rm` it), with the window's stages
+  (`wnew`, `wdraw`, `wacq`, `wsched`, `wpres`) beside the guest's (`cmd`, `cbdone`,
+  `present`). `lat.py --trace` lines them up per move.
+- `tune`: `present_mode=mailbox|fifo|immediate` switches the window's swapchain at run time.
+- `floor2.py`: a full-screen shm window's commit -> `wp_presentation` time, Hyprland's floor
+  (it takes full screen from the Reims window; `fs.sh` gives it back).
+- `metalbench.swift` (guest): per-command round trips, pipelined rate, bandwidth, FLOPs and
+  new-pipeline costs on the guest's Metal device.
+
+Keep the Reims window full screen when measuring: another full-screen window on the workspace
+(the floor test's) takes it away, and a windowed Reims window is scaled and composited with
+the bar, which adds several milliseconds.
 
 The guest's display agent (`share/omvm-display-follow.swift`) puts each new size in the mode
 macOS marks default: local mode's `3024x1964@254` runs 1512x982 points at 2x. A scaling picked
