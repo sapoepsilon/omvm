@@ -801,6 +801,13 @@ usb_trust() { # VM [SECONDS]: ask the wired iPhone to pair, make noise until the
     IFS=$'\t' read -r st udid rest <<<"$(head -1 <<<"$st")"
     if [ "$st" = paired ]; then ok "paired: ${rest//$'\t'/ }"; return 0; fi
     say "$n: ${rest//$'\t'/ } is $st: unlock the iPhone and tap Trust (enter its passcode)"
+    # Nothing may re-attach or reset the phone while it shows Trust and the passcode
+    # screen: that dismisses them. The watcher is paused until pairing settles.
+    local bp watched=()
+    for bp in $(usb_attached "$n" | sed 's/^omvm-usb-//'); do
+        systemctl --user is-active -q "omvm-usb-watch-$n-$bp" 2>/dev/null &&
+            { systemctl --user stop "omvm-usb-watch-$n-$bp"; watched+=("$bp"); }
+    done
     # devicectl's pair request is what puts "Trust This Computer?" on the phone; it waits for the tap.
     usb_guest "$n" "nohup xcrun devicectl manage pair --device $udid >/tmp/omvm-pair.log 2>&1 &" </dev/null
     vol="$(XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)"
@@ -820,33 +827,62 @@ usb_trust() { # VM [SECONDS]: ask the wired iPhone to pair, make noise until the
         [ "$st" = paired ] && break
     done
     restore_vol; trap - EXIT
+    [ "$st" = paired ] && sleep 90   # passcode entry and the phone's re-enumeration after it
+    for bp in "${watched[@]}"; do usb_watch_start "$n" "$bp"; done
     if [ "$st" = paired ]; then
         ok "trusted: ${rest//$'\t'/ } is paired with $n"
     else
         bad "still ${st:-gone} after ${limit}s; guest log: omvm ssh $n cat /tmp/omvm-pair.log"; return 1
     fi
 }
-# An iPhone comes up in its charging mode (configuration 1). macOS asks it for its
-# preferred mode (vendor request 0x45) and switches it (0x52); a real Mac then sees
-# the phone drop off and come back in the new mode. Passed through, the host never
-# sees that drop: the phone answers every request with EPROTO and stays in
-# configuration 1. A host-side reset (usbreset) re-enumerates it; it comes back in
-# the new mode, QEMU follows it by port, and macOS sets configuration 6. The watcher
-# does that while the device is attached, at most once a minute, three times.
+# An iPhone comes up in its charging mode (configuration 1). macOS reads its mode
+# (vendor request 0x45) and switches it (0x52); a real Mac then sees the phone drop
+# off and come back in Mac mode. Passed through, the host never sees that drop: the
+# phone answers every later request with EPROTO and stays in configuration 1. So
+# the switch is done on the host before QEMU gets the phone (share/usb-apple-mode.py);
+# the phone re-enumerates normally and the guest finds nothing to switch.
+usb_apple_prepare() { # BUS-PORT: iPhone/iPad into Mac mode on the host
+    local m
+    m="$(python3 "$SHARE/usb-apple-mode.py" ensure "$1")" || { warn "could not switch $1's USB mode: $m"; return 0; }
+    ok "$1 in Mac mode ($m)"
+}
+usb_add() { # VM BUS-PORT VID:PID: device_add and wait for it
+    local n="$1" bp="$2" vp="$3" id="omvm-usb-$2" extra="" out
+    # Apple devices: no guest-driven port reset (QEMU's libusb_reset_device puts the
+    # phone back in its charging mode).
+    [ "${vp%%:*}" = 05ac ] && extra=",guest-reset=off"
+    out="$(usb_hmp "$n" "device_add usb-host,id=$id,bus=omvm-usb.0,hostbus=${bp%%-*},hostport=${bp#*-}$extra")"
+    [ -z "$(tr -d '[:space:]' <<<"$out")" ] || die "device_add: $out"
+    for _ in $(seq 1 10); do grep -q "ID: $id" <<<"$(usb_hmp "$n" "info usb")" && return 0; sleep 1; done
+    die "QEMU did not attach $bp (QEMU log: ~/.cache/libvirt/qemu/log/$n.log)"
+}
+# The phone also re-enumerates on its own (after "Trust", after a reboot) and comes
+# back in charging mode, which the guest then switches and gets stuck on. The
+# watcher (attach starts it; trust pauses it so nothing interrupts the passcode
+# entry) notices configuration 1 for 15 s and re-attaches: device_del, host-side
+# switch, device_add. At most once a minute, five times.
 usb_watch() { # BUS-PORT VM
-    local bp="$1" n="$2" stuck=0 last=0 tries=0 cfg
+    local bp="$1" n="$2" stuck=0 last=-60 tries=0 cfg vp
     while [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = running ] &&
           grep -qx "omvm-usb-$bp" <<<"$(usb_attached "$n")"; do
         cfg="$(cat "/sys/bus/usb/devices/$bp/bConfigurationValue" 2>/dev/null)"
         if [ "$cfg" = 1 ]; then stuck=$((stuck + 3)); else stuck=0; fi
-        if [ $stuck -ge 12 ] && [ $((SECONDS - last)) -ge 60 ] && [ $tries -lt 3 ]; then
-            echo "$bp stuck in configuration 1 for ${stuck}s: usbreset"
-            sudo -n usbreset "$(cat "/sys/bus/usb/devices/$bp/busnum")/$(cat "/sys/bus/usb/devices/$bp/devnum")" || true
+        if [ $stuck -ge 15 ] && [ $((SECONDS - last)) -ge 60 ] && [ $tries -lt 5 ]; then
+            echo "$bp in configuration 1 for ${stuck}s: re-attaching in Mac mode"
+            vp="$(cat "/sys/bus/usb/devices/$bp/idVendor"):$(cat "/sys/bus/usb/devices/$bp/idProduct")"
+            usb_hmp "$n" "device_del omvm-usb-$bp" >/dev/null
+            for _ in $(seq 1 10); do grep -qx "omvm-usb-$bp" <<<"$(usb_attached "$n")" || break; sleep 1; done
+            sleep 3; usb_apple_prepare "$bp"; usb_add "$n" "$bp" "$vp"
             last=$SECONDS; tries=$((tries + 1)); stuck=0
         fi
         sleep 3
     done
     echo "$bp no longer attached to $n: watcher done"
+}
+usb_watch_start() { # VM BUS-PORT
+    systemctl --user stop "omvm-usb-watch-$1-$2" 2>/dev/null || true
+    systemd-run --user --quiet --collect --unit "omvm-usb-watch-$1-$2" \
+        "$(readlink -f "$0")" usb watch "$2" "$1"
 }
 cmd_usb() {
     local verb="${1:-list}" n line bp vp id
@@ -878,23 +914,14 @@ cmd_usb() {
             usb_hmp "$n" "device_del $id" >/dev/null; ok "detached $bp from $n"; return 0
         fi
         grep -qx "$id" <<<"$(usb_attached "$n")" && { ok "$bp is already attached to $n"; return 0; }
-        usb_hmp "$n" "info qtree" | grep -q 'id "omvm-usb"' ||
+        grep -q 'id "omvm-usb"' <<<"$(usb_hmp "$n" "info qtree")" ||
             die "$n has no omvm-usb controller (domains from libvirt-domain.py have one: omvm virt $n)"
         usb_rule "${vp%%:*}" "${vp##*:}"
-        # Apple devices: no guest-driven port reset (QEMU's libusb_reset_device makes
-        # the iPhone drop back to its charging mode); the watcher below handles the
-        # re-enumeration macOS needs instead.
-        local extra=""; [ "${vp%%:*}" = 05ac ] && extra=",guest-reset=off"
-        local out; out="$(usb_hmp "$n" "device_add usb-host,id=$id,bus=omvm-usb.0,hostbus=${bp%%-*},hostport=${bp#*-}$extra")"
-        [ -z "$(tr -d '[:space:]' <<<"$out")" ] || die "device_add: $out"
-        for _ in $(seq 1 10); do usb_hmp "$n" "info usb" | grep -q "ID: $id" && break; sleep 1; done
-        usb_hmp "$n" "info usb" | grep "ID: $id" || die "QEMU did not attach $bp (journal/QEMU log: ~/.cache/libvirt/qemu/log/$n.log)"
+        case "$vp" in 05ac:12[ab]?) usb_apple_prepare "$bp" ;; esac
+        usb_add "$n" "$bp" "$vp"
+        usb_hmp "$n" "info usb" | grep "ID: $id"
         ok "attached $bp ($vp) to $n"
-        if [ "${vp%%:*}" = 05ac ]; then
-            systemctl --user stop "omvm-usb-watch-$n-$bp" 2>/dev/null || true
-            systemd-run --user --quiet --collect --unit "omvm-usb-watch-$n-$bp" \
-                "$(readlink -f "$0")" usb watch "$bp" "$n" && ok "watching $bp (journalctl --user -u omvm-usb-watch-$n-$bp)"
-        fi
+        case "$vp" in 05ac:12[ab]?) usb_watch_start "$n" "$bp" && ok "watching $bp (journalctl --user -u omvm-usb-watch-$n-$bp)" ;; esac
         case "$vp" in 05ac:12[ab]?) say "iPhone/iPad: run 'omvm usb trust $n' to pair it (tap Trust on the phone)" ;; esac ;;
     trust) usb_trust "${2:-${OMVM_VM:-macos}}" "${3:-300}" ;;
     watch) usb_watch "${2:?BUS-PORT}" "${3:-${OMVM_VM:-macos}}" ;;

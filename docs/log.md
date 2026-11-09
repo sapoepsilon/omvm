@@ -5,6 +5,25 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **iPhone in the `macos` guest is usable: QEMU xHCI fix + host-side USB mode
+  switch.** After pairing, devicectl showed the phone `unavailable`: macOS posts NCM
+  receive buffers as two-TRB TDs, and on a short packet QEMU's `xhci_xfer_report`
+  skipped the IOC event of the TD's last TRB, which macOS waits for (4 receive
+  completions per NCM function, 0 packets in `netstat -I anri0`, `remoted` connect
+  timeouts, empty `usbmuxd` list). Patched `hw/usb/hcd-xhci.c` to send that event
+  (commit `760d1d0d29` on `sb-kvm-bdif-write`, copy in `patches/usb/`), rebuilt in
+  `build/qemu-sb-bdifw/build` (old binary `qemu-system-aarch64.pre-xhci-ioc`), two
+  `macos` restarts under the lock. Now: devicectl `connected`, paired, wired, tunnel
+  connected, Developer Mode on, DDI services available; Finder sidebar and
+  `xctrace list devices` list it; `usbmuxd` lists it. The stuck mode switch is now
+  avoided instead of reset: `share/usb-apple-mode.py` switches the phone to Mac mode
+  on the host (0xc0 0x52) before `device_add`, so it re-enumerates natively; the
+  watcher re-attaches the same way (no more `usbreset`, which once knocked the phone
+  off the bus), and `omvm usb trust` pauses it while the Trust/passcode screens are
+  up (a re-attach dismissed the owner's passcode screen once) and for 90 s after.
+  Tested: detach → attach → `connected` again in 25 s; `trust` on a paired phone
+  returns at once. Proof: Finder sidebar screenshot (host grim) on R2.
+
 - **`omvm usb list|attach|detach|trust`: hot-plug host USB devices into a running VM
   (docs/usb.md); an iPhone reaches the `macos` guest and pairs.** `attach` runs
   `device_add usb-host,...,hostbus=B,hostport=P` on the domain's existing `qemu-xhci`

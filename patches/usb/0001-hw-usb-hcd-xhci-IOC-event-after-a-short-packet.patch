@@ -1,0 +1,46 @@
+From 760d1d0d29b07341409825eb55e760a52fd7d58f Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 16:18:48 -0700
+Subject: [PATCH] hw/usb/hcd-xhci: IOC event after a short packet in a
+ multi-TRB TD
+
+When a short packet ends a TD early on a TRB with ISP set, xhci_xfer_report
+reported that TRB and then skipped the IOC on the TD's last TRB. The
+xHCI spec (4.10.1.1) has the controller still generate the IOC event
+there, and macOS completes a TD only on it: an iPhone's NCM receive
+buffers (two TRBs, 16384 + 16380 bytes) never completed, so the guest
+got no packets from the phone and CoreDevice could not reach it.
+---
+ hw/usb/hcd-xhci.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+index 376bc00264..591ac009e3 100644
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -1551,9 +1551,20 @@ static void xhci_xfer_report(XHCITransfer *xfer)
+             break;
+         }
+ 
+-        if (!reported && ((trb->control & TRB_TR_IOC) ||
++        /*
++         * Short packet in a multi-TRB TD: after the event on the ISP TRB, the
++         * TD's last TRB still gets its IOC event (xHCI 1.2, 4.10.1.1). macOS
++         * completes a TD only on that IOC event; without it, bulk-in TDs that
++         * span two TRBs (iPhone NCM receive buffers) never complete.
++         */
++        bool ioc_after_short = reported && shortpkt &&
++                               (trb->control & TRB_TR_IOC) &&
++                               TRB_TYPE(*trb) == TR_NORMAL;
++
++        if (ioc_after_short ||
++            (!reported && ((trb->control & TRB_TR_IOC) ||
+                           (shortpkt && (trb->control & TRB_TR_ISP)) ||
+-                          (xfer->status != CC_SUCCESS && left == 0))) {
++                          (xfer->status != CC_SUCCESS && left == 0)))) {
+             event.slotid = xfer->epctx->slotid;
+             event.epid = xfer->epctx->epid;
+             event.length = (trb->status & 0x1ffff) - chunk;
+-- 
+2.56.0
+
