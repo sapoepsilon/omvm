@@ -1,0 +1,100 @@
+From 8e76b0e4ebdbb92343dbff43003c307f27b6bf0c Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 16:54:39 -0700
+Subject: [PATCH 3/3] fix(vulkan): skip a dispatch the runtime refuses as
+ unsupported
+
+Local (Asahi/Honeykrisp). A compute dispatch that binds, for sampling, a
+texture whose image the runtime made without SAMPLED (a 4:2:2
+BGRG422 plane of an IOSurface, which has no decoded twin) ended the
+process at the encode: the whole VM died on an AVFoundation ProRes ->
+H.264 export (VideoToolbox pixel transfer through Metal).
+
+With REIMS_VGPU_SOFT_UNSUPPORTED_STATES on (the default), such a
+dispatch is skipped and logged as an error (the first 20, then at
+powers of two); its output is left as it was (green frames from a
+skipped 4:2:2 conversion), and the guest goes on. Every other refusal
+still dies as before.
+---
+ crates/reims-vgpu-vulkan/src/answer.rs        | 30 +++++++++++++++++++
+ .../reims-vgpu-vulkan/src/gpu/predication.rs  |  8 ++---
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/crates/reims-vgpu-vulkan/src/answer.rs b/crates/reims-vgpu-vulkan/src/answer.rs
+index e57223f4..ebfb923c 100644
+--- a/crates/reims-vgpu-vulkan/src/answer.rs
++++ b/crates/reims-vgpu-vulkan/src/answer.rs
+@@ -215,6 +215,36 @@ pub fn send<T>(
+     inside(Some(sel), call).or_else(|e| decide(sel, policy, e))
+ }
+ 
++/// Local (Asahi/Honeykrisp): [`send`] for a dispatch, whose refusal as unsupported on this device
++/// (a texture bound for sampling whose image the runtime made without `SAMPLED`, as for a
++/// format view the device cannot sample) skips the dispatch with a warning, while
++/// `REIMS_VGPU_SOFT_UNSUPPORTED_STATES` is on (the default), instead of ending the process:
++/// the guest's kernel then leaves its output as it was, and the guest goes on. Any other refusal
++/// is [`send`]'s.
++pub fn send_dispatch(
++    sel: &'static str,
++    call: impl FnOnce() -> Result<(), Error>,
++) -> RaiseResult<()> {
++    stop_if_task_ended();
++    match inside(Some(sel), call) {
++        Ok(()) => Ok(()),
++        Err(Error::Unsupported(u)) if crate::gpu::states::soft_unsupported_states() => {
++            use std::sync::atomic::{AtomicU64, Ordering};
++            static SKIPPED: AtomicU64 = AtomicU64::new(0);
++            let n = SKIPPED.fetch_add(1, Ordering::Relaxed);
++            if n < 20 || n.is_power_of_two() {
++                log::error!(
++                    "{sel}: the Vulkan runtime refused it: {u}; the dispatch is skipped \
++                     (REIMS_VGPU_SOFT_UNSUPPORTED_STATES, {} so far)",
++                    n + 1
++                );
++            }
++            Ok(())
++        }
++        Err(e) => decide(sel, Policy::Dies, e),
++    }
++}
++
+ /// [`send`], the line of a death or a raise also carrying what `describe` says of the call
+ /// ([`decide_describing`]), asked only where the runtime refuses it.
+ pub fn send_describing<T>(
+diff --git a/crates/reims-vgpu-vulkan/src/gpu/predication.rs b/crates/reims-vgpu-vulkan/src/gpu/predication.rs
+index 207d5dfd..71ea8605 100644
+--- a/crates/reims-vgpu-vulkan/src/gpu/predication.rs
++++ b/crates/reims-vgpu-vulkan/src/gpu/predication.rs
+@@ -132,7 +132,7 @@ use reims_vgpu_core::raise::{OnFault, RaiseResult};
+ use reims_vgpu_core::rt::BlockEnv;
+ use reims_vgpu_core::sync::Mutex;
+ 
+-use crate::answer::{Policy, metal_aborts, plain, refused, send};
++use crate::answer::{metal_aborts, plain, refused, send_dispatch};
+ use crate::gpu::command::{CommandBufferObject, VulkanCommandBuffer};
+ use crate::gpu::device::VulkanDevice;
+ use crate::gpu::encode_blit::EncoderObject;
+@@ -2043,17 +2043,17 @@ pub fn work(enc: &VulkanComputeEncoder, sel: &'static str, work: Work<'_>) -> Ra
+         || work.direct_only(u.bindings.pipeline.as_ref())
+     {
+         drop(u);
+-        return send(sel, Policy::Dies, || enc.with(sel, |e| work.direct(e)));
++        return send_dispatch(sel, || enc.with(sel, |e| work.direct(e)));
+     }
+     u.work = true;
+     if !u.predicated() {
+         drop(u);
+-        return send(sel, Policy::Dies, || enc.with(sel, |e| work.direct(e)));
++        return send_dispatch(sel, || enc.with(sel, |e| work.direct(e)));
+     }
+     let (step, guest) = work.arguments(sel);
+     let (chunk, at) = u.step(predication, enc, sel, step, guest);
+     drop(u);
+-    send(sel, Policy::Dies, || {
++    send_dispatch(sel, || {
+         enc.with(sel, |e| work.indirect(e, &chunk, at + OUT))
+     })
+ }
+-- 
+2.56.0
+

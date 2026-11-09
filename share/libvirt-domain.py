@@ -62,11 +62,21 @@ args = [
     "-audiodev", AUDIODEV,
     "-device", f"virtio-sound-pci,audiodev=snd0,streams=2{virtio_asc}",
 ]
+# The paravirtual M2 scaler (106b:1a0b, reims-vgpu's scaler on the host GPU), which
+# a guest's VideoToolbox would use for pixel transfers instead of a Metal compute
+# fallback. Opt-in (OMVM_M2SCALER=1): on vmapple with a macOS 27.2 guest the host
+# side starts (kernels made on the M1 Max) but the guest's AppleVirtIOPCITransport
+# only resets the device a few times and never attaches (docs/fcp.md, GAP-1).
+if os.environ.get("OMVM_M2SCALER", "0") == "1":
+    args += ["-device", "apple-m2scaler-pci"]
 env = {
     "VK_DRIVER_FILES": icd,
     "REIMS_VGPU_WINDOW": "0",
     "REIMS_VGPU_MAX_REFRESH_HZ": "60",
     "REIMS_VGPU_DRAW_LOG_PATH": "off",
+    # reims-vgpu's own error lines (a refused dispatch it skips, say) in the
+    # domain's log; silent otherwise.
+    "REIMS_VGPU_LOG": "error",
     "TMPDIR": f"{home}/.cache/reims-vgpu",
     "XDG_RUNTIME_DIR": xdg,   # the user's PipeWire socket, for sound
 }

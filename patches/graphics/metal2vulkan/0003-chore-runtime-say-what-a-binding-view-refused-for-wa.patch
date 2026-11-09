@@ -1,0 +1,39 @@
+From 9f957a02d0e17cd88f88985103837f2a105c14a6 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 16:54:39 -0700
+Subject: [PATCH] chore(runtime): say what a binding view refused for want of
+ SAMPLED is
+
+Local (Asahi/Honeykrisp) diagnostic: the first 20 refusals print the
+image's pixel format, Vulkan format, usage and views, and the view's
+format and usage on stderr (the VM's log), which the refusal's own
+text does not name.
+---
+ crates/metal2vulkan-runtime/src/binding_view.rs | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/crates/metal2vulkan-runtime/src/binding_view.rs b/crates/metal2vulkan-runtime/src/binding_view.rs
+index 2d46f23b..d353365d 100644
+--- a/crates/metal2vulkan-runtime/src/binding_view.rs
++++ b/crates/metal2vulkan-runtime/src/binding_view.rs
+@@ -143,6 +143,17 @@ pub(super) fn binding_view(
+         )));
+     }
+     if !image.usage.contains(usage) {
++        // Local (Asahi/Honeykrisp): what the refused binding is, for the log.
++        static SHOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++        if SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
++            eprintln!(
++            "metal2vulkan: binding view refused (storage {storage}): image pf {:?} fmt {:?} usage {:?} unavailable {:?} \
++             flags {:?} views {:?} extent {:?}; view pf {:?} fmt {:?} usage {:?} type {:?}",
++            image.pixel_format, image.format, image.usage, image.unavailable, image.flags,
++            image.view_formats, image.extent, record.pixel_format, desc.format, record.usage,
++            record.texture_type
++        );
++        }
+         return Err(ViewRefusal::Unsupported(Unsupported::needs(
+             Feature::Format,
+             Capability::Format {
+-- 
+2.56.0
+

@@ -5,6 +5,36 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`macos` local-mode latency: profiled stage by stage; reims-vgpu's share is ~1.4 ms; a
+  refused 4:2:2 dispatch no longer kills the VM.** reims-vgpu got a run-time trace gate and
+  tune file (`patches/graphics/reims-vgpu/0002`; local mode sets `REIMS_VGPU_TRACE`,
+  `_TRACE_GATE`, `_TUNE`) and window-stage events. Medians at 120 Hz (docs/graphics.md
+  "Pointer latency" has the table): move -> guest NSEvent 1.3-1.6 ms, -> guest present
+  5.5-6.5 ms, -> `vkQueuePresentKHR` 7.0 ms; the window copy ~0.9 ms of GPU; Hyprland + DCP
+  commit -> scanout 11-13 ms for any client (`floor2.py`, presentation-time). Not kept: 240 Hz
+  guest modes (slower to present), IMMEDIATE/tearing (Hyprland refuses tearing at scale 2),
+  Hyprland `new_render_scheduling`/`async_commit`/cm/fp16, CPU deep idle off. Guest Metal
+  (`share/latency/metalbench.swift`): 0.25 ms per small command buffer round trip, 0.05 ms per
+  pipelined 1080p pass, ~320 GB/s, ~1.2 TFLOP/s, 2.8 ms for a new pipeline's first use;
+  display link 120.0/s.
+  - End-to-end on screen with the grim rig was 19.3 ms (p90 30.3) at 15:40 and 30.7-34.1 ms
+    (p90 ~60) at 16:50, after the iPhone passthrough joined the tablet's xHCI and the guest
+    ran Xcode; the stage timings up to the host present did not grow, and Hyprland's own
+    floor showed 30 ms spikes in the same hour, so the grim number tracks the box's load and
+    the rig's own screencopy cost more than this change.
+  - FCP GAP-1 (docs/fcp.md): the dispatch that samples a 4:2:2 `BGRG422` IOSurface plane
+    through an `RGBA8Unorm` view (no decoded twin for a surface-backed texture, image made
+    without `SAMPLED`) is now skipped with an error line (`reims-vgpu/0003`,
+    `REIMS_VGPU_SOFT_UNSUPPORTED_STATES`); the export finishes, but those frames come out
+    green. `metal2vulkan/0003` logs what the refused view is. `REIMS_VGPU_LOG=error` is now in
+    every domain so such lines reach the VM's log.
+  - The M2 scaler (`apple-m2scaler-pci`, which VideoToolbox would use instead of that Metal
+    kernel) starts on the host (kernels made on the M1 Max) but the 27.2 guest's
+    AppleVirtIOPCITransport only resets it and never attaches; `libvirt-domain.py` offers it
+    behind `OMVM_M2SCALER=1`.
+  - Rollback: `~/vm-artifacts/rollback-latency-20261109/` (the QEMU binary and reims dist from
+    before; HEADS lists the commits). QEMU itself has no change (relinked only).
+
 - **Xcode → iPhone from the `macos` guest: everything but the signing identity
   (docs/xcode-device.md).** Phone `connected` with DDI services usable and Xcode's
   6.8 GB symbol copy for iPhone18,1 27.2 complete over the patched xHCI; a SwiftUI

@@ -57,6 +57,20 @@ clips made in the guest with Homebrew ffmpeg 8 (`~/Movies/fcptest`).
 
 ### GAP-1: VM dies on a compute dispatch that samples `RGBA8Unorm` (AVFoundation ProRes -> H.264 export)
 
+**Status (GPU agent, 2026-11-09 16:55): the VM no longer dies; the frames are wrong.**
+Root cause from `metal2vulkan/0003`'s log line: the kernel samples a 4:2:2 `BGRG422`
+IOSurface plane (1920x1080, the ProRes decoder's `2vuy`/`yuvs` output) through an
+`RGBA8Unorm` view. metal2vulkan holds 4:2:2 texels in an `R8G8_UNORM` carrier and serves
+reads from a decoded `RGBA8` twin, but a texture over a surface's pages gets no twin, so its
+image has no `SAMPLED` usage and the bind is refused. `reims-vgpu/0003` now skips such a
+dispatch with an error line in `~/.cache/libvirt/qemu/log/macos.log` (`... the dispatch is
+skipped (REIMS_VGPU_SOFT_UNSUPPORTED_STATES, N so far)`); the same export now completes in
+4.7 s, but its video is solid green (the conversion never ran). Still open: decoding a
+surface-backed 4:2:2 texture into a twin before each read (metal2vulkan
+`texture/decoded_twin.rs` + `buffer_texture.rs`), or the guest using the M2 scaler instead
+(`OMVM_M2SCALER=1` adds `apple-m2scaler-pci`; the host side starts, but the 27.2 guest's
+transport never attaches it).
+
 - **Symptom:** the whole VM dies (`shutting down, reason=crashed`) at
   2026-11-09 22:43:50 UTC, during a plain AVFoundation export, no FCP involved.
 - **Host log** (`~/.cache/libvirt/qemu/log/macos.log`, line ~5823):
