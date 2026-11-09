@@ -129,6 +129,21 @@ the other VM (`omvm stop NAME`) for a smooth local desktop. Local mode also sets
 `REIMS_VGPU_MAX_REFRESH_HZ` to the panel's rate (remote: 60); the steelbrain reims these
 builds link ignores it, but qemu-fleet's reims caps the guest's modes with it.
 
+### Pointer latency
+
+The `omvm` libvirt hook switches every CPU cluster to the `performance` governor while a
+local-mode VM runs and restores the previous governors when the last one stops
+(`OMVM_LOCAL_GOVERNOR=keep` to skip; needs passwordless sudo). With `schedutil` a pointer
+move took 51 ms to show in the guest's image (10 ms to reach the guest); with `performance`
+20 ms (1.4 ms). The cursor itself is the host's: SDL's colour cursor with the guest's glyph,
+drawn by Hyprland, 13 ms (26 ms with schedutil). Measured 2026-11-09 with a uinput mouse,
+a guest window that flips colour on the mouse-moved event and `grim` polling a pixel
+(docs/log.md).
+
+The guest's display agent (`share/omvm-display-follow.swift`) puts each new size in the mode
+macOS marks default: local mode's `3024x1964@254` runs 1512x982 points at 2x. A scaling picked
+in System Settings stays across reboots until the host offers another size.
+
 ## macOS 27 updates
 
 A macOS 26 guest can take the macOS 27 OTA (tested: 26.4 25E246 to 27.2.1 26B131 on `macos27`) with these QEMU changes and the 27-era AVPBooter:

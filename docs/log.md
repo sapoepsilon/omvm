@@ -5,6 +5,35 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`macos` pointer lag: the CPU governor; the guest now boots in macOS's default
+  scaling.** Measured with a uinput mouse on the host (`/tmp/lat.py`, not in the
+  repo) against `~/bin/latprobe` in the guest (a full-screen window that turns
+  white or black on the mouse-moved event, clocks matched over its SSH pipe), and
+  `grim` polling one pixel (~9 ms a sample): with `schedutil` a move reached the
+  guest's NSEvent in 10 ms median (p90 17) and the screen in 51 ms (p90 58); the
+  host-drawn cursor showed in 26 ms (p90 34). With the `performance` governor on
+  all three clusters: 1.4 ms (p90 2.8), 20 ms (p90 28.5) and 13 ms (p90 17); the
+  guest's display link ran 120.0/s with frame gaps of 8.40 ms p95, 8.54 ms max.
+  schedutil leaves the cores at low clocks between the guest's bursts, and each
+  move waits for them to ramp. Not the cause: the cursor (SDL's colour cursor,
+  drawn by Hyprland; reims draws it into the image only while the guest moves it
+  on its own), the swapchain (MAILBOX, 4 images), the tablet (1 ms bInterval).
+  Hyprland's `render:direct_scanout = 1` changed nothing (the window was never
+  scanned out) and was put back to 0.
+  - `omvm`'s libvirt hook now sets the `performance` governor while a local-mode
+    VM runs (its QEMU has `REIMS_VGPU_WINDOW=1`; checked in `/proc`, since a hook
+    must not call libvirt) and puts the saved governors back when the last one
+    stops (`$XDG_RUNTIME_DIR/omvm-governor`). `OMVM_LOCAL_GOVERNOR=keep` skips
+    it. Needs passwordless sudo.
+  - Scaling: `omvm-display-follow` set each new size's native 1x mode, so local
+    mode ran 3024x1964 at 1x (tiny UI). It now sets the mode macOS marks default
+    (`kDisplayModeDefaultFlag`: 1512x982 points at 2x here), else native 1x, and
+    keeps the last size it acted on in `~/Library/omvm/display-follow.state`, so a
+    scaling picked in System Settings survives reboots until the host offers
+    another size. The agent is now ad-hoc signed as `org.omvm.display-follow`
+    after a rebuild; launchd refused its first spawn
+    (`OS_REASON_CODESIGNING`) on 27.2.
+
 - **`macos` (27.2, local mode) runs at ~110 fps again; the lag was `macos27`
   sharing the GPU, not the 60 Hz cap.** The domain carried
   `REIMS_VGPU_MAX_REFRESH_HZ=60` from `libvirt-domain.py` (the headless

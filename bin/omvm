@@ -494,6 +494,37 @@ local_screen() {
     fi
 }
 
+# CPU governor while a local-mode VM runs. With schedutil the cores idle at low clocks
+# between the guest's bursts, and every pointer move waits for them to ramp up: on the
+# M1 Max a move took 51 ms to reach the screen (10 ms to reach the guest), with the
+# performance governor 18 ms (1.4 ms). docs/graphics.md, "Pointer latency".
+# OMVM_LOCAL_GOVERNOR=keep leaves the governor alone. Needs passwordless sudo.
+GOV_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omvm-governor"
+vm_is_local_running() { # NAME: its QEMU runs reims-vgpu's window (no virsh: libvirt hooks must not call libvirt)
+    local pid; pid="$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/libvirt/qemu/run/$1.pid" 2>/dev/null)" || return 1
+    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx 'REIMS_VGPU_WINDOW=1'
+}
+governor_start() { # NAME
+    local g="${OMVM_LOCAL_GOVERNOR:-performance}" p
+    [ "$g" != keep ] && vm_is_local_running "$1" || return 0
+    mkdir -p "$GOV_DIR"
+    if [ ! -f "$GOV_DIR/saved" ]; then
+        for p in /sys/devices/system/cpu/cpufreq/policy*; do echo "$p $(cat "$p/scaling_governor")"; done > "$GOV_DIR/saved"
+    fi
+    touch "$GOV_DIR/vm.$1"
+    for p in /sys/devices/system/cpu/cpufreq/policy*; do
+        echo "$g" | sudo -n tee "$p/scaling_governor" >/dev/null 2>&1 || { warn "cpufreq: no passwordless sudo, governor left as is"; return 0; }
+    done
+}
+governor_stop() { # NAME: back to the saved governors once no local VM is left
+    local p g
+    rm -f "$GOV_DIR/vm.$1"
+    compgen -G "$GOV_DIR/vm.*" >/dev/null && return 0
+    [ -f "$GOV_DIR/saved" ] || return 0
+    while read -r p g; do echo "$g" | sudo -n tee "$p/scaling_governor" >/dev/null 2>&1 || true; done < "$GOV_DIR/saved"
+    rm -f "$GOV_DIR/saved"
+}
+
 # The window needs a Vulkan driver with Wayland WSI: the graphics stack's Mesa is
 # built with -Dplatforms= (docs/graphics.md), so local mode uses a second build of
 # the same tree with -Dplatforms=wayland.
@@ -641,7 +672,7 @@ remote) shift; exec "$SHARE/stream-host.sh" "$@" ;;
 virt) shift; cmd_virt "$@" ;;
 mode) shift; cmd_mode "$@" ;;
 show) shift; cmd_show "$@" ;;
-virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1" ;; stopped) clip_stop "$1" ;; esac ;;
+virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1"; governor_start "$1" ;; stopped) clip_stop "$1"; governor_stop "$1" ;; esac ;;
 ssh) shift; cmd_ssh "$@" ;;
 stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;

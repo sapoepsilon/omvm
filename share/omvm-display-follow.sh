@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Runs inside the guest (omvm gui pipes it over SSH): builds and loads the display-follow
 # LaunchAgent (omvm-display-follow.swift, copied to ~/Library/omvm first), which puts the
-# desktop at the size the VNC viewer's window asks for. Idempotent.
+# desktop at the size the host offers, in macOS's default scaling. Idempotent.
 set -euo pipefail
 dir="$HOME/Library/omvm" label=org.omvm.display-follow
 src="$dir/omvm-display-follow.swift" bin="$dir/omvm-display-follow"
@@ -11,7 +11,11 @@ command -v swiftc >/dev/null || { echo "no swiftc (Command Line Tools): display-
 mkdir -p "$dir" "$HOME/Library/LaunchAgents"
 rebuilt=0
 if [ ! -x "$bin" ] || [ "$src" -nt "$bin" ]; then
-    swiftc -O "$src" -o "$bin.new" && mv "$bin.new" "$bin"
+    swiftc -O "$src" -o "$bin.new"
+    # Sign it under its own name: the linker's ad-hoc signature says "omvm-display-follow.new",
+    # and launchd's first spawn of the rebuilt agent failed (OS_REASON_CODESIGNING) on 27.2.
+    codesign -f -s - -i org.omvm.display-follow "$bin.new" 2>/dev/null || true
+    mv "$bin.new" "$bin"
     rebuilt=1
 fi
 cat > "$plist.new" <<EOF
