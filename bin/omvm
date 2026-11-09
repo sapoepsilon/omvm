@@ -11,7 +11,7 @@
 #   omvm ingest                 import the VM restored in macOS (VMXFER)
 #   omvm setup [--xcode]        create account/SSH, headless layer, Xcode
 #   omvm run [IMAGE] -- CMD     run CMD in a throwaway guest (SSH)
-#   omvm start NAME [IMAGE] | ssh NAME | stop NAME | list | images
+#   omvm start|stop|restart|pause|resume NAME (virt) | start NAME IMAGE | ssh NAME | list | images
 #   omvm gui NAME [IMAGE]       desktop over VNC (paravirtual GPU on the host GPU);
 #                               RESOLUTION=WxH[@PPI] picks the first mode
 #   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt)
@@ -249,6 +249,7 @@ cmd_run() {
 port_of() { cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/null || cat "$IMAGES/vms/$1/ssh_port" 2>/dev/null || die "no VM '$1'"; }
 
 cmd_start() {
+    if [ $# = 1 ] && is_virt "$1"; then cmd_power start "$1"; return; fi
     upstream; guest_env
     local name="${1:?usage: omvm start NAME [IMAGE]}" img; img="$(resolve_image "${2:-}")"
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
@@ -261,12 +262,47 @@ cmd_start() {
 cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 "$@"; }
 
 cmd_stop() {
+    if [ $# = 1 ] && is_virt "$1"; then cmd_power stop "$1"; return; fi
     local n="${1:?usage: omvm stop NAME}" run="$UPSTREAM/artifacts/runs/$1"
     clip_stop "$n"
     ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
     (cd "$UPSTREAM" && scripts/vm-run.sh quit "$n") >/dev/null 2>&1 || true
     rm -rf "$run"; ok "stopped $n"
+}
+
+# ---------------------------------------------------------------- virt power
+# start|stop|restart|pause|resume for libvirt VMs (omvm virt). Stop holds off the
+# watchdog (omvm-vm@NAME.timer), which would start the VM again within a minute;
+# start turns it back on. Pause keeps the guest in memory (virsh suspend).
+is_virt() { [ ! -d "$UPSTREAM/artifacts/runs/$1" ] && command -v virsh >/dev/null &&
+            virsh -q -c qemu:///session dominfo "$1" >/dev/null 2>&1; }
+cmd_power() { # start|stop|restart|pause|resume NAME
+    local verb="$1" n="${2:-${OMVM_VM:-macos}}" s
+    is_virt "$n" || die "no libvirt VM '$n' (omvm virt $n)"
+    s="$("${VIRSH[@]}" domstate "$n")"
+    case "$verb" in
+    start)
+        case "$s" in
+        running) ok "$n is already running" ;;
+        paused) "${VIRSH[@]}" resume "$n" >/dev/null; ok "$n resumed" ;;
+        *) "${VIRSH[@]}" start "$n" >/dev/null; ok "$n started ($(vm_mode "$n") mode)" ;;
+        esac
+        systemctl --user start "omvm-vm@$n.timer" 2>/dev/null || true ;;
+    stop)
+        systemctl --user stop "omvm-vm@$n.timer" "omvm-vm@$n.service" 2>/dev/null || true
+        if [ "$s" = paused ]; then "${VIRSH[@]}" resume "$n" >/dev/null; fi  # paused guests can't shut down
+        vm_shutdown "$n"
+        ok "$n: watchdog off until omvm start $n" ;;
+    restart) cmd_power stop "$n"; cmd_power start "$n" ;;
+    pause)
+        [ "$s" = running ] || die "$n is $s, not running"
+        "${VIRSH[@]}" suspend "$n" >/dev/null; ok "$n paused (omvm resume $n)" ;;
+    resume)
+        [ "$s" = paused ] || die "$n is $s, not paused"
+        "${VIRSH[@]}" resume "$n" >/dev/null; ok "$n resumed" ;;
+    *) die "usage: omvm start|stop|restart|pause|resume NAME" ;;
+    esac
 }
 
 cmd_gui() {
@@ -470,11 +506,12 @@ define_mode() { # NAME local|remote
 
 vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
     local n="$1" i
-    [ "$("${VIRSH[@]}" domstate "$n")" = running ] || return 0
+    vm_on() { case "$("${VIRSH[@]}" domstate "$1" 2>&1)" in "shut off"|crashed) return 1 ;; esac; }
+    vm_on "$n" || return 0
     say "shutting $n down"
     "${VIRSH[@]}" shutdown "$n" >/dev/null 2>&1 || true
     for i in $(seq 1 120); do
-        [ "$("${VIRSH[@]}" domstate "$n")" = running ] || { ok "$n is off ($((2 * i - 2))s)"; return 0; }
+        vm_on "$n" || { ok "$n is off ($((2 * i - 2))s)"; return 0; }
         # vmapple ignores libvirt's power button: ask macOS itself after 10 s
         if [ "$i" = 6 ]; then
             ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
@@ -580,6 +617,7 @@ ingest) shift; cmd_ingest "$@" ;;
 setup) shift; cmd_setup "$@" ;;
 run) shift; cmd_run "$@" ;;
 start) shift; cmd_start "$@" ;;
+restart|pause|resume) cmd_power "$@" ;;
 gui) shift; cmd_gui "$@"; clip_start "$1" ;;
 clip) shift; cmd_clip "$@" ;;
 res) shift; upstream; cmd_res "$@" ;;

@@ -28,6 +28,8 @@ Xcode 27.2
 - A guest boots to SSH in about 25 s. Every `omvm run` starts from a clean,
   throwaway copy of the image. That's instant on btrfs because it uses reflinks.
 - `omvm start NAME` / `omvm ssh NAME` / `omvm stop NAME` give you a longer-lived VM.
+  For a libvirt VM (`omvm virt`), `omvm start|stop|restart|pause|resume NAME` power it;
+  stop holds off the watchdog until the next start.
 - CPU-bound work runs at 95–99% of the host's speed.
 - At most **two** macOS guests can run at once. That's Apple's licence limit,
   and the QEMU fork enforces it.
