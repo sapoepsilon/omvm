@@ -1,0 +1,79 @@
+From a10f19585ad4b76d3f5e8058e7b0eed410b8f805 Mon Sep 17 00:00:00 2001
+From: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 14:10:56 -0700
+Subject: [PATCH] Local (Asahi/Honeykrisp): hold argument-buffer cubic samplers
+ as bilinear
+
+A cubic sampler listed in an argument buffer beside a fragment stage
+refused the bind plan (NotImplemented(SamplerBicubicFilter)), which
+reims-vgpu makes fatal. The iOS Simulator display and simctl io
+screenshot hit it, killing QEMU. Hold such a sampler as a linear
+VkSampler instead, recorded as a degrade; REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0
+restores the refusal.
+---
+ crates/metal2vulkan/src/bind/heap.rs     |  3 ++-
+ crates/metal2vulkan/src/metal/bicubic.rs | 17 +++++++++++++++++
+ crates/metal2vulkan/src/metal/sampler.rs |  5 +++++
+ 3 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/crates/metal2vulkan/src/bind/heap.rs b/crates/metal2vulkan/src/bind/heap.rs
+index ea50e47a..3dde3a5e 100644
+--- a/crates/metal2vulkan/src/bind/heap.rs
++++ b/crates/metal2vulkan/src/bind/heap.rs
+@@ -867,7 +867,8 @@ impl<'a> HeapPlanner<'a> {
+                     .copied()
+                     .filter(|c| c.sampler_use().is_some())
+                     .collect(),
+-                cubic: sampler_tables.iter().all(|&(stage, ..)| tested(stage)),
++                cubic: crate::metal::bicubic::cubic_argument_samplers_linear()
++                    || sampler_tables.iter().all(|&(stage, ..)| tested(stage)),
+                 opaque_black: false,
+             };
+             if !a.shapes.iter().all(|s| admission.cubic_held(s)) {
+diff --git a/crates/metal2vulkan/src/metal/bicubic.rs b/crates/metal2vulkan/src/metal/bicubic.rs
+index f58b928d..bb107063 100644
+--- a/crates/metal2vulkan/src/metal/bicubic.rs
++++ b/crates/metal2vulkan/src/metal/bicubic.rs
+@@ -154,6 +154,23 @@ const A: u32 = 0b1000;
+ /// bicubic readings cover (not `MirrorClampToEdge`). A function that samples through such a
+ /// sampler refuses any other word (`lower::sampler::bicubic`), so the binder refuses it before it
+ /// names the cubic-sampler variant (`VariantKey::cubic_samplers`).
++/// Local (Asahi/Honeykrisp, omvm): whether a cubic sampler in an argument buffer, whose bicubic
++/// filter no stage emulates there, is held as a bilinear one instead of refusing the plan. On
++/// unless `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0`. The iOS Simulator's display and
++/// `simctl io screenshot` sample through one from a fragment stage; refused, the draw is fatal.
++pub(crate) fn cubic_argument_samplers_linear() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| {
++        let on = std::env::var("REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR").as_deref() != Ok("0");
++        if on {
++            eprintln!(
++                "metal2vulkan: a cubic sampler in an argument buffer filters bilinearly, where Metal filters bicubically (REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0 refuses it) [metal2vulkan-degrade-cubic-argument-sampler-linear]"
++            );
++        }
++        on
++    })
++}
++
+ pub(crate) fn runtime_cubic_measured(word: u32) -> bool {
+     use crate::metal::sampler::SamplerWord;
+     use crate::metal::{SamplerAddressMode, SamplerBorderColor};
+diff --git a/crates/metal2vulkan/src/metal/sampler.rs b/crates/metal2vulkan/src/metal/sampler.rs
+index b73df075..67641a35 100644
+--- a/crates/metal2vulkan/src/metal/sampler.rs
++++ b/crates/metal2vulkan/src/metal/sampler.rs
+@@ -783,6 +783,11 @@ fn filter(f: SamplerMinMagFilter) -> vk::Filter {
+         // A cubic sample is fetches under its pipeline's cubic-sampler variant
+         // (`VariantKey::cubic_samplers`), as a constexpr bicubic sampler's is, so the Vulkan
+         // sampler holds a nearest placeholder, which no filtered operation reads.
++        // Local (omvm): linear where an argument buffer's cubic sampler is held bilinearly
++        // (`bicubic::cubic_argument_samplers_linear`); a slot's variant still never reads it.
++        SamplerMinMagFilter::Cubic if crate::metal::bicubic::cubic_argument_samplers_linear() => {
++            vk::Filter::LINEAR
++        }
+         SamplerMinMagFilter::Cubic => vk::Filter::NEAREST,
+     }
+ }
+-- 
+2.56.0
+

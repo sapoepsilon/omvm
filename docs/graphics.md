@@ -6,7 +6,7 @@
 |---|---|---|
 | QEMU | [steelbrain/qemu-reims-vgpu](https://github.com/steelbrain/qemu-reims-vgpu) `1b41f5f5db` (reims-vgpu's `vendor/qemu` pin) | `qemu/0001`: aquarat's vmapple-on-KVM work, rebased. `qemu/0002`: macOS 26 disk compatibility (keeps the guest's protected files readable). `qemu/0003`: the desktop follows the VNC viewer's window size, and `resolution` works headless ("Resolution", below). `qemu/0004`-`0007`: macOS 27 ("macOS 27 updates", below) |
 | GPU library | [steelbrain/reims-vgpu](https://github.com/steelbrain/reims-vgpu) `1fe0acb6` | `reims-vgpu/0001`: dma-buf imports instead of host pointers, memfd-backed own allocations, 10-bit extended-range formats off, unsupported pipelines answered as NSErrors. Each change has an environment switch |
-| Shader translator | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) `219f0136` | `metal2vulkan/0001`: an importer that works without `VK_EXT_external_memory_host` |
+| Shader translator | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) `219f0136` | `metal2vulkan/0001`: an importer that works without `VK_EXT_external_memory_host`. `metal2vulkan/0002`: a cubic sampler in an argument buffer filters bilinearly instead of refusing the draw (the iOS Simulator needs it; `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0` refuses again) |
 | Vulkan driver | Mesa (Honeykrisp) 26.2.6 (the tested version), plus aquarat's `patches/mesa/0001-0002` | `mesa/0003`: exposes `VK_EXT_fragment_shader_interlock`, which macOS's framebuffer-fetch shaders need |
 
 ## Build (about 40 minutes)

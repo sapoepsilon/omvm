@@ -5,6 +5,36 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **The iOS Simulator runs in `macos27`.** Xcode 27.2 (27B52) was already in
+  the guest; `sudo xcodebuild -runFirstLaunch` and `xcodebuild -downloadPlatform iOS`
+  (no Apple ID, ~8.3 GB at 10-20 MB/s over Wi-Fi) installed the iOS 27.2
+  runtime (24B8117). Metal in the guest is "Apple Paravirtual device"
+  (families apple1-5 and mac2, no apple7/metal3); a swiftc compute + render
+  test gave exact results. `simctl boot` of iPhone 17 took 38 s cold, 11 s
+  warm; the home screen, Settings and a SwiftUI test app (built with
+  `xcrun -sdk iphonesimulator swiftc`, ad-hoc signed, `simctl install`) render
+  correctly, and Xcode 27's Simulator window (now `Device Hub.app`,
+  `Xcode.app/Contents/Applications/DeviceHub.app`) shows the device live.
+  - Before the fix, the first `simctl io screenshot`, app launch or Device
+    Hub frame killed QEMU: `reims-vgpu: fatal: platform call drawPrimitives...
+    the bind state was refused: Unsupported(SamplerBicubicFilter)`. A
+    diagnostic build traced it to `bind/heap.rs`: a cubic sampler in an
+    argument buffer beside a fragment stage, which metal2vulkan refuses.
+    `patches/graphics/metal2vulkan/0002` holds such a sampler as a linear
+    VkSampler (a logged degrade, `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0`
+    restores the refusal); reims rebuilt (`cargo xtask dist`, ~10 min
+    incremental) and `build/qemu-sb-bdifw` relinked. Only macos27's QEMU
+    links it; the `macos` VM's `qemu-sb` binary was not relinked.
+  - Speed: CADisplayLink in the app reports 60 Hz, but a serialized Metal
+    command buffer round trip is ~85 ms (11.8 full-screen 1206x2622 passes/s
+    waited one by one, 672/s pipelined), and `simctl io recordVideo` caught
+    37 frames in 10.8 s. Usable for UI checks and tests, not smooth.
+  - Something else on the host restarted macos27 within ~30 s after each
+    crash (not `on_crash`, which is `destroy`).
+  - Backups: VM dir `~/vm-artifacts/vms/macos27.pre-iossim-20261109/`
+    (reflinks, before the runtime install); the old `libreims_vgpu.a` and
+    `qemu-system-aarch64` in `~/vm-artifacts/rollback-iossim-20261109/`.
+
 - **`macos27` has sound, and `omvm virt` makes macOS 27 domains.** QEMU
   3a14b4eadb on `sb-kvm-bdif-write` (exported as `patches/graphics/qemu/0007`)
   adds `x-ascending-capabilities` to `virtio-sound-pci` and moves the
