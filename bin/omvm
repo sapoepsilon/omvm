@@ -24,6 +24,8 @@
 #   omvm clip NAME [off]        share the text clipboard with the host (on with gui)
 #   omvm res NAME [WxH]         show or change the desktop size (or resize the viewer)
 #   omvm remote start|stop|...  control this laptop and its VMs from Moonlight
+#   omvm usb list|attach|detach|trust  hot-plug a host USB device (BUS-PORT, VID:PID or
+#                               name) into a running VM; trust pairs an attached iPhone
 set -euo pipefail
 
 VERSION=0.1.0
@@ -725,6 +727,181 @@ cmd_res() {
     ok "$n: asked for $2 (macOS switches in about a second; a VNC viewer with remote resize may change it back when its window resizes)"
 }
 
+# ---------------------------------------------------------------- usb passthrough
+# Hot-plugs a host USB device into a running libvirt VM (no restart): QEMU's monitor
+# `device_add usb-host` on the qemu-xhci the domain already has (libvirt-domain.py,
+# id omvm-usb). The device is matched by host bus + port, so it follows the
+# re-enumerations an iPhone does when the guest switches its configuration (new
+# device number, same port). The attachment lasts until detach, unplug or VM stop.
+# QEMU runs as this user (qemu:///session), so a udev rule gives the user the
+# device node. Docs: docs/usb.md.
+USB_RULE=/etc/udev/rules.d/70-omvm-usb.rules
+usb_host_devices() { # one line per host device (no hubs): BUS-PORT VID:PID SPEED PRODUCT
+    local d
+    for d in /sys/bus/usb/devices/[0-9]*-[0-9]*; do
+        [ -e "$d/idVendor" ] || continue
+        case "${d##*/}" in *:*) continue ;; esac
+        [ "$(cat "$d/bDeviceClass" 2>/dev/null)" = 09 ] && continue
+        printf '%s\t%s:%s\t%s\t%s\n' "${d##*/}" "$(cat "$d/idVendor")" "$(cat "$d/idProduct")" \
+            "$(cat "$d/speed" 2>/dev/null)M" "$(cat "$d/manufacturer" 2>/dev/null) $(cat "$d/product" 2>/dev/null)"
+    done
+}
+usb_resolve() { # BUS-PORT | VID:PID | name substring -> the one matching line
+    local id="$1" m
+    m="$(usb_host_devices | awk -F'\t' -v id="$id" '$1 == id')"
+    [ -n "$m" ] || m="$(usb_host_devices | awk -F'\t' -v id="${id,,}" '$2 == id')"
+    [ -n "$m" ] || m="$(usb_host_devices | awk -F'\t' -v id="${id,,}" 'index(tolower($4), id)')"
+    [ -n "$m" ] || die "no host USB device matches '$id' (omvm usb list)"
+    [ "$(wc -l <<<"$m")" = 1 ] || die "'$id' matches several devices, use BUS-PORT:"$'\n'"$m"
+    echo "$m"
+}
+usb_hmp() { "${VIRSH[@]}" qemu-monitor-command "$1" --hmp "$2" | tr -d '\r'; }
+usb_attached() { usb_hmp "$1" "info usb" | sed -n 's/.*ID: \(omvm-usb-[^ ,]*\).*/\1/p'; }  # VM -> device ids
+usb_rule() { # VID PID: the user owns the node; QEMU (this user) opens it in any session or mode
+    local line="SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"$1\", ATTR{idProduct}==\"$2\", OWNER=\"$(id -un)\", MODE=\"0660\""
+    grep -qxF "$line" "$USB_RULE" 2>/dev/null && return 0
+    { [ -s "$USB_RULE" ] || echo "# omvm usb: host devices passed to VMs (omvm usb attach)"; echo "$line"; } |
+        sudo -n tee -a "$USB_RULE" >/dev/null && sudo -n udevadm control --reload &&
+        sudo -n udevadm trigger --action=change --subsystem-match=usb --attr-match=idVendor="$1" --attr-match=idProduct="$2" &&
+        sudo -n udevadm settle || warn "no passwordless sudo: $USB_RULE not written (QEMU may not open the device)"
+}
+usb_guest() { # VM CMD...: run in the guest (its guest_user, its SSH port)
+    local n="$1" u="$GUEST_USER"; shift
+    [ -f "$IMAGES/vms/$n/guest_user" ] && u="$(cat "$IMAGES/vms/$n/guest_user")"
+    ssh "${ssh_opts[@]}" -o ConnectTimeout=10 -p "$(port_of "$n")" "$u@127.0.0.1" "$@"
+}
+usb_ios_state() { # VM -> per wired iOS device: PAIRING-STATE UDID MODEL IOS NAME (CoreDevice's view)
+    usb_guest "$1" 'python3 -I -' <<'EOF'
+import json, os, subprocess, tempfile
+fd, f = tempfile.mkstemp(suffix=".json"); os.close(fd)
+subprocess.run(["xcrun", "devicectl", "list", "devices", "--json-output", f], capture_output=True, timeout=90)
+try:
+    devs = json.load(open(f))["result"]["devices"]
+finally:
+    os.unlink(f)
+for x in devs:
+    c, p, h = x.get("connectionProperties", {}), x.get("deviceProperties", {}), x.get("hardwareProperties", {})
+    if h.get("reality") == "simulated" or c.get("transportType") != "wired":
+        continue
+    print("\t".join(str(v) for v in (c.get("pairingState", "?"), h.get("udid", "?"), h.get("productType", "?"),
+                                     p.get("osVersionNumber", "?"), p.get("name", "?"))))
+EOF
+}
+usb_alert() { # VM: one round of "tap Trust" noise: host sound + notification, guest speech
+    local env=(XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus")
+    env "${env[@]}" notify-send -u critical -t 6000 -a omvm "iPhone" "Unlock it and tap Trust" 2>/dev/null || true
+    env "${env[@]}" pw-play /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga 2>/dev/null ||
+        env "${env[@]}" paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga 2>/dev/null || printf '\a'
+    usb_guest "$1" 'say "Tap trust on your iPhone"' </dev/null >/dev/null 2>&1 &
+}
+usb_trust() { # VM [SECONDS]: ask the wired iPhone to pair, make noise until the owner taps Trust
+    local n="$1" limit="${2:-300}" st udid rest end vol
+    st="$(usb_ios_state "$n")" || die "can't ask $n's CoreDevice (omvm ssh $n)"
+    [ -n "$st" ] || die "no wired iOS device in $n yet (omvm usb attach iphone $n, then wait ~20 s)"
+    IFS=$'\t' read -r st udid rest <<<"$(head -1 <<<"$st")"
+    if [ "$st" = paired ]; then ok "paired: ${rest//$'\t'/ }"; return 0; fi
+    say "$n: ${rest//$'\t'/ } is $st: unlock the iPhone and tap Trust (enter its passcode)"
+    # devicectl's pair request is what puts "Trust This Computer?" on the phone; it waits for the tap.
+    usb_guest "$n" "nohup xcrun devicectl manage pair --device $udid >/tmp/omvm-pair.log 2>&1 &" </dev/null
+    vol="$(XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)"
+    restore_vol() {
+        [ -n "$vol" ] || return 0
+        XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk '{print $2}' <<<"$vol")"
+        case "$vol" in *MUTED*) XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 ;; esac
+    }
+    trap restore_vol EXIT
+    XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null || true
+    XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.9 2>/dev/null || true
+    end=$((SECONDS + limit))
+    while [ $SECONDS -lt $end ]; do
+        usb_alert "$n"
+        sleep 5
+        st="$(usb_ios_state "$n" | head -1 | cut -f1)"
+        [ "$st" = paired ] && break
+    done
+    restore_vol; trap - EXIT
+    if [ "$st" = paired ]; then
+        ok "trusted: ${rest//$'\t'/ } is paired with $n"
+    else
+        bad "still ${st:-gone} after ${limit}s; guest log: omvm ssh $n cat /tmp/omvm-pair.log"; return 1
+    fi
+}
+# An iPhone comes up in its charging mode (configuration 1). macOS asks it for its
+# preferred mode (vendor request 0x45) and switches it (0x52); a real Mac then sees
+# the phone drop off and come back in the new mode. Passed through, the host never
+# sees that drop: the phone answers every request with EPROTO and stays in
+# configuration 1. A host-side reset (usbreset) re-enumerates it; it comes back in
+# the new mode, QEMU follows it by port, and macOS sets configuration 6. The watcher
+# does that while the device is attached, at most once a minute, three times.
+usb_watch() { # BUS-PORT VM
+    local bp="$1" n="$2" stuck=0 last=0 tries=0 cfg
+    while [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = running ] &&
+          grep -qx "omvm-usb-$bp" <<<"$(usb_attached "$n")"; do
+        cfg="$(cat "/sys/bus/usb/devices/$bp/bConfigurationValue" 2>/dev/null)"
+        if [ "$cfg" = 1 ]; then stuck=$((stuck + 3)); else stuck=0; fi
+        if [ $stuck -ge 12 ] && [ $((SECONDS - last)) -ge 60 ] && [ $tries -lt 3 ]; then
+            echo "$bp stuck in configuration 1 for ${stuck}s: usbreset"
+            sudo -n usbreset "$(cat "/sys/bus/usb/devices/$bp/busnum")/$(cat "/sys/bus/usb/devices/$bp/devnum")" || true
+            last=$SECONDS; tries=$((tries + 1)); stuck=0
+        fi
+        sleep 3
+    done
+    echo "$bp no longer attached to $n: watcher done"
+}
+cmd_usb() {
+    local verb="${1:-list}" n line bp vp id
+    case "$verb" in
+    list)
+        n="${2:-${OMVM_VM:-macos}}"
+        local att=""; [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = running ] && att="$(usb_attached "$n")"
+        usb_host_devices | while IFS=$'\t' read -r bp vp sp desc; do
+            printf '%-8s %s %7s  %-40s %s\n' "$bp" "$vp" "$sp" "$desc" \
+                "$(grep -qx "omvm-usb-$bp" <<<"$att" && echo "-> $n")"
+        done
+        [ -n "$(usb_host_devices)" ] || echo "(no USB devices on this host)"
+        for id in $att; do  # attached, but gone from the host (unplugged or re-enumerating)
+            [ -e "/sys/bus/usb/devices/${id#omvm-usb-}/idVendor" ] || echo "${id#omvm-usb-}  (not on the host now) -> $n"
+        done ;;
+    attach|detach)
+        n="${3:-${OMVM_VM:-macos}}"
+        [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = running ] || die "VM '$n' is not running"
+        if [ "$verb" = detach ] && grep -qx "omvm-usb-${2:-}" <<<"$(usb_attached "$n")"; then
+            bp="$2"   # by BUS-PORT even when the device is already unplugged
+        else
+            line="$(usb_resolve "${2:?usage: omvm usb $verb BUS-PORT|VID:PID|NAME [VM]}")"
+            IFS=$'\t' read -r bp vp _ _ <<<"$line"
+        fi
+        id="omvm-usb-$bp"
+        if [ "$verb" = detach ]; then
+            grep -qx "$id" <<<"$(usb_attached "$n")" || { ok "$bp is not attached to $n"; return 0; }
+            systemctl --user stop "omvm-usb-watch-$n-$bp" 2>/dev/null || true
+            usb_hmp "$n" "device_del $id" >/dev/null; ok "detached $bp from $n"; return 0
+        fi
+        grep -qx "$id" <<<"$(usb_attached "$n")" && { ok "$bp is already attached to $n"; return 0; }
+        usb_hmp "$n" "info qtree" | grep -q 'id "omvm-usb"' ||
+            die "$n has no omvm-usb controller (domains from libvirt-domain.py have one: omvm virt $n)"
+        usb_rule "${vp%%:*}" "${vp##*:}"
+        # Apple devices: no guest-driven port reset (QEMU's libusb_reset_device makes
+        # the iPhone drop back to its charging mode); the watcher below handles the
+        # re-enumeration macOS needs instead.
+        local extra=""; [ "${vp%%:*}" = 05ac ] && extra=",guest-reset=off"
+        local out; out="$(usb_hmp "$n" "device_add usb-host,id=$id,bus=omvm-usb.0,hostbus=${bp%%-*},hostport=${bp#*-}$extra")"
+        [ -z "$(tr -d '[:space:]' <<<"$out")" ] || die "device_add: $out"
+        for _ in $(seq 1 10); do usb_hmp "$n" "info usb" | grep -q "ID: $id" && break; sleep 1; done
+        usb_hmp "$n" "info usb" | grep "ID: $id" || die "QEMU did not attach $bp (journal/QEMU log: ~/.cache/libvirt/qemu/log/$n.log)"
+        ok "attached $bp ($vp) to $n"
+        if [ "${vp%%:*}" = 05ac ]; then
+            systemctl --user stop "omvm-usb-watch-$n-$bp" 2>/dev/null || true
+            systemd-run --user --quiet --collect --unit "omvm-usb-watch-$n-$bp" \
+                "$(readlink -f "$0")" usb watch "$bp" "$n" && ok "watching $bp (journalctl --user -u omvm-usb-watch-$n-$bp)"
+        fi
+        case "$vp" in 05ac:12[ab]?) say "iPhone/iPad: run 'omvm usb trust $n' to pair it (tap Trust on the phone)" ;; esac ;;
+    trust) usb_trust "${2:-${OMVM_VM:-macos}}" "${3:-300}" ;;
+    watch) usb_watch "${2:?BUS-PORT}" "${3:-${OMVM_VM:-macos}}" ;;
+    *) die "usage: omvm usb list [VM] | attach|detach BUS-PORT|VID:PID|NAME [VM] | trust [VM] [SECONDS]" ;;
+    esac
+}
+
 cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
 cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
 
@@ -747,6 +924,7 @@ remote) shift; exec "$SHARE/stream-host.sh" "$@" ;;
 virt) shift; cmd_virt "$@" ;;
 mode) shift; cmd_mode "$@" ;;
 perf) shift; cmd_perf "$@" ;;
+usb) shift; cmd_usb "$@" ;;
 show) shift; cmd_show "$@" ;;
 virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1"; governor_start "$1" ;; stopped) clip_stop "$1"; governor_stop "$1" ;; esac ;;
 ssh) shift; cmd_ssh "$@" ;;

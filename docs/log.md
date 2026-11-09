@@ -5,6 +5,31 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`omvm usb list|attach|detach|trust`: hot-plug host USB devices into a running VM
+  (docs/usb.md); an iPhone reaches the `macos` guest and pairs.** `attach` runs
+  `device_add usb-host,...,hostbus=B,hostport=P` on the domain's existing `qemu-xhci`
+  (`omvm-usb`) over `virsh qemu-monitor-command --hmp`: no restart, port-based so the
+  phone's re-enumerations are followed, plus a udev rule
+  (`/etc/udev/rules.d/70-omvm-usb.rules`, OWNER=user) so session QEMU can open it.
+  iPhone 17 Pro (iOS 27.2, 05ac:12a8, 10 Gb/s on the host, 5 Gb/s in the guest):
+  macOS 27.2 lists it in `system_profiler SPUSBHostDataType` and `ioreg`, sets
+  configuration 6 (PTP, usbmux, Apple USB Ethernet, two NCM), and `devicectl list
+  devices` showed it `available`, `pairingState: unpaired`. `omvm usb trust` started
+  `devicectl manage pair` (the Trust prompt) with host alarm + notification + guest
+  `say` every 5 s; the owner tapped Trust within 20 s and the state went `paired`.
+  Found on the way: macOS switches the phone's USB mode (vendor requests 0x45/0x52)
+  and expects it to drop off and come back; passed through, the host never sees the
+  drop and the phone answers every request with EPROTO (usbmon -71) in configuration
+  1. A host `usbreset` re-enumerates it in the new mode; `attach` now starts a
+  watcher unit (`omvm-usb-watch-VM-BUS-PORT`) that does that when it sits in
+  configuration 1 for 12 s (max once a minute, 3 times). Apple devices are attached
+  with `guest-reset=off`. Open: after pairing the phone stayed `unavailable` in
+  devicectl (no reply on the restricted NCM link `anri0`, `remoted` connect timeouts,
+  `usbmuxd` "device connected" but an empty device list); a second `usbreset` a
+  minute after a good one left the phone off the bus (USB 2 fallback, -71), which
+  needs a physical replug. During the test `macos` crashed once on a reims-vgpu
+  fatal from the FCP export (not USB; agent-notes.log).
+
 - **Final Cut Pro in `macos`: runs, but stops at the Creator Studio paywall; one GPU
   gap kills the VM.** Apple dropped the 90-day FCP trial (apple.com/final-cut-pro/trial
   301s to /final-cut-pro/, "Try it free" is the App Store's Creator Studio, which needs
