@@ -22,6 +22,8 @@ aux, disk = f"{vmdir}/aux.img.trimmed", f"{vmdir}/disk.img"
 # Stable libvirt UUID per VM name.
 dom_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"omvm:{name}")
 mac = "52:54:00:%02x:%02x:%02x" % tuple(dom_uuid.bytes[:3])
+xdg = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+AUDIODEV = f"pipewire,id=snd0,out.stream-name={name},in.stream-name={name}"
 
 args = [
     "-machine", f"uuid={ecid},aux-ram-share=on",
@@ -39,8 +41,11 @@ args = [
     "-device", "qemu-xhci,id=omvm-usb",
     "-device", "usb-kbd,bus=omvm-usb.0",
     "-device", "usb-vmapple-tablet,bus=omvm-usb.0",
-    "-audiodev", "none,id=snd0",
-    "-device", "virtio-sound-pci,audiodev=snd0,streams=1",
+    # Sound: virtio-snd (macOS's AppleVirtIOSound, "Apple Virtual Sound Device")
+    # on the host's PipeWire. Stream 0 is output (the guest's speakers), stream 1
+    # input (its microphone, the host's default source).
+    "-audiodev", AUDIODEV,
+    "-device", "virtio-sound-pci,audiodev=snd0,streams=2",
 ]
 env = {
     "VK_DRIVER_FILES": icd,
@@ -48,6 +53,7 @@ env = {
     "REIMS_VGPU_MAX_REFRESH_HZ": "60",
     "REIMS_VGPU_DRAW_LOG_PATH": "off",
     "TMPDIR": f"{home}/.cache/reims-vgpu",
+    "XDG_RUNTIME_DIR": xdg,   # the user's PipeWire socket, for sound
 }
 x = lambda s: quoteattr(str(s))
 print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>

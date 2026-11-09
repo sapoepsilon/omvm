@@ -57,12 +57,25 @@ Xcode 27.2
   VM state and power, local/remote mode, resolution, Moonlight hosts and pairing, and a
   log of every command it runs. `omvm-gui --install` adds "macOS VM" to the app launcher
   (needs `python-gobject gtk4 libadwaita`; the CLI works without them).
-- **Keyboard:** `share/hypr-macos-vm.lua` makes Hyprland pass every key, Super = Cmd
-  included, to a focused VNC viewer (Ctrl+Alt+Esc releases).
+- **Switching:** `share/hypr-macos-vm.lua` (append it to `~/.config/hypr/bindings.lua`)
+  adds keys that work in both modes, even while the VM has the keyboard captured:
+
+  | Keys | What it does |
+  |---|---|
+  | Ctrl+Alt+M | macOS ⇄ Omarchy: from the VM back to the window you came from; from anywhere else to the VM (`omvm show`: its window, or a VNC viewer in remote mode, starting the VM if it is off) |
+  | Ctrl+Alt+1 … 5 | leave the VM for Omarchy workspace 1 … 5 |
+  | Ctrl+Alt+Super | (local mode window) release the mouse and keyboard, stay on the VM |
+  | Ctrl+Alt+Esc | (VNC viewer) give the keys back to Hyprland, stay on the VM |
+
+  "macOS" in the app launcher (`share/omvm-macos.desktop`, copy it to
+  `~/.local/share/applications/`) runs `omvm show` too.
+- **Keyboard:** the same file makes Hyprland pass every key, Super = Cmd included, to a
+  focused VNC viewer; the local-mode window captures keys itself after a click.
+- **Sound:** the guest has a virtio-snd card ("Apple Virtual Sound Device") on the host's
+  PipeWire: macOS output plays through the laptop's speakers (a stream named after the VM),
+  and its input records from the host's default microphone.
 - **Apple Account sign-in** is not expected to work: the guest has no Secure Enclave
   identity. See docs for what Xcode can do without it.
-
-**Not yet:** audio.
 
 ## Requirements
 

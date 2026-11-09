@@ -5,6 +5,48 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- **Switching keys** (`share/hypr-macos-vm.lua`, installed into
+  `~/.config/hypr/bindings.lua`): Ctrl+Alt+M toggles macOS ⇄ Omarchy (from the VM
+  to the most recently focused other window, by Hyprland's focus history; from
+  anywhere else to the VM's window or VNC viewer, else `omvm show`);
+  Ctrl+Alt+1..5 leave the VM for workspace N. Lua bind options
+  `dont_inhibit = true` (the old `p` flag: past reims-vgpu's
+  keyboard-shortcuts-inhibitor, which SDL takes while input is captured) and
+  `submap_universal = true` (past the VNC "macos-vm" submap). Verified with
+  ydotool in local mode, uncaptured and captured: Ctrl+Alt+M and Ctrl+Alt+1 left
+  the captured window and capture was released. Remote mode not exercised live.
+  On this host keyd maps Caps Lock (hold) to Control and turns the physical left
+  Control off, so Ctrl here is Caps Lock. wtype input does not trigger Hyprland
+  binds; ydotool through keyd does. Never synthesize Ctrl+Alt+F-keys: they
+  switch VTs (one test did; `sudo chvt 1` brought the session back).
+- **`omvm show [NAME]`** and launcher entry "macOS" (`share/omvm-macos.desktop`,
+  copied to `~/.local/share/applications/`): start the VM if it is off, then
+  focus reims-vgpu's window (local) or a VNC viewer, opening
+  `vncviewer -Shared=1 127.0.0.1:PORT` if none (remote).
+- **Guest sound**: virtio-snd moved from `-audiodev none` (output only) to
+  `-audiodev pipewire,id=snd0,out.stream-name=macos,in.stream-name=macos` with
+  `streams=2`, and `XDG_RUNTIME_DIR` is now kept in both modes so QEMU finds the
+  user's PipeWire. `libvirt-domain.py` writes it; `libvirt-mode.py` upgrades older
+  definitions on every mode switch (and on its own: `libvirt-mode.py sound`); the
+  remote backups in `~/Work/omvm-backups/` were upgraded too (originals:
+  `*.pre-sound.xml`). Guest after a restart: "Apple Virtual Sound Device" with
+  2 output and 2 input channels. `afplay Ping.aiff` in the guest showed up as a
+  running `qemu-system-aarch64` stream (44.1 kHz) into `audio_effect.j314-convolver`
+  → `RawSpeakers`; a guest AVAudioEngine capture opened a `qemu-system-aarch64`
+  input stream linked from `omarchy_asahi_mic` but read zeros over SSH (TCC
+  microphone permission, which a headless SSH process does not have; the first
+  GUI app that records will prompt). Both streams close when the guest stops.
+- **Host sound** was not broken: speakers (asahi convolver → RawSpeakers,
+  speakersafetyd running) verified by playing a 660 Hz tone and finding it in a
+  recording from the built-in mic.
+- **"Process crashed: mpv"**: Omarchy's screen-recording webcam overlay
+  (`omarchy-capture-screenrecording --with-webcam`, mpv on `av://v4l2:/dev/video1`)
+  segfaulted every time the overlay closed: FFmpeg's v4l2 input hands out frames
+  that point into the camera's mmap buffers, the device unmaps them on close
+  while mpv's VO still uploads the last frame (crash in `pl_tex_upload`, on Vulkan
+  and on OpenGL alike). Fix in `~/.config/mpv/mpv.conf`: an auto profile for
+  `av://v4l2:` paths that appends `vf=lavfi=[copy]`. Reproduced 2/2 before,
+  0/2 after.
 - **`omvm-gui`** (new, optional): a GTK4 + libadwaita window (`bin/omvm-gui`,
   PyGObject; `sudo pacman -S --needed python-gobject gtk4 libadwaita`) that only
   shells out to `omvm`, `virsh -c qemu:///session`, `systemctl --user`, `hyprctl`,

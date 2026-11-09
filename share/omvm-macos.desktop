@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=macOS
+Comment=Switch to the macOS VM (its window, or a VNC viewer in remote mode); Ctrl+Alt+M switches back
+Exec=omvm show
+Icon=computer
+Terminal=false
+Categories=System;Emulator;
+Keywords=omvm;macOS;VM;switch;

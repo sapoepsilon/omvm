@@ -5,6 +5,7 @@
     libvirt-mode.py get   < domain.xml            prints local or remote
     libvirt-mode.py local RES REFRESH WAYLAND_DISPLAY XDG_RUNTIME_DIR ICD [STATS] < domain.xml > new.xml
     libvirt-mode.py remote < domain.xml > new.xml
+    libvirt-mode.py sound < domain.xml > new.xml   (only the sound upgrade below)
 
 remote: QEMU's VNC server (libvirt <graphics type='vnc'>, 127.0.0.1, autoport)
         with reims-vgpu headless (REIMS_VGPU_WINDOW=0); Sunshine/Moonlight and
@@ -15,6 +16,11 @@ local:  no <graphics> (libvirt passes -display none), and reims-vgpu opens its
         property (WxH@PPI, or host). ICD is a Vulkan driver with Wayland WSI
         (the remote one, built with -Dplatforms=, has none); the remote ICD is
         kept in OMVM_REMOTE_VK_DRIVER_FILES and put back by remote.
+
+Both modes (and `sound`) also upgrade the sound card of a domain defined before
+2026-11-08 (virtio-snd on a discarding 'none' backend, output only) to the
+user's PipeWire with output and input, and keep XDG_RUNTIME_DIR in both modes
+so QEMU finds PipeWire's socket.
 
 Only what one mode adds is touched, so local -> remote gives back the domain
 `omvm virt` made (libvirt normalises the rest).
@@ -29,7 +35,7 @@ ET.register_namespace("omvm", OMVM_NS)
 Q = "{%s}" % QEMU_NS
 # Environment that local mode adds (and remote mode removes).
 LOCAL_ENV = ("REIMS_VGPU_WINDOW_REFRESH", "REIMS_VGPU_WINDOW_BORDERLESS",
-             "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "REIMS_VGPU_STATS")
+             "WAYLAND_DISPLAY", "REIMS_VGPU_STATS")
 RES_PREFIX = "apple-gfx-mmio.resolution="
 SAVED_ICD = "OMVM_REMOTE_VK_DRIVER_FILES"
 
@@ -85,6 +91,20 @@ def add_arg_pair(c, flag, value):
         c.insert(idx + off, el)
 
 
+def upgrade_sound(dom, c):
+    """virtio-snd on PipeWire, output + input (see libvirt-domain.py)."""
+    import os
+    name = dom.findtext("name") or "macos"
+    for a in c.findall(Q + "arg"):
+        v = a.get("value", "")
+        if v.startswith("none,id=snd0"):
+            a.set("value", "pipewire,id=snd0,out.stream-name=%s,in.stream-name=%s" % (name, name))
+        elif v.startswith("virtio-sound-pci,") and "streams=1" in v:
+            a.set("value", v.replace("streams=1", "streams=2"))
+    if get_env(c, "XDG_RUNTIME_DIR") is None:
+        set_env(c, "XDG_RUNTIME_DIR", os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()))
+
+
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "get"
     dom = ET.fromstring(sys.stdin.read())
@@ -93,6 +113,10 @@ def main():
         return
     devices = dom.find("devices")
     c = cmdline(dom)
+    upgrade_sound(dom, c)
+    if what == "sound":
+        write(dom)
+        return
     for g in devices.findall("graphics"):
         devices.remove(g)
     drop_resolution(c)
@@ -123,7 +147,11 @@ def main():
         devices.insert(list(devices).index(emu) + 1 if emu is not None else 0, g)
         set_env(c, "REIMS_VGPU_WINDOW", "0")
     else:
-        sys.exit("usage: libvirt-mode.py get | local RES REFRESH WAYLAND_DISPLAY XDG_RUNTIME_DIR ICD [STATS] | remote")
+        sys.exit("usage: libvirt-mode.py get | local RES REFRESH WAYLAND_DISPLAY XDG_RUNTIME_DIR ICD [STATS] | remote | sound")
+    write(dom)
+
+
+def write(dom):
     out = ET.tostring(dom, encoding="unicode")
     # ElementTree prefixes omvm's metadata (omvm:omvm); give it back its default
     # namespace, as `omvm virt` wrote it, so a round trip leaves the XML as it was
