@@ -5,6 +5,11 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- Mesa `agx-16bit-flat-varyings` now credits aquarat: the change is byte-identical
+  to his `patches/mesa/0001` + `0002` (apple-macos-arm64-vm-guest 9b62919, 636da1e;
+  MIT). Message-only amend (tree unchanged) adds a body line and
+  `Co-developed-by: Aaron Scheiner <blue@aquarat.co.uk>`; 2b37de4b -> 64c25aa0,
+  force-pushed to github.com/sapoepsilon/mesa. Hash references updated.
 - **LICENSING.md** added (linked from the README's Legal section): omvm is
   GPL-2.0-or-later; the PAC kernel patch is steelbrain's unlicensed work and is
   fetched from aquarat's repo at build time, not included (steelbrain#1); each
@@ -33,7 +38,7 @@ host it runs on). Newest first. Agents: append an entry after each change.
 - Mesa branches published on GitHub while the gitlab.freedesktop.org account
   awaits verification: https://github.com/sapoepsilon/mesa (no official GitHub mirror exists, so not a fork;
   full history pushed from `~/src/mesa-upstream-mr`, remote `gh`).
-  `hk-fragment-shader-interlock` a3561cde, `agx-16bit-flat-varyings` 2b37de4b;
+  `hk-fragment-shader-interlock` a3561cde, `agx-16bit-flat-varyings` 64c25aa0;
   compare against upstream main: `https://github.com/sapoepsilon/mesa/compare/1f935e49...<branch>`.
 - **`omvm start|stop|restart|pause|resume NAME`** for libvirt VMs (`bin/omvm`,
   `cmd_power`; `omvm start NAME IMAGE` / `omvm stop NAME` of a throwaway run are
@@ -153,7 +158,7 @@ host it runs on). Newest first. Agents: append an entry after each change.
   (force-pushed); the old history is on `backup/pre-coauthor-strip-20261108`.
 - Mesa upstreaming: branches in `~/src/mesa-upstream-mr` (worktree off
   `~/src/mesa-honeykrisp-sb`, on upstream `main`): `hk-fragment-shader-interlock`
-  a3561cde and `agx-16bit-flat-varyings` 2b37de4b. VK-GL-CTS
+  a3561cde and `agx-16bit-flat-varyings` 64c25aa0. VK-GL-CTS
   `dEQP-VK.fragment_shader_interlock.*` (576 cases): Pass 128, Fail 64,
   NotSupported 384 (without the patch: NotSupported 576). The 64 failures are
   MSAA 4x pixel-interlock cases, still open. Waiting on a

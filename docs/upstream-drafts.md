@@ -119,8 +119,12 @@ covering different samples of one pixel are not ordered. Options: expose
 sample interlock (passes) and fix or restrict pixel interlock under MSAA
 before submitting.
 
-#### MR 2: `agx-16bit-flat-varyings` (2b37de4b9864)
+#### MR 2: `agx-16bit-flat-varyings` (64c25aa0ac5a)
 **Title:** agx: fix 16-bit flat varyings
+
+The code is aquarat's (`patches/mesa/0001` + `0002` in
+apple-macos-arm64-vm-guest, applied unchanged); the commit credits him with
+`Co-developed-by: Aaron Scheiner <blue@aquarat.co.uk>`.
 
 > 16-bit varyings (e.g. SPIR-V Float16 outputs/inputs) reached `st_vary` as
 > 16-bit values and 16-bit flat loads returned a 32-bit def, which aborted
