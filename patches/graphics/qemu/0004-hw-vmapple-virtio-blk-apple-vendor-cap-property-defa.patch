@@ -1,0 +1,105 @@
+From 07279a4a8e0d596010eaf6e9fbf68ef0826d3e52 Mon Sep 17 00:00:00 2001
+From: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 09:23:17 -0700
+Subject: [PATCH] hw/vmapple/virtio-blk: apple-vendor-cap property (default
+ off) instead of dropping the macOS 27 vendor capability
+
+---
+ hw/vmapple/virtio-blk.c | 46 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/hw/vmapple/virtio-blk.c b/hw/vmapple/virtio-blk.c
+index 9de9aaae0b..526cc6534c 100644
+--- a/hw/vmapple/virtio-blk.c
++++ b/hw/vmapple/virtio-blk.c
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "hw/pci/pci.h"
+ #include "hw/vmapple/vmapple.h"
+ #include "hw/virtio/virtio-blk.h"
+ #include "hw/virtio/virtio-pci.h"
+@@ -44,6 +45,8 @@ typedef struct VMAppleVirtIOBlk {
+ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleVirtIOBlkPCI, VMAPPLE_VIRTIO_BLK_PCI)
+ 
+ #define VIRTIO_BLK_T_APPLE_BARRIER     0x10000
++#define VMAPPLE_PCI_VNDR_SIZE 14
++#define VMAPPLE_PCI_VNDR_DISABLE_ENCRYPTION 1
+ 
+ static bool vmapple_virtio_blk_handle_unknown_request(VirtIOBlockReq *req,
+                                                       MultiReqBuffer *mrb,
+@@ -107,6 +110,7 @@ struct VMAppleVirtIOBlkPCI {
+ 
+     VMAppleVirtIOBlk vdev;
+     VMAppleVirtioBlkVariant variant;
++    bool apple_vendor_cap;
+ };
+ 
+ static const Property vmapple_virtio_blk_pci_properties[] = {
+@@ -117,6 +121,9 @@ static const Property vmapple_virtio_blk_pci_properties[] = {
+                        DEV_NVECTORS_UNSPECIFIED),
+     DEFINE_PROP_VMAPPLE_VIRTIO_BLK_VARIANT("variant", VMAppleVirtIOBlkPCI, variant,
+                                            VM_APPLE_VIRTIO_BLK_VARIANT_UNSPECIFIED),
++    /* Off: macOS 26 images made without it keep their data-protected files
++     * readable. On: what macOS 27 (Golden Gate) guests expect. */
++    DEFINE_PROP_BOOL("apple-vendor-cap", VMAppleVirtIOBlkPCI, apple_vendor_cap, false),
+ };
+ 
+ static void vmapple_virtio_blk_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
+@@ -125,6 +132,10 @@ static void vmapple_virtio_blk_pci_realize(VirtIOPCIProxy *vpci_dev, Error **err
+     VMAppleVirtIOBlkPCI *dev = VMAPPLE_VIRTIO_BLK_PCI(vpci_dev);
+     DeviceState *vdev = DEVICE(&dev->vdev);
+     VirtIOBlkConf *conf = &dev->vdev.parent_obj.conf;
++    int offset;
++    uint8_t capabilities[PCI_CONFIG_SPACE_SIZE] = { 0 };
++    uint8_t *config = vpci_dev->pci_dev.config;
++    int previous = PCI_CAPABILITY_LIST;
+ 
+     if (dev->variant == VM_APPLE_VIRTIO_BLK_VARIANT_UNSPECIFIED) {
+         error_setg(errp, "vmapple virtio block device variant unspecified");
+@@ -162,6 +173,41 @@ static void vmapple_virtio_blk_pci_realize(VirtIOPCIProxy *vpci_dev, Error **err
+     pci_config_set_vendor_id(vpci_dev->pci_dev.config, PCI_VENDOR_ID_APPLE);
+     pci_config_set_device_id(vpci_dev->pci_dev.config,
+                              PCI_DEVICE_ID_APPLE_VIRTIO_BLK);
++    if (!dev->apple_vendor_cap) {
++        return;
++    }
++    pci_set_word(vpci_dev->pci_dev.config + PCI_SUBSYSTEM_ID, 0x1100);
++
++    /* A non-FileVault Golden Gate root disk requires Apple's vendor
++     * capability to advertise that transport encryption is disabled. */
++    offset = pci_add_capability(&vpci_dev->pci_dev, PCI_CAP_ID_VNDR, 0,
++                                VMAPPLE_PCI_VNDR_SIZE, errp);
++    if (offset < 0) {
++        return;
++    }
++    pci_set_byte(vpci_dev->pci_dev.config + offset + 2,
++                 VMAPPLE_PCI_VNDR_SIZE);
++    pci_set_byte(vpci_dev->pci_dev.config + offset + 3, 9);
++    pci_set_word(vpci_dev->pci_dev.config + offset + 4, PCI_VENDOR_ID_APPLE);
++    pci_set_byte(vpci_dev->pci_dev.config + offset + 6,
++                 VMAPPLE_PCI_VNDR_DISABLE_ENCRYPTION);
++
++    /* Golden Gate's cached capability lookup and its fallback disagree on
++     * descending lists: the storage probe alternates between the final
++     * vendor capability and VIRTIO_PCI_CAP_PCI_CFG forever. Keep the same
++     * capabilities and offsets, but enumerate them in address order. */
++    for (offset = config[PCI_CAPABILITY_LIST]; offset;
++         offset = config[offset + PCI_CAP_LIST_NEXT]) {
++        capabilities[offset] = 1;
++    }
++    for (offset = PCI_CONFIG_HEADER_SIZE; offset < PCI_CONFIG_SPACE_SIZE;
++         offset++) {
++        if (capabilities[offset]) {
++            config[previous] = offset;
++            previous = offset + PCI_CAP_LIST_NEXT;
++        }
++    }
++    config[previous] = 0;
+ }
+ 
+ static void vmapple_virtio_blk_pci_class_init(ObjectClass *klass,
+-- 
+2.56.0
+

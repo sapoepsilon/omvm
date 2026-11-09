@@ -3,6 +3,97 @@
 A running, dated log of changes to this setup (the omvm repo and the Omarchy
 host it runs on). Newest first. Agents: append an entry after each change.
 
+## 2026-11-09
+
+- **`macos27` is on macOS 27.2.1 (26B131)** and boots to the desktop
+  (autologin `aquarat`, Setup Assistant done: Apple Account skipped, no
+  FileVault, updates download-only). Two more QEMU fixes on top of the bdif
+  write fix below, now committed on `sb-kvm-bdif-write` in
+  `build/qemu-sb-bdifw/src` and exported as `patches/graphics/qemu/0005`
+  (bdif writes, f7865b7924) and `0006` (`ascending-capabilities`,
+  3b875bb399); `0004` (`apple-vendor-cap`, 07279a4a8e) is committed with
+  them because `0006` builds on it.
+  - The earlier iBEC panic (`99180f7bfe1a22b:991`) did not come back.
+    Disassembly of the 27.2 iBoot (`Firmware/all_flash/iBoot.vma2.RELEASE.im4p`,
+    linked at 0x7006c000) shows it: the boot-args builder panics when the
+    boot type stage 1 handed over is 7 (iBEC) and boot-args lack `rd=`, i.e.
+    the upgrade command booted a kernel without its update ramdisk. On the
+    27.2.1 attempt a gdbstub breakpoint (`gdbserver` over HMP + `hbreak`)
+    showed boot-args `rd=md0 -progress -restore` and no panic.
+  - The update ramdisk then hung: all CPUs in the 27 kernel, zero aux/root
+    I/O for minutes. Cause: macOS 27's virtio transport needs the PCI
+    capability list in address order. `apple-vendor-cap=on` fixed the probe
+    but, powered off mid-ramdisk, iBoot fell back to 26.4, which then lost
+    its data-protected files (ssh key auth failed) because the vendor cap
+    also disables transport encryption. Disk and aux were restored from the
+    pre-install reflink backup and `0006` adds `ascending-capabilities`
+    (reorder only). With it on both vmapple-virtio-blk devices plus
+    `x-ascending-capabilities=on` on virtio-net, 26.4 booted with its data
+    intact, `softwareupdate -i ... --stdinpass -R` applied 27.2.1 in about
+    5 minutes, and ssh/sudo work on 27.2.1. virtio-sound-pci was removed
+    from the domain (no reorder switch yet).
+  - HMP `sendkey` and VNC keys did not reach the 27.2.1 login window (the
+    mouse did); on the desktop the keyboard works. Autologin
+    (`/etc/kcpassword` + `autoLoginUser`) was set over ssh instead.
+  - Backups (reflinks): `~/vm-artifacts/vms/macos27.pre-ota2721-20261109/`
+    (26.4 with 27.2.1 downloaded); `disk.img`/`aux.img.trimmed`
+    `.failed-vcap-20261109` in the VM dir (the vendor-cap fallback, safe to
+    delete). Serial logs `logs/serial-20261109-{vcap,asc}.log`.
+  - The `macos` VM and `build/qemu-sb` are untouched. To roll out: `git am`
+    `0005` + `0006` onto `build/qemu-sb/src` (`0004` is already there),
+    `ninja`, then add `ascending-capabilities=on` to both vmapple-virtio-blk
+    devices and `x-ascending-capabilities=on` to virtio-net before updating a
+    guest to 27 (the new switches default off, so 26 guests are unchanged).
+
+- `macos27` boots again (macOS 26.4 25E246, login window), but the 27.2 OTA
+  did not apply. It was never an AVPBooter hang: with a serial console
+  (`-chardev file,...,path=~/vm-artifacts/vms/macos27/logs/serial-*.log`
+  `-serial chardev:omvmser0` as qemu:arg) the guest showed the OTA's
+  precommitted 27.2 iBootStage1 (mBoot-20457.41.3, `illb` at aux offset
+  0x220000) panicking in a reset loop (`iBoot Panic: 64383f188f1c630:234`,
+  54 resets in 30 s; PC in 0x7007xxxx-0x700bxxxx is iBoot, not the ROM).
+  Disassembly of the dumped iBoot (`pmemsave 0x70000000`) shows it bumps a
+  counter (3 -> 4) in the aux disk's `virt_pmu_sram` record (`UMPv`) before
+  it loads the next stage, and panics when the write fails. QEMU's vmapple
+  BDIF backdoor dropped every write (`/* Not needed, iBoot only reads */`).
+  Fix: a patched QEMU that implements BDIF writes and asks for write
+  permission on the backdoor's drives (without the permission it aborts on
+  `child->perm & BLK_PERM_WRITE`). Built separately so `macos` keeps its
+  binary: `build/qemu-sb-bdifw/` in apple-macos-arm64-vm-guest (reflink copy
+  of qemu-sb/src, branch `sb-kvm-bdif-write`, uncommitted; diff in
+  `build/qemu-sb-bdifw/bdif-write.patch`). With it the 27.2 iBootStage1
+  writes the counter, resets, then loads the 27.2 iBootStage2 ("Remote boot",
+  the upgrade iBEC), which panics too (`99180f7bfe1a22b:991`, iBoot's NVRAM
+  code); iBoot then falls back to the 26.4 chain and macOS 26.4 boots.
+  `boot-command` is now cleared (not settable from the guest: "not
+  permitted"); softwareupdate now offers 27.2.1 (26B131, 11 GB).
+  macos27 now runs the 27.2 host's AVPBooter
+  (`artifacts/firmware/AVPBooter.vmapple2.macos27.2-26B123.bin`, mBoot-20457.41.3,
+  sha256 c9c4fdb8…bec8a, copied from Virtualization.framework on uzi's Mac,
+  macOS 27.2 26B123) and the patched QEMU; with the boot chain back on
+  26.4 both AVPBooters boot it. Serial and `-d guest_errors,unimp`
+  (`logs/qemu-d-20261109.log`) stay on in macos27's domain. Backup of the
+  pre-change VM dir + both XMLs: `~/vm-artifacts/vms/macos27.pre-avpbooter-20261109/`
+  (reflinks). Next for 27.x: catch the iBEC panic (memory dump at the
+  panic, e.g. a second `-qmp` socket and a stop on "iBoot Panic" after
+  "Remote boot") on the next OTA attempt.
+
+- `macos27` (26.4 clone) hangs in AVPBooter after the macOS 27.2 OTA's own
+  apply-reboot. The OTA finished downloading ~09:55; the guest rebooted at
+  09:52:04 (aux.img.trimmed and disk.img mtimes) and never came back: CPU0
+  loops in firmware (PC around 0x100000 / 0x700a2xxx), CPUs 1-7 stay at PC=0,
+  zero I/O on both the aux and root virtio drives (`virsh qemu-monitor-command
+  macos27 --hmp "info blockstats"`; `domblkstat` is useless because the disks
+  come in via qemu:arg), VNC frame black. vmapple QEMU does not survive an
+  in-guest reboot, so a fresh process was tried: `virsh destroy macos27` +
+  `virsh start macos27` at 10:38 (the REIMS_VGPU_* / VK_DRIVER_FILES env lives
+  in the domain XML as qemu:env, so plain start reproduces the config). Result:
+  same hang. After 5 min: aux and root reads 0 bytes, CPU0 in firmware, other
+  CPUs never started, VNC shows "Guest has not initialized the display (yet).",
+  no ssh banner on 43757. Firmware is AVPBooter.vmapple2.mBoot-18000.161.10
+  (26-era); untested guess is that the 27.2 boot objects/policy staged in aux
+  need newer AVPBooter. Left running in that state; no retry, no reinstall.
+
 ## 2026-11-08
 
 - Mesa `agx-16bit-flat-varyings` now credits aquarat: the change is byte-identical

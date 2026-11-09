@@ -1,0 +1,129 @@
+From f7865b792484bb139e3836c57bfb6ef2ecfa10bc Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 13:09:40 -0700
+Subject: [PATCH 5/6] hw/vmapple/bdif: implement backdoor disk writes (macOS
+ 27.2 iBoot)
+
+macOS 27.2's iBootStage1 (mBoot-20457.41.3) writes through the vmapple
+backdoor disk interface: on an OTA's upgrade boot it bumps a counter in
+the aux disk's virt_pmu_sram record (magic "UMPv" at aux offset
+0x1000000) before it loads the next stage, and both 27.2 iBoot stages
+write the NVRAM banks at aux 0xa00000 and 0xa80000. QEMU dropped every
+write ("iBoot only reads"), so the 26.4 -> 27.2 upgrade boot panicked in
+a reset loop (iBoot Panic 64383f188f1c630:234).
+
+Handle VBLK_DATA_FLAGS_WRITE with blk_pwrite() and take BLK_PERM_WRITE
+on each writable backend at realize (without it blk_pwrite() aborts on
+the permission assertion). A read-only backend stays read-only and its
+writes are logged and fail. Adds a bdif_vblk_write trace event.
+---
+ hw/vmapple/bdif.c       | 59 ++++++++++++++++++++++++++++++++++++++++-
+ hw/vmapple/trace-events |  1 +
+ 2 files changed, 59 insertions(+), 1 deletion(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index c967cece5e..c83ffeeada 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -157,6 +157,7 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+     uint8_t ret = VBLK_RET_FAILED;
+     int r;
+     MemTxResult dma_result;
++    uint64_t perm, shared_perm;
+ 
+     dma_result = dma_memory_read(&address_space_memory, gp_addr,
+                                  &req, sizeof(req), MEMTXATTRS_UNSPECIFIED);
+@@ -202,7 +203,36 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+         }
+         break;
+     case VBLK_DATA_FLAGS_WRITE:
+-        /* Not needed, iBoot only reads */
++        /*
++         * macOS 27.2's iBootStage1 writes too: before it loads the next
++         * stage it updates a counter in the aux disk's virt_pmu_sram
++         * partition (seen on a 26.4 -> 27.2 OTA's upgrade boot), and it
++         * panics when the write fails.
++         */
++        dma_result = dma_memory_read(&address_space_memory, req.data.addr, buf,
++                                     req.data.len, MEMTXATTRS_UNSPECIFIED);
++        if (dma_result != MEMTX_OK) {
++            goto out;
++        }
++        blk_get_perm(blk, &perm, &shared_perm);
++        if (!(perm & BLK_PERM_WRITE)) {
++            qemu_log_mask(LOG_GUEST_ERROR,
++                          "bdif: %s is read-only, write at 0x%" PRIx64
++                          " dropped\n",
++                          devid == DEVID_AUX ? "aux" : "root", off);
++            goto out;
++        }
++        r = blk_pwrite(blk, off, req.data.len, buf, 0);
++        trace_bdif_vblk_write(devid == DEVID_AUX ? "aux" : "root",
++                              req.data.addr, off, req.data.len, r);
++        if (r < 0) {
++            qemu_log_mask(LOG_GUEST_ERROR,
++                          "bdif: %s write at 0x%" PRIx64 " len 0x%x failed: %d\n",
++                          devid == DEVID_AUX ? "aux" : "root", off,
++                          req.data.len, r);
++            goto out;
++        }
++        ret = VBLK_RET_SUCCESS;
+         break;
+     default:
+         break;
+@@ -258,6 +288,32 @@ static void bdif_init(Object *obj)
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
+ }
+ 
++/*
++ * iBoot writes through the backdoor since macOS 27.2, so ask for write
++ * permission on each writable backend (a read-only one stays read-only and
++ * its writes are dropped).
++ */
++static void bdif_allow_writes(BlockBackend *blk)
++{
++    uint64_t perm, shared_perm;
++
++    if (!blk || !blk_supports_write_perm(blk)) {
++        return;
++    }
++    blk_get_perm(blk, &perm, &shared_perm);
++    if (blk_set_perm(blk, perm | BLK_PERM_WRITE, shared_perm, NULL) < 0) {
++        qemu_log_mask(LOG_GUEST_ERROR, "bdif: no write permission\n");
++    }
++}
++
++static void bdif_realize(DeviceState *dev, Error **errp)
++{
++    VMAppleBdifState *s = VMAPPLE_BDIF(dev);
++
++    bdif_allow_writes(s->aux);
++    bdif_allow_writes(s->root);
++}
++
+ static const Property bdif_properties[] = {
+     DEFINE_PROP_DRIVE("aux", VMAppleBdifState, aux),
+     DEFINE_PROP_DRIVE("root", VMAppleBdifState, root),
+@@ -268,6 +324,7 @@ static void bdif_class_init(ObjectClass *klass, const void *data)
+     DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     dc->desc = "VMApple Backdoor Interface";
++    dc->realize = bdif_realize;
+     device_class_set_props(dc, bdif_properties);
+ }
+ 
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 3458922304..afab9ac04b 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -19,6 +19,7 @@ aes_dump_data(const char *desc, const char *hex) "%s%s"
+ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
++bdif_vblk_write(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
+ 
+ # avp-rtc.c
+ avp_rtc_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=%u value=0x%"PRIx64
+-- 
+2.56.0
+

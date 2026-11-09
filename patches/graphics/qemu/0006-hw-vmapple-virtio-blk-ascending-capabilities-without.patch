@@ -1,0 +1,98 @@
+From 3b875bb3990c91b530209d2e3d45944139a62c76 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 13:09:40 -0700
+Subject: [PATCH 6/6] hw/vmapple/virtio-blk: ascending-capabilities without the
+ vendor capability
+
+macOS 27's virtio PCI transport loops forever on QEMU's descending
+capability list (d235e51310), so a 27 kernel never starts the root disk:
+the 27.2.1 update ramdisk sat at an empty progress bar with zero disk
+I/O. apple-vendor-cap=on fixes the probe but also advertises "transport
+encryption disabled", which makes a macOS 26 image's data-protected
+files unreadable (the 26.4 fallback boot of an upgraded VM lost its ssh
+keys and logins).
+
+Add ascending-capabilities (default off): relink the capabilities in
+address order without adding Apple's vendor capability or changing the
+subsystem ID. apple-vendor-cap=on still implies the reordering. With
+ascending-capabilities=on on both vmapple-virtio-blk-pci devices and
+x-ascending-capabilities=on on virtio-net-pci, a macOS 26.4 (25E246)
+image boots 26.4 with its data intact, applies the 27.2.1 (26B131) OTA
+and boots 27.2.1 to the desktop, ssh keys working.
+---
+ hw/vmapple/virtio-blk.c | 42 ++++++++++++++++++++++++++---------------
+ 1 file changed, 27 insertions(+), 15 deletions(-)
+
+diff --git a/hw/vmapple/virtio-blk.c b/hw/vmapple/virtio-blk.c
+index 526cc6534c..3edae1f02b 100644
+--- a/hw/vmapple/virtio-blk.c
++++ b/hw/vmapple/virtio-blk.c
+@@ -111,6 +111,7 @@ struct VMAppleVirtIOBlkPCI {
+     VMAppleVirtIOBlk vdev;
+     VMAppleVirtioBlkVariant variant;
+     bool apple_vendor_cap;
++    bool ascending_capabilities;
+ };
+ 
+ static const Property vmapple_virtio_blk_pci_properties[] = {
+@@ -124,6 +125,15 @@ static const Property vmapple_virtio_blk_pci_properties[] = {
+     /* Off: macOS 26 images made without it keep their data-protected files
+      * readable. On: what macOS 27 (Golden Gate) guests expect. */
+     DEFINE_PROP_BOOL("apple-vendor-cap", VMAppleVirtIOBlkPCI, apple_vendor_cap, false),
++    /*
++     * macOS 27's virtio transport needs the capability list in address
++     * order (it loops forever on QEMU's descending list). Separate from
++     * apple-vendor-cap so a macOS 26 image updated to 27 keeps its
++     * transport-encryption mode, and with it its data-protected files.
++     * apple-vendor-cap=on implies it.
++     */
++    DEFINE_PROP_BOOL("ascending-capabilities", VMAppleVirtIOBlkPCI,
++                     ascending_capabilities, false),
+ };
+ 
+ static void vmapple_virtio_blk_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
+@@ -173,24 +183,26 @@ static void vmapple_virtio_blk_pci_realize(VirtIOPCIProxy *vpci_dev, Error **err
+     pci_config_set_vendor_id(vpci_dev->pci_dev.config, PCI_VENDOR_ID_APPLE);
+     pci_config_set_device_id(vpci_dev->pci_dev.config,
+                              PCI_DEVICE_ID_APPLE_VIRTIO_BLK);
+-    if (!dev->apple_vendor_cap) {
+-        return;
+-    }
+-    pci_set_word(vpci_dev->pci_dev.config + PCI_SUBSYSTEM_ID, 0x1100);
++    if (dev->apple_vendor_cap) {
++        pci_set_word(vpci_dev->pci_dev.config + PCI_SUBSYSTEM_ID, 0x1100);
+ 
+-    /* A non-FileVault Golden Gate root disk requires Apple's vendor
+-     * capability to advertise that transport encryption is disabled. */
+-    offset = pci_add_capability(&vpci_dev->pci_dev, PCI_CAP_ID_VNDR, 0,
+-                                VMAPPLE_PCI_VNDR_SIZE, errp);
+-    if (offset < 0) {
++        /* A non-FileVault Golden Gate root disk requires Apple's vendor
++         * capability to advertise that transport encryption is disabled. */
++        offset = pci_add_capability(&vpci_dev->pci_dev, PCI_CAP_ID_VNDR, 0,
++                                    VMAPPLE_PCI_VNDR_SIZE, errp);
++        if (offset < 0) {
++            return;
++        }
++        pci_set_byte(vpci_dev->pci_dev.config + offset + 2,
++                     VMAPPLE_PCI_VNDR_SIZE);
++        pci_set_byte(vpci_dev->pci_dev.config + offset + 3, 9);
++        pci_set_word(vpci_dev->pci_dev.config + offset + 4,
++                     PCI_VENDOR_ID_APPLE);
++        pci_set_byte(vpci_dev->pci_dev.config + offset + 6,
++                     VMAPPLE_PCI_VNDR_DISABLE_ENCRYPTION);
++    } else if (!dev->ascending_capabilities) {
+         return;
+     }
+-    pci_set_byte(vpci_dev->pci_dev.config + offset + 2,
+-                 VMAPPLE_PCI_VNDR_SIZE);
+-    pci_set_byte(vpci_dev->pci_dev.config + offset + 3, 9);
+-    pci_set_word(vpci_dev->pci_dev.config + offset + 4, PCI_VENDOR_ID_APPLE);
+-    pci_set_byte(vpci_dev->pci_dev.config + offset + 6,
+-                 VMAPPLE_PCI_VNDR_DISABLE_ENCRYPTION);
+ 
+     /* Golden Gate's cached capability lookup and its fallback disagree on
+      * descending lists: the storage probe alternates between the final
+-- 
+2.56.0
+
