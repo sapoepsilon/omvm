@@ -6,7 +6,6 @@ Subject: [PATCH 2/2] hw/vmapple/virtio-blk: drop the macOS 27 vendor
  26 image made under aquarat's QEMU the guest's data-protected files become
  unreadable (auth fails)
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  hw/vmapple/virtio-blk.c | 39 ---------------------------------------
  1 file changed, 39 deletions(-)

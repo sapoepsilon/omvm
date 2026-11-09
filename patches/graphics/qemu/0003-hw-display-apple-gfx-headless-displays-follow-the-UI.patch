@@ -30,7 +30,6 @@ SetDesktopSize to 1280x800, 3008x1692, 1728x1117, 2560x1600, 1920x1200,
 the mode is sometimes ignored by macOS (it keeps a mode still derivable
 from the new one, or its saved one); omvm's guest agent covers that.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  hw/display/apple-gfx-mmio.c |  10 +-
  hw/display/apple-gfx-pci.c  |  10 +-

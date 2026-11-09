@@ -4,7 +4,6 @@ Date: Sun, 8 Nov 2026 12:15:04 -0700
 Subject: [PATCH] Local (Asahi/Honeykrisp): dma-buf-only importer without
  VK_EXT_external_memory_host; detach backing on Linux
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../metal2vulkan-runtime/src/host_memory.rs   | 38 +++++++++++++++++--
  .../src/private_properties.rs                 | 14 ++++---

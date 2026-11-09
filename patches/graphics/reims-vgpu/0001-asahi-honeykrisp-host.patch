@@ -5,7 +5,6 @@ Subject: [PATCH] Local (Asahi/Honeykrisp): local metal2vulkan, dma-buf route
  stands in for host-pointer import, memfd-backed own allocations, XR10 off,
  soft unsupported states
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Cargo.toml                                    |  7 +++++
  crates/reims-vgpu-vulkan/src/gpu/caps.rs      | 13 ++++++--
