@@ -1,0 +1,53 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+		A10000000000000000000001 /* HelloVMApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002; };
+		A10000000000000000000002 /* HelloVMApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelloVMApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000003 /* HelloVM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HelloVM.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000004 = {isa = PBXGroup; children = (A10000000000000000000005, A10000000000000000000006, ); sourceTree = "<group>"; };
+		A10000000000000000000005 /* HelloVM */ = {isa = PBXGroup; children = (A10000000000000000000002, ); path = HelloVM; sourceTree = "<group>"; };
+		A10000000000000000000006 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000003, ); name = Products; sourceTree = "<group>"; };
+		A10000000000000000000007 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000008 /* HelloVM */ = {isa = PBXNativeTarget; buildConfigurationList = A1000000000000000000000B; buildPhases = (A10000000000000000000007, ); buildRules = ( ); dependencies = ( ); name = HelloVM; productName = HelloVM; productReference = A10000000000000000000003; productType = "com.apple.product-type.application"; };
+		A10000000000000000000009 /* Project object */ = {isa = PBXProject; buildConfigurationList = A1000000000000000000000E; compatibilityVersion = "Xcode 14.0"; mainGroup = A10000000000000000000004; productRefGroup = A10000000000000000000006; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000008, ); };
+		A1000000000000000000000C /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGN_STYLE = Automatic;
+			CURRENT_PROJECT_VERSION = 1;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+			INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+			LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+			MARKETING_VERSION = 1.0;
+			PRODUCT_BUNDLE_IDENTIFIER = dev.omvm.HelloVM;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SDKROOT = iphoneos;
+			SWIFT_VERSION = 5.0;
+			TARGETED_DEVICE_FAMILY = "1,2";
+		}; name = Debug; };
+		A1000000000000000000000D /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGN_STYLE = Automatic;
+			CURRENT_PROJECT_VERSION = 1;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+			INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+			LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+			MARKETING_VERSION = 1.0;
+			PRODUCT_BUNDLE_IDENTIFIER = dev.omvm.HelloVM;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SDKROOT = iphoneos;
+			SWIFT_VERSION = 5.0;
+			TARGETED_DEVICE_FAMILY = "1,2";
+		}; name = Release; };
+		A1000000000000000000000F /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; SDKROOT = iphoneos; }; name = Debug; };
+		A10000000000000000000010 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; SDKROOT = iphoneos; }; name = Release; };
+		A1000000000000000000000B = {isa = XCConfigurationList; buildConfigurations = (A1000000000000000000000C, A1000000000000000000000D, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A1000000000000000000000E = {isa = XCConfigurationList; buildConfigurations = (A1000000000000000000000F, A10000000000000000000010, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+	};
+	rootObject = A10000000000000000000009;
+}

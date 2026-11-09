@@ -5,6 +5,23 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **Xcode → iPhone from the `macos` guest: everything but the signing identity
+  (docs/xcode-device.md).** Phone `connected` with DDI services usable and Xcode's
+  6.8 GB symbol copy for iPhone18,1 27.2 complete over the patched xHCI; a SwiftUI
+  test app (`share/ios-hello/`) builds unsigned for `generic/platform=iOS`, and
+  `devicectl device install app` reaches the phone's `installd`, which only rejects
+  the signature. Xcode's Apple Account sign-in is not viable: `akd` fails anisette
+  provisioning for every client (`AKAnisetteError -8007`, `ADIGetIDMSRouting
+  -45061`, no body from Apple's start-provisioning call). Guest prepared for manual
+  signing: the owner's Xcode-managed team wildcard profile (lists the phone, valid to
+  2027-10-06) copied in, Apple WWDR G3 intermediate added to the login keychain.
+  New `share/ios-run-on-device.sh` (guest `~/bin`): automatic signing (optionally
+  with an App Store Connect API key; flags checked, a throwaway key gets a 401 from
+  ASC), else unsigned build + `codesign` with a local identity and matching profile,
+  then `devicectl` install + launch; the fallback path was tested with a self-signed
+  identity up to the phone's profile check. Waiting on the owner to export the
+  Apple Development .p12 (route and steps in the doc).
+
 - **iPhone in the `macos` guest is usable: QEMU xHCI fix + host-side USB mode
   switch.** After pairing, devicectl showed the phone `unavailable`: macOS posts NCM
   receive buffers as two-TRB TDs, and on a short packet QEMU's `xhci_xfer_report`
