@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# omvm-gui: an optional GTK4/libadwaita window for the omvm CLI.
+#
+# Every action shells out to `omvm`, `virsh -c qemu:///session`, `systemctl --user`,
+# `hyprctl`, `vncviewer` or `lsusb`; the CLI stays the source of truth and works
+# without GTK installed. Needs: sudo pacman -S --needed python-gobject gtk4 libadwaita
+#
+#   omvm-gui                 open the window (VM name: $OMVM_VM or "macos")
+#   omvm-gui --install       add "macOS VM" to the app launcher, link ~/.local/bin/omvm-gui,
+#                            and remember this shell's OMVM_* variables for the launcher
+#   omvm-gui --uninstall     remove the launcher entry and the link
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+SELF = Path(os.path.realpath(__file__))
+HOME = Path.home()
+VM = os.environ.get("OMVM_VM", "macos")
+VIRSH = ["virsh", "-q", "-c", "qemu:///session"]
+ENV_FILE = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "omvm" / "gui.env"
+DESKTOP = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications" / "omvm-gui.desktop"
+LINK = HOME / ".local/bin/omvm-gui"
+TAILSCALE_FALLBACK = "100.72.93.99"
+HOSTS = [  # (Moonlight host, Sunshine config dir, base port, user unit)
+    ("omarchy", HOME / ".config/sunshine", 47989, "omvm-sunshine"),
+    (VM, HOME / f".config/sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
+]
+
+
+def omvm_bin():
+    sib = SELF.parent / "omvm"
+    return str(sib) if sib.exists() else (shutil.which("omvm") or "omvm")
+
+
+def load_env():
+    """The launcher does not read ~/.bashrc: apply the OMVM_* saved by --install."""
+    env = dict(os.environ)
+    try:
+        for line in ENV_FILE.read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k.startswith("OMVM_") and k not in os.environ:
+                env[k] = v
+    except OSError:
+        pass
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    env.setdefault("WAYLAND_DISPLAY", "wayland-1")
+    if "HYPRLAND_INSTANCE_SIGNATURE" not in env:
+        try:
+            hy = Path(env["XDG_RUNTIME_DIR"]) / "hypr"
+            env["HYPRLAND_INSTANCE_SIGNATURE"] = max(hy.iterdir(), key=lambda p: p.stat().st_mtime).name
+        except (OSError, ValueError):
+            pass
+    return env
+
+
+ENV = load_env()
+
+
+def install():
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    saved = {k: v for k, v in os.environ.items() if k.startswith("OMVM_")}
+    ENV_FILE.write_text("".join(f"{k}={v}\n" for k, v in sorted(saved.items())))
+    DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+    DESKTOP.write_text(
+        "[Desktop Entry]\nType=Application\nName=macOS VM\n"
+        "Comment=Start, stop and stream the omvm macOS VM\n"
+        f"Exec={SELF}\nIcon=computer\nTerminal=false\nCategories=System;Emulator;\n"
+        "Keywords=omvm;macOS;VM;Moonlight;Sunshine;\nStartupWMClass=dev.omvm.Gui\n")
+    LINK.parent.mkdir(parents=True, exist_ok=True)
+    if LINK.is_symlink() or not LINK.exists():
+        LINK.unlink(missing_ok=True)
+        LINK.symlink_to(SELF)
+    print(f"installed {DESKTOP}, {LINK} -> {SELF}")
+    print(f"saved {', '.join(sorted(saved)) or 'no OMVM_* variables'} to {ENV_FILE}")
+
+
+def uninstall():
+    DESKTOP.unlink(missing_ok=True)
+    if LINK.is_symlink():
+        LINK.unlink()
+    print(f"removed {DESKTOP} and {LINK}")
+
+
+SECRET = re.compile(r"(password|passwd|creds|omvm-webui-login|credentials|-u \S+:\S+)", re.I)
+
+
+def redact(text):
+    return "\n".join("[line hidden: may contain credentials]" if SECRET.search(l) else l
+                     for l in text.splitlines())
+
+
+def run_sync(argv, timeout=30):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=ENV,
+                           stdin=subprocess.DEVNULL)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except FileNotFoundError:
+        return 127, f"{argv[0]}: not found"
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout}s"
+
+
+def paired_clients(conf_dir):
+    """Names only, from Sunshine's state file (never the certificates or login)."""
+    try:
+        j = json.loads((conf_dir / "sunshine_state.json").read_text())
+        return [d.get("name", "?") for d in j.get("root", {}).get("named_devices", [])]
+    except (OSError, ValueError):
+        return None
+
+
+def main_gui():
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw, Gio, GLib, Gtk, Pango
+    except (ImportError, ValueError) as e:
+        sys.exit(f"omvm-gui needs GTK4 + libadwaita ({e}).\n"
+                 "  sudo pacman -S --needed python-gobject gtk4 libadwaita\n"
+                 "The omvm CLI works without them.")
+
+    class Window(Adw.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title="macOS VM", default_width=620, default_height=900)
+            self.features = set()
+            self.state = "?"
+            self.mode = None
+            self.busy = 0
+            self._setting_mode = False
+
+            view = Adw.ToolbarView()
+            header = Adw.HeaderBar()
+            self.spinner = Adw.Spinner(visible=False)
+            header.pack_start(self.spinner)
+            refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
+            refresh.connect("clicked", lambda *_: self.refresh_all(log=True))
+            header.pack_end(refresh)
+            view.add_top_bar(header)
+
+            page = Adw.PreferencesPage()
+            page.add(self.build_vm())
+            page.add(self.build_display())
+            page.add(self.build_moonlight())
+            page.add(self.build_usb())
+            page.add(self.build_shares())
+            page.add(self.build_log())
+            view.set_content(page)
+            self.set_content(view)
+
+            self.refresh_all(log=True)
+            GLib.timeout_add_seconds(5, self.poll_state)
+
+        # ---------------------------------------------------------- runner
+        def run(self, argv, label=None, done=None, timeout=120, log=True, ok=(0,)):
+            """Run argv off the UI thread; log the command + output; call done(rc, out) on the UI thread."""
+            self.set_busy(+1)
+
+            def work():
+                rc, out = run_sync(argv, timeout)
+                GLib.idle_add(finish, rc, out)
+
+            def finish(rc, out):
+                self.set_busy(-1)
+                if log:
+                    self.log(f"$ {shlex.join(argv)}", out, 0 if rc in ok else rc, label)
+                if done:
+                    done(rc, out)
+                return False
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def set_busy(self, d):
+            self.busy += d
+            self.spinner.set_visible(self.busy > 0)
+
+        def log(self, cmd, out="", rc=0, label=None):
+            buf = self.logview.get_buffer()
+            end = buf.get_end_iter()
+            head = f"{label}: " if label else ""
+            buf.insert_with_tags_by_name(end, f"{head}{cmd}\n", "cmd")
+            if out:
+                buf.insert(buf.get_end_iter(), redact(out) + "\n")
+            if rc:
+                buf.insert_with_tags_by_name(buf.get_end_iter(), f"(exit {rc})\n", "err")
+            buf.insert(buf.get_end_iter(), "\n")
+            GLib.idle_add(lambda: self.logview.scroll_to_mark(buf.get_insert(), 0, False, 0, 0) and False)
+            buf.place_cursor(buf.get_end_iter())
+
+        def toast_ok(self, rc, msg_ok, msg_fail):
+            self.status_row.set_subtitle(msg_ok if rc == 0 else msg_fail)
+
+        # ---------------------------------------------------------- 1. VM
+        def build_vm(self):
+            g = Adw.PreferencesGroup(title="VM", description=f"libvirt domain “{VM}” (qemu:///session)")
+            self.status_row = Adw.ActionRow(title="State", subtitle="…")
+            self.state_label = Gtk.Label(label="…", css_classes=["title-4"])
+            self.status_row.add_suffix(self.state_label)
+            g.add(self.status_row)
+
+            row = Adw.ActionRow(title="Power")
+            box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+            self.btn_start = Gtk.Button(label="Start", css_classes=["suggested-action"])
+            self.btn_stop = Gtk.Button(label="Stop")
+            self.btn_restart = Gtk.Button(label="Restart")
+            self.btn_start.connect("clicked", lambda *_: self.vm_start())
+            self.btn_stop.connect("clicked", lambda *_: self.confirm(
+                "Shut the VM down?", "macOS gets a clean shutdown; unsaved work in the guest may be lost.",
+                "Stop", lambda: self.vm_stop()))
+            self.btn_restart.connect("clicked", lambda *_: self.confirm(
+                "Restart the VM?", "Clean shutdown, then start again.", "Restart",
+                lambda: self.vm_stop(then=self.vm_start)))
+            for b in (self.btn_start, self.btn_stop, self.btn_restart):
+                box.append(b)
+            row.add_suffix(box)
+            g.add(row)
+
+            desk = Adw.ActionRow(title="Open desktop", subtitle="local: focus the window · remote: VNC viewer")
+            b = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+            b.connect("clicked", lambda *_: self.open_desktop())
+            desk.add_suffix(b)
+            g.add(desk)
+            return g
+
+        def poll_state(self):
+            self.run(VIRSH + ["domstate", VM], done=self.got_state, timeout=10, log=False)
+            return True
+
+        def got_state(self, rc, out):
+            self.state = out.splitlines()[0].strip() if rc == 0 and out else "unknown"
+            self.state_label.set_label(self.state)
+            running = self.state == "running"
+            self.btn_start.set_sensitive(not running)
+            self.btn_stop.set_sensitive(running)
+            self.btn_restart.set_sensitive(running)
+
+        def vm_start(self):
+            def started(rc, out):
+                self.toast_ok(rc, "started", "start failed: see log")
+                self.run(["systemctl", "--user", "start", f"omvm-vm@{VM}.timer"], "watchdog on")
+                self.poll_state()
+            self.run(VIRSH + ["start", VM], "Start", started)
+
+        def vm_stop(self, then=None):
+            # the watchdog (omvm-vm@VM.timer) would start the VM again within a minute
+            self.run(["systemctl", "--user", "stop", f"omvm-vm@{VM}.timer"], "watchdog off")
+            self.status_row.set_subtitle("shutting down…")
+            tries = {"n": 0}
+
+            def check(rc, out):
+                if out.strip() != "running":
+                    self.status_row.set_subtitle("off")
+                    self.poll_state()
+                    if then:
+                        then()
+                    return
+                tries["n"] += 1
+                if tries["n"] == 5:  # vmapple ignores libvirt's power button: ask macOS itself
+                    self.run([omvm_bin(), "ssh", VM, "sudo -n shutdown -h now"], "guest shutdown", timeout=30)
+                if tries["n"] > 120:
+                    self.status_row.set_subtitle("still running after 4 min: see log")
+                    self.log("Stop gave up", f"force with: virsh -c qemu:///session destroy {VM}", 1)
+                    return
+                GLib.timeout_add_seconds(2, lambda: self.run(VIRSH + ["domstate", VM], done=check,
+                                                            timeout=10, log=False) and False)
+
+            self.run(VIRSH + ["shutdown", VM], "Stop",
+                     lambda rc, out: self.run(VIRSH + ["domstate", VM], done=check, log=False))
+
+        def open_desktop(self):
+            if self.mode == "local":
+                self.run(["hyprctl", "dispatch", "hl.dsp.focus({ window = 'class:reims-vgpu' })"],
+                         "Open desktop (local)")
+                return
+
+            def got_port(rc, out):
+                m = re.search(r":(\d+)\s*$", out.strip().splitlines()[0]) if rc == 0 and out else None
+                target = f"localhost:{5900 + int(m.group(1))}" if m else "localhost:5900"
+                argv = ["vncviewer", target]
+                try:
+                    subprocess.Popen(argv, env=ENV, start_new_session=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.log(f"$ {shlex.join(argv)} &", "", 0, "Open desktop (remote)")
+                except OSError as e:
+                    self.log(f"$ {shlex.join(argv)}", str(e), 1, "Open desktop (remote)")
+            self.run(VIRSH + ["vncdisplay", VM], done=got_port, log=False)
+
+        # ---------------------------------------------------------- 2. display
+        def build_display(self):
+            g = Adw.PreferencesGroup(title="Display mode",
+                                     description="local: 120 Hz window on this screen · remote: VNC + Moonlight")
+            row = Adw.ActionRow(title="Mode", subtitle="switching restarts the VM")
+            self.mode_group = Adw.ToggleGroup(valign=Gtk.Align.CENTER)
+            self.mode_group.add(Adw.Toggle(name="local", label="Local"))
+            self.mode_group.add(Adw.Toggle(name="remote", label="Remote"))
+            self.mode_group.connect("notify::active-name", self.on_mode_toggled)
+            row.add_suffix(self.mode_group)
+            g.add(row)
+
+            self.res_row = Adw.EntryRow(title="Resolution (WxH, e.g. 2560x1440)", show_apply_button=True)
+            self.res_row.connect("apply", self.on_res_apply)
+            g.add(self.res_row)
+            return g
+
+        def got_mode(self, rc, out):
+            m = out.strip().splitlines()[-1] if rc == 0 and out else None
+            self.mode = m if m in ("local", "remote") else None
+            self._setting_mode = True
+            if self.mode:
+                self.mode_group.set_active_name(self.mode)
+            self._setting_mode = False
+            self.status_row.set_subtitle(f"{self.mode} mode" if self.mode else "not a libvirt VM? see log")
+            if self.mode == "remote" and self.state == "running":
+                self.run([omvm_bin(), "res", VM], "Current size", timeout=20)
+
+        def on_mode_toggled(self, group, _pspec):
+            new = group.get_active_name()
+            if self._setting_mode or not self.mode or new == self.mode:
+                return
+            old = self.mode
+            self._setting_mode = True
+            group.set_active_name(old)  # until confirmed
+            self._setting_mode = False
+
+            def go():
+                self.status_row.set_subtitle(f"switching to {new} (shutting down + restarting)…")
+                self.run([omvm_bin(), "mode", new, VM], f"Mode → {new}",
+                         lambda rc, out: (self.toast_ok(rc, f"{new} mode", "mode switch failed: see log"),
+                                          self.refresh_all(log=False)), timeout=600)
+            self.confirm(f"Switch to {new} mode?",
+                         "This shuts the VM down cleanly and starts it again in the new mode.",
+                         "Restart VM", go)
+
+        def on_res_apply(self, row):
+            v = row.get_text().strip()
+            if not re.fullmatch(r"\d+x\d+", v):
+                self.log("Resolution", f"'{v}' is not WxH", 1)
+                return
+            self.run([omvm_bin(), "res", VM, v], "Resolution", timeout=30)
+
+        # ---------------------------------------------------------- 3. moonlight
+        def build_moonlight(self):
+            g = Adw.PreferencesGroup(title="Moonlight", description="Sunshine hosts (add in Moonlight as ADDRESS:PORT)")
+            self.host_rows = []
+            for name, conf, port, unit in HOSTS:
+                r = Adw.ExpanderRow(title=f"{name}  :{port}", subtitle="…", expanded=True)
+                g.add(r)
+                self.host_rows.append((r, name, conf, port, unit, []))
+
+            pair = Adw.ExpanderRow(title="Pair device", subtitle="enter the PIN Moonlight shows")
+            self.pair_target = Adw.ComboRow(title="Host", model=Gtk.StringList.new(
+                ["Auto (whichever host is waiting)", f"{VM} (:48989)"]))
+            self.pin_row = Adw.EntryRow(title="PIN", input_purpose=Gtk.InputPurpose.DIGITS)
+            self.devname_row = Adw.EntryRow(title="Device name", text="phone")
+            btn_row = Adw.ActionRow()
+            b = Gtk.Button(label="Pair", css_classes=["suggested-action"], valign=Gtk.Align.CENTER)
+            b.connect("clicked", lambda *_: self.pair())
+            btn_row.add_suffix(b)
+            for r in (self.pair_target, self.pin_row, self.devname_row, btn_row):
+                pair.add_row(r)
+            g.add(pair)
+            return g
+
+        def refresh_moonlight(self, log):
+            def got_ip(rc, out):
+                ip = out.split()[0] if rc == 0 and out else TAILSCALE_FALLBACK
+                for r, name, conf, port, unit, kids in self.host_rows:
+                    self.run(["systemctl", "--user", "is-active", unit], log=log, label=f"{name} host",
+                             done=lambda rc, out, r=r, ip=ip, port=port: r.set_subtitle(
+                                 f"{ip}:{port} · sunshine {out.strip() or '?'}"))
+                    for k in kids:
+                        r.remove(k)
+                    kids.clear()
+                    clients = paired_clients(conf)
+                    if log:
+                        self.log(f"paired clients of {name} ({conf}/sunshine_state.json, names only)",
+                                 ", ".join(clients) if clients else "none" if clients is not None else "unreadable")
+                    for c in clients or []:
+                        k = Adw.ActionRow(title=c, subtitle="paired client")
+                        r.add_row(k)
+                        kids.append(k)
+                    if not clients:
+                        k = Adw.ActionRow(title="no paired clients" if clients is not None else "no Sunshine config")
+                        r.add_row(k)
+                        kids.append(k)
+            self.run(["tailscale", "ip", "-4"], done=got_ip, log=log, label="Tailscale IP", timeout=10)
+
+        def pair(self):
+            pin = self.pin_row.get_text().strip()
+            name = self.devname_row.get_text().strip() or "phone"
+            if not re.fullmatch(r"\d{4}", pin):
+                self.log("Pair", "the PIN is the 4 digits Moonlight shows", 1)
+                return
+            argv = [omvm_bin(), "remote"]
+            if self.pair_target.get_selected() == 1:
+                argv += ["-i", VM]
+            argv += ["pin", pin, name]
+            self.run(argv, "Pair", lambda rc, out: (self.pin_row.set_text(""), self.refresh_moonlight(False)))
+
+        # ---------------------------------------------------------- 4. usb + shares
+        def build_usb(self):
+            self.usb_group = Adw.PreferencesGroup(title="USB devices",
+                                                  description="host devices (lsusb) → omvm usb attach|detach")
+            self.usb_rows = []
+            return self.usb_group
+
+        def refresh_usb(self, log):
+            def got(rc, out):
+                for r in self.usb_rows:
+                    self.usb_group.remove(r)
+                self.usb_rows.clear()
+                avail = "usb" in self.features
+                if not avail:
+                    self.add_usb_row(Adw.ActionRow(title="omvm usb: not available yet",
+                                                   subtitle="buttons enable when `omvm help` lists it"))
+                lines = [l for l in out.splitlines() if l.strip()] if rc == 0 else []
+                if not lines:  # lsusb exits 1 with no output when the host has no USB devices
+                    self.add_usb_row(Adw.ActionRow(
+                        title="lsusb not found (sudo pacman -S usbutils)" if rc == 127 else
+                        "no USB devices on this host" if rc in (0, 1) and not out else "lsusb failed: see log"))
+                for l in lines:
+                    m = re.match(r"Bus (\d+) Device (\d+): ID ([0-9a-f]{4}:[0-9a-f]{4})\s*(.*)", l)
+                    if not m:
+                        continue
+                    bus, dev, vidpid, desc = m.groups()
+                    r = Adw.ActionRow(title=desc or vidpid, subtitle=f"{vidpid} · bus {bus} device {dev}")
+                    box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+                    for verb in ("attach", "detach"):
+                        b = Gtk.Button(label=verb.capitalize(), sensitive=avail)
+                        b.connect("clicked", lambda _b, v=verb, d=vidpid: self.run(
+                            [omvm_bin(), "usb", v, d, VM], f"USB {v}"))
+                        box.append(b)
+                    r.add_suffix(box)
+                    self.add_usb_row(r)
+            self.run(["lsusb"], "USB devices", got, timeout=10, log=log, ok=(0, 1))
+
+        def add_usb_row(self, r):
+            self.usb_group.add(r)
+            self.usb_rows.append(r)
+
+        def build_shares(self):
+            g = Adw.PreferencesGroup(title="Shared folders", description="omvm share add|remove PATH")
+            self.share_avail_row = Adw.ActionRow(title="…")
+            g.add(self.share_avail_row)
+            self.share_row = Adw.EntryRow(title="Folder on this machine")
+            pick = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Choose…")
+            pick.connect("clicked", lambda *_: self.pick_folder())
+            self.share_row.add_suffix(pick)
+            g.add(self.share_row)
+            btns = Adw.ActionRow()
+            box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+            self.share_btns = []
+            for verb in ("add", "remove"):
+                b = Gtk.Button(label=verb.capitalize())
+                b.connect("clicked", lambda _b, v=verb: self.share(v))
+                box.append(b)
+                self.share_btns.append(b)
+            btns.add_suffix(box)
+            g.add(btns)
+            return g
+
+        def update_share_avail(self):
+            avail = "share" in self.features
+            self.share_avail_row.set_title("available" if avail else "omvm share: not available yet")
+            for b in self.share_btns:
+                b.set_sensitive(avail)
+
+        def pick_folder(self):
+            d = Gtk.FileDialog(title="Folder to share with the VM")
+            d.select_folder(self, None, lambda dlg, res: self._picked(dlg, res))
+
+        def _picked(self, dlg, res):
+            try:
+                f = dlg.select_folder_finish(res)
+                if f:
+                    self.share_row.set_text(f.get_path())
+            except GLib.Error:
+                pass
+
+        def share(self, verb):
+            path = self.share_row.get_text().strip()
+            if not path:
+                self.log(f"Share {verb}", "choose a folder first", 1)
+                return
+            self.run([omvm_bin(), "share", verb, path], f"Share {verb}")
+
+        # ---------------------------------------------------------- 5. log
+        def build_log(self):
+            g = Adw.PreferencesGroup(title="Log", description="each command and its output")
+            clear = Gtk.Button(icon_name="edit-clear-all-symbolic", tooltip_text="Clear", valign=Gtk.Align.CENTER,
+                               css_classes=["flat"])
+            g.set_header_suffix(clear)
+            self.logview = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                        top_margin=8, bottom_margin=8, left_margin=8, right_margin=8)
+            buf = self.logview.get_buffer()
+            buf.create_tag("cmd", weight=Pango.Weight.BOLD)
+            buf.create_tag("err", foreground="#e01b24")
+            clear.connect("clicked", lambda *_: buf.set_text(""))
+            sw = Gtk.ScrolledWindow(min_content_height=220, child=self.logview, css_classes=["card"])
+            g.add(sw)
+            return g
+
+        # ---------------------------------------------------------- misc
+        def confirm(self, heading, body, verb, action):
+            d = Adw.AlertDialog(heading=heading, body=body)
+            d.add_response("cancel", "Cancel")
+            d.add_response("ok", verb)
+            d.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE)
+            d.set_default_response("cancel")
+            d.connect("response", lambda _d, r: action() if r == "ok" else None)
+            d.present(self)
+
+        def refresh_all(self, log):
+            def feats(rc, out):
+                self.features = {m.group(1) for m in re.finditer(r"^\s*omvm (\w[\w-]*)", out, re.M)}
+                self.update_share_avail()
+                self.refresh_usb(log)
+            self.run([omvm_bin(), "help"], "Features", feats, timeout=10, log=False)
+            self.run(VIRSH + ["domstate", VM], "VM state",
+                     lambda rc, out: (self.got_state(rc, out),
+                                      self.run([omvm_bin(), "mode", VM], "Display mode", self.got_mode,
+                                               timeout=20, log=log)),
+                     timeout=10, log=log)
+            self.refresh_moonlight(log)
+
+    class App(Adw.Application):
+        def __init__(self):
+            super().__init__(application_id="dev.omvm.Gui", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+        def do_activate(self):
+            w = self.get_active_window() or Window(self)
+            w.present()
+
+    return App().run([sys.argv[0]])
+
+
+if __name__ == "__main__":
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "--install":
+        install()
+    elif arg == "--uninstall":
+        uninstall()
+    elif arg in ("-h", "--help"):
+        print("\n".join(l[2:] for l in open(SELF).read().splitlines()[2:12]))
+    else:
+        sys.exit(main_gui())

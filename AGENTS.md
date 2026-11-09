@@ -37,6 +37,8 @@ subagents or background jobs.
   authorisation from the user.
 - Keep the stock `linux-aurora` kernel installed and bootable. Run
   `omarchy update` only from the stock kernel.
+- `bin/omvm-gui` must stay a thin front end: every action shells out to `omvm`
+  (or virsh/systemctl/hyprctl). Put new logic in the CLI, then expose it there.
 - Don't use `pkill -f PATTERN` when PATTERN also appears in your own shell's
   command line. That kills your own shell.
 

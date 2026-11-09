@@ -5,6 +5,26 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- **`omvm-gui`** (new, optional): a GTK4 + libadwaita window (`bin/omvm-gui`,
+  PyGObject; `sudo pacman -S --needed python-gobject gtk4 libadwaita`) that only
+  shells out to `omvm`, `virsh -c qemu:///session`, `systemctl --user`, `hyprctl`,
+  `vncviewer` and `lsusb`. Sections: VM state + Start/Stop/Restart (stops the
+  `omvm-vm@macos.timer` watchdog first, then `virsh shutdown`, guest
+  `sudo shutdown -h now` after ~10 s, like `vm_shutdown`), Open desktop (local:
+  focus `class:reims-vgpu`; remote: `vncviewer localhost:59xx`), display mode
+  toggle with a confirm dialog (`omvm mode`), resolution (`omvm res`), Moonlight
+  hosts :47989/:48989 on the Tailscale IP with paired client names (names only,
+  read from `sunshine_state.json`), Pair (`omvm remote [-i macos] pin PIN NAME`),
+  USB (`omvm usb attach|detach VID:PID macos`) and shared folders
+  (`omvm share add|remove PATH`): both greyed out with "not available yet" until
+  `omvm help` lists them. A log pane shows each command and its output (lines
+  that look like credentials are hidden). `omvm-gui --install` adds the
+  "macOS VM" launcher entry, links `~/.local/bin/omvm-gui`, and saves the shell's
+  `OMVM_*` variables to `~/.config/omvm/gui.env` (the launcher doesn't read
+  `~/.bashrc`). Installed `usbutils` (this M1 Max lists no USB devices: lsusb
+  exits 1). Tested on a temporary headless Hyprland output (VM untouched): state,
+  mode, hosts, clients and lsusb render and log; Stop/Restart/mode switch/Open
+  were not clicked.
 - **`omvm mode local|remote`** (`omvm mode` prints the current one; default VM
   `macos`). local: no libvirt `<graphics>` (QEMU `-display none`), reims-vgpu's
   SDL3/Vulkan window borderless full screen on eDP-1 (`REIMS_VGPU_WINDOW=1`,

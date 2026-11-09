@@ -53,6 +53,10 @@ Xcode 27.2
 - **Remote control:** `omvm remote start` runs Sunshine, so Moonlight on a phone, tablet
   or computer can drive the Omarchy desktop or any VM on a virtual monitor sized to the
   client, with the lid closed too ([docs/streaming.md](docs/streaming.md)).
+- **GUI (optional):** `omvm-gui` is a small GTK4/libadwaita window over the same CLI:
+  VM state and power, local/remote mode, resolution, Moonlight hosts and pairing, and a
+  log of every command it runs. `omvm-gui --install` adds "macOS VM" to the app launcher
+  (needs `python-gobject gtk4 libadwaita`; the CLI works without them).
 - **Keyboard:** `share/hypr-macos-vm.lua` makes Hyprland pass every key, Super = Cmd
   included, to a focused VNC viewer (Ctrl+Alt+Esc releases).
 - **Apple Account sign-in** is not expected to work: the guest has no Secure Enclave
