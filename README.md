@@ -163,8 +163,9 @@ know about the second kernel.
 - **Xcode** is subject to Apple's Xcode and SDK agreement. Use your own copy.
 - **Never share** guest images, `vm.json` (the VM's identity), AVPBooter,
   restore images or Xcode images.
-- **omvm** is GPL-2.0-or-later. The upstream code it fetches has its own
-  licences: see upstream's
+- **omvm** is GPL-2.0-or-later; [LICENSING.md](LICENSING.md) lists the
+  patches and third-party code it carries and their licences. The upstream
+  code it fetches has its own licences: see upstream's
   [LICENSING.md](https://github.com/aquarat/apple-macos-arm64-vm-guest/blob/master/LICENSING.md).
   In particular, the PAC kernel patch is steelbrain's work and is
   **unlicensed** (a licence was requested in

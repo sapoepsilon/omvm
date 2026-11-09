@@ -5,6 +5,13 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- **LICENSING.md** added (linked from the README's Legal section): omvm is
+  GPL-2.0-or-later; the PAC kernel patch is steelbrain's unlicensed work and is
+  fetched from aquarat's repo at build time, not included (steelbrain#1); each
+  `patches/graphics/` patch is offered under its upstream's licence (Mesa MIT,
+  QEMU GPL-2.0-or-later, reims-vgpu and metal2vulkan GPL-2.0-or-later OR
+  LGPL-3.0-or-later); `share/bake-xcode-dmg.sh` is derived from aquarat's
+  GPL-2.0-or-later `bake-xcode.sh`; no Apple software is included.
 - **Guest user renamed `aquarat` -> `killerisya`** (macOS 26.4 VM `macos`; short
   name, home `/Users/killerisya`, full name; UID 501 unchanged). `dscl` RecordName,
   RealName, `admin` GroupMembership, `/etc/sudoers.d/killerisya` (NOPASSWD; the
