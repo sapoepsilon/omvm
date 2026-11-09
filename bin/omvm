@@ -67,7 +67,8 @@ latest_image() { ls -d "$IMAGES/$BUNDLE"-v* 2>/dev/null | sort -V | tail -1; }
 
 guest_env() {
     local booter
-    booter="$(ls "$UPSTREAM"/artifacts/firmware/AVPBooter.vmapple2.*.bin 2>/dev/null | head -1 || true)"
+    # The 27-era AVPBooter (AVPBooter.vmapple2.macos27*) is only for macOS 27 guests (cmd_virt).
+    booter="$(ls "$UPSTREAM"/artifacts/firmware/AVPBooter.vmapple2.*.bin 2>/dev/null | grep -v '/AVPBooter\.vmapple2\.macos27' | head -1 || true)"
     test -n "$booter" || die "no AVPBooter yet: run 'omvm ingest'"
     export AVPBOOTER="$booter" RUNNER_KEY="$KEY" GFX="${GFX:-none}"
 }
@@ -421,8 +422,12 @@ cmd_virt() {
     fi
     command -v virsh >/dev/null || die "install libvirt and virt-manager first: omarchy pkg add libvirt virt-manager"
     img="$(resolve_image "${2:-}")"
-    local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port
-    [ -x "$qemu" ] || die "build the graphics stack first (docs/graphics.md)"
+    local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port major
+    # macOS 27 guests ($dir/guest_major >= 27) need the 27-patched QEMU (0005-0007) and
+    # the 27-era AVPBooter; see docs/graphics.md "macOS 27 updates".
+    major="$(cat "$dir/guest_major" 2>/dev/null || echo 0)"
+    [ "${major:-0}" -ge 27 ] 2>/dev/null && qemu="${OMVM_QEMU27:-$UPSTREAM/build/qemu-sb-bdifw/build/qemu-system-aarch64}"
+    [ -x "$qemu" ] || die "build the graphics stack first (docs/graphics.md): no $qemu"
     if [ ! -f "$dir/disk.img" ]; then
         mkdir -p "$dir"
         for f in disk.img aux.img.trimmed vm.json; do cp --reflink=auto "$img/guest/$f" "$dir/$f"; chmod u+w "$dir/$f"; done
@@ -431,6 +436,10 @@ cmd_virt() {
     port="$(cat "$dir/ssh_port" 2>/dev/null || python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     echo "$port" > "$dir/ssh_port"
     guest_env
+    if [ "${major:-0}" -ge 27 ] 2>/dev/null; then
+        AVPBOOTER="${OMVM_AVPBOOTER27:-$UPSTREAM/artifacts/firmware/AVPBooter.vmapple2.macos27.2-26B123.bin}"
+        [ -f "$AVPBOOTER" ] || die "macOS $major guest needs the 27-era AVPBooter: no $AVPBOOTER"
+    fi
     local was; was="$(vm_mode "$name" 2>/dev/null || echo remote)"
     python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
         "$("$UPSTREAM/scripts/extract-ecid.py" "$dir/vm.json")" "$port" "${CPUS:-8}" "${RAM_GIB:-16}" > "$dir/domain.xml"
@@ -613,6 +622,8 @@ cmd_res() {
 cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
 cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
 
+# Per-VM guest account: IMAGES/vms/NAME/guest_user overrides OMVM_GUEST_USER.
+case "${1:-}" in ssh|clip|res|stop|virt-hook|show|gui|start) [ -n "${2:-}" ] && [ -f "$IMAGES/vms/$2/guest_user" ] && GUEST_USER="$(cat "$IMAGES/vms/$2/guest_user")" ;; esac
 case "${1:-help}" in
 doctor) shift; cmd_doctor "$@" ;;
 kernel) shift; cmd_kernel "$@" ;;

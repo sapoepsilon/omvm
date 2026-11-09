@@ -5,9 +5,10 @@ started, stopped and viewed from virt-manager / virsh.
 
     libvirt-domain.py NAME VMDIR QEMU_BIN FIRMWARE ECID SSH_PORT [CPUS] [RAM_GIB]
 
-VMDIR holds disk.img, aux.img.trimmed (and vm.json). The vmapple machine and its
-devices are not modelled by libvirt, so they are passed as QEMU arguments; libvirt
-owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
+VMDIR holds disk.img, aux.img.trimmed (and vm.json), plus optional switch files:
+guest_major (e.g. 27; docs/graphics.md "macOS 27 updates") and apple_vendor_cap.
+The vmapple machine and its devices are not modelled by libvirt, so they are
+passed as QEMU arguments; libvirt owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
 """
 import os, sys, uuid
 from xml.sax.saxutils import quoteattr
@@ -17,6 +18,20 @@ cpus = sys.argv[7] if len(sys.argv) > 7 else "8"
 ram = sys.argv[8] if len(sys.argv) > 8 else "16"
 qdir = os.path.dirname(qemu)
 home = os.path.expanduser("~")
+# macOS 27 guests (VMDIR/guest_major holds 27 or more): their virtio transport
+# loops forever on QEMU's descending PCI capability list, so the disks, network
+# and sound link their capabilities in address order (QEMU patches 0006, 0007).
+try:
+    major = int(open(f"{vmdir}/guest_major").read().strip() or 0)
+except (OSError, ValueError):
+    major = 0
+asc = major >= 27
+# Apple's vendor capability (VMDIR/apple_vendor_cap) also reorders, but it says
+# "transport encryption disabled": only for images installed with it, never for a
+# 26 image updated to 27 (its data-protected files become unreadable).
+vcap = ",apple-vendor-cap=on" if os.path.exists(f"{vmdir}/apple_vendor_cap") else ""
+blk = vcap or (",ascending-capabilities=on" if asc else "")
+virtio_asc = ",x-ascending-capabilities=on" if asc else ""
 icd = os.environ.get("VK_DRIVER_FILES", f"{home}/opt/mesa-honeykrisp-sb/share/vulkan/icd.d/asahi_icd.aarch64.json")
 aux, disk = f"{vmdir}/aux.img.trimmed", f"{vmdir}/disk.img"
 # Stable libvirt UUID per VM name.
@@ -31,11 +46,11 @@ args = [
     "-drive", f"if=pflash,format=raw,file.filename={aux},file.locking=off",
     "-drive", f"if=pflash,format=raw,file.filename={disk},file.locking=off",
     "-drive", f"if=none,format=raw,file.filename={aux},file.locking=off,cache=unsafe,id=aux",
-    "-device", "vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on",
+    "-device", f"vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on{blk}",
     "-drive", f"if=none,format=raw,file.filename={disk},file.locking=off,cache=unsafe,id=root",
-    "-device", "vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on",
+    "-device", f"vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on{blk}",
     "-netdev", f"user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
-    "-device", f"virtio-net-pci,netdev=net0,mac={mac}",
+    "-device", f"virtio-net-pci,netdev=net0,mac={mac}{virtio_asc}",
     # libvirt runs QEMU with -nodefaults, which drops vmapple's default USB
     # keyboard and tablet: add them back.
     "-device", "qemu-xhci,id=omvm-usb",
@@ -45,7 +60,7 @@ args = [
     # on the host's PipeWire. Stream 0 is output (the guest's speakers), stream 1
     # input (its microphone, the host's default source).
     "-audiodev", AUDIODEV,
-    "-device", "virtio-sound-pci,audiodev=snd0,streams=2",
+    "-device", f"virtio-sound-pci,audiodev=snd0,streams=2{virtio_asc}",
 ]
 env = {
     "VK_DRIVER_FILES": icd,

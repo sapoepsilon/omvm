@@ -1,0 +1,143 @@
+From 3a14b4eadbb59ee70f7ce5f17e28da208a100f0e Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 13:24:22 -0700
+Subject: [PATCH] hw/audio/virtio-snd-pci: x-ascending-capabilities for macOS
+ 27 guests
+
+macOS 27's virtio PCI transport loops forever on QEMU's descending
+capability list, so a 27 guest never starts a virtio-sound-pci device
+that keeps the default order. virtio-net-pci already had a local
+x-ascending-capabilities switch and vmapple-virtio-blk-pci has
+ascending-capabilities; move the relinking into a shared helper,
+virtio_pci_link_capabilities_ascending(), use it from virtio-net-pci
+and add the same x-ascending-capabilities switch (default off) to
+virtio-sound-pci.
+
+With -device virtio-sound-pci,audiodev=snd0,streams=2,
+x-ascending-capabilities=on on a pipewire audiodev, a macOS 27.2.1
+(26B131) guest lists "Apple Virtual Sound Device" (2 in, 2 out) and
+afplay output reaches the host PipeWire output stream.
+---
+ hw/audio/virtio-snd-pci.c      |  9 ++++++++-
+ hw/virtio/virtio-net-pci.c     | 20 ++------------------
+ hw/virtio/virtio-pci.c         | 20 ++++++++++++++++++++
+ include/hw/virtio/virtio-pci.h | 10 ++++++++++
+ 4 files changed, 40 insertions(+), 19 deletions(-)
+
+diff --git a/hw/audio/virtio-snd-pci.c b/hw/audio/virtio-snd-pci.c
+index 230581ed63..6a09e5bba9 100644
+--- a/hw/audio/virtio-snd-pci.c
++++ b/hw/audio/virtio-snd-pci.c
+@@ -25,9 +25,13 @@ struct VirtIOSoundPCI {
+     VirtIOPCIProxy parent_obj;
+ 
+     VirtIOSound vdev;
++    bool ascending_capabilities;
+ };
+ 
+ static const Property virtio_snd_pci_properties[] = {
++    /* macOS 27 guests: capabilities linked in address order. */
++    DEFINE_PROP_BOOL("x-ascending-capabilities", VirtIOSoundPCI,
++                     ascending_capabilities, false),
+     DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags,
+                     VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, true),
+     DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 2),
+@@ -39,7 +43,10 @@ static void virtio_snd_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
+     DeviceState *vdev = DEVICE(&dev->vdev);
+ 
+     virtio_pci_force_virtio_1(vpci_dev);
+-    qdev_realize(vdev, BUS(&vpci_dev->bus), errp);
++    if (qdev_realize(vdev, BUS(&vpci_dev->bus), errp) &&
++        dev->ascending_capabilities) {
++        virtio_pci_link_capabilities_ascending(&vpci_dev->pci_dev);
++    }
+ }
+ 
+ static void virtio_snd_pci_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/virtio/virtio-net-pci.c b/hw/virtio/virtio-net-pci.c
+index 4a6c47ae6e..3de433fab6 100644
+--- a/hw/virtio/virtio-net-pci.c
++++ b/hw/virtio/virtio-net-pci.c
+@@ -66,25 +66,9 @@ static void virtio_net_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
+     qdev_realize(vdev, BUS(&vpci_dev->bus), errp);
+ 
+     if (dev->ascending_capabilities && qdev_is_realized(vdev)) {
+-        uint8_t *config = vpci_dev->pci_dev.config;
+-        bool capabilities[PCI_CONFIG_SPACE_SIZE] = { false };
+-        unsigned offset, previous = PCI_CAPABILITY_LIST;
+-
+         /* Local Golden Gate workaround: its cached and fallback capability
+-         * lookups revisit PCI_CFG and NOTIFY forever on descending lists.
+-         * Keep capability contents and offsets; only reorder the links. */
+-        for (offset = config[PCI_CAPABILITY_LIST]; offset;
+-             offset = config[offset + PCI_CAP_LIST_NEXT]) {
+-            capabilities[offset] = true;
+-        }
+-        for (offset = PCI_CONFIG_HEADER_SIZE; offset < PCI_CONFIG_SPACE_SIZE;
+-             offset++) {
+-            if (capabilities[offset]) {
+-                config[previous] = offset;
+-                previous = offset + PCI_CAP_LIST_NEXT;
+-            }
+-        }
+-        config[previous] = 0;
++         * lookups revisit PCI_CFG and NOTIFY forever on descending lists. */
++        virtio_pci_link_capabilities_ascending(&vpci_dev->pci_dev);
+     }
+ }
+ 
+diff --git a/hw/virtio/virtio-pci.c b/hw/virtio/virtio-pci.c
+index c73f1f546c..713ac5a4d9 100644
+--- a/hw/virtio/virtio-pci.c
++++ b/hw/virtio/virtio-pci.c
+@@ -2510,6 +2510,26 @@ static void virtio_pci_non_transitional_instance_init(Object *obj)
+     proxy->disable_modern = false;
+ }
+ 
++void virtio_pci_link_capabilities_ascending(PCIDevice *pci_dev)
++{
++    uint8_t *config = pci_dev->config;
++    bool capabilities[PCI_CONFIG_SPACE_SIZE] = { false };
++    unsigned offset, previous = PCI_CAPABILITY_LIST;
++
++    for (offset = config[PCI_CAPABILITY_LIST]; offset;
++         offset = config[offset + PCI_CAP_LIST_NEXT]) {
++        capabilities[offset] = true;
++    }
++    for (offset = PCI_CONFIG_HEADER_SIZE; offset < PCI_CONFIG_SPACE_SIZE;
++         offset++) {
++        if (capabilities[offset]) {
++            config[previous] = offset;
++            previous = offset + PCI_CAP_LIST_NEXT;
++        }
++    }
++    config[previous] = 0;
++}
++
+ void virtio_pci_types_register(const VirtioPCIDeviceTypeInfo *t)
+ {
+     char *base_name = NULL;
+diff --git a/include/hw/virtio/virtio-pci.h b/include/hw/virtio/virtio-pci.h
+index ee50fb0d55..9e11be6769 100644
+--- a/include/hw/virtio/virtio-pci.h
++++ b/include/hw/virtio/virtio-pci.h
+@@ -242,6 +242,16 @@ typedef struct VirtioPCIDeviceTypeInfo {
+ /* Register virtio-pci type(s).  @t must be static. */
+ void virtio_pci_types_register(const VirtioPCIDeviceTypeInfo *t);
+ 
++/**
++ * virtio_pci_link_capabilities_ascending:
++ * @pci_dev: a realized virtio PCI device
++ *
++ * Relink @pci_dev's capability list in address order, keeping every
++ * capability at its offset. macOS 27's virtio PCI transport loops forever
++ * on QEMU's usual high-to-low list.
++ */
++void virtio_pci_link_capabilities_ascending(PCIDevice *pci_dev);
++
+ /**
+  * virtio_pci_optimal_num_queues:
+  * @fixed_queues: number of queues that are always present
+-- 
+2.56.0
+

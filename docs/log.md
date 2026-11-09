@@ -5,6 +5,36 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`macos27` has sound, and `omvm virt` makes macOS 27 domains.** QEMU
+  3a14b4eadb on `sb-kvm-bdif-write` (exported as `patches/graphics/qemu/0007`)
+  adds `x-ascending-capabilities` to `virtio-sound-pci` and moves the
+  capability reordering into `virtio_pci_link_capabilities_ascending()`
+  (virtio-net uses it too). macos27 now has `virtio-sound-pci,streams=2` on
+  PipeWire again: `system_profiler SPAudioDataType` lists "Apple Virtual Sound
+  Device" (2 in, 2 out, mic input), and `afplay Glass.aiff` in the guest showed
+  up on the host as the `macos27` output stream (pw-record on it: peak 11759 /
+  4901, silent otherwise), linked to the speakers' convolver; the input stream
+  is linked to the MacBook mic.
+  - `guest_major` (a file in the VM dir, `27`) makes `omvm virt` use
+    `build/qemu-sb-bdifw` (`OMVM_QEMU27`), the 27.2 AVPBooter
+    (`OMVM_AVPBOOTER27`) and the four capability switches. `guest_env` no
+    longer picks the 27 AVPBooter for other VMs (the glob could sort it first).
+    Regenerating macos27 with it gave the hand-made domain minus the serial /
+    `-d` debug args; macos27 boots from it to the desktop.
+  - The bdifw build had no `pc-bios/keymaps` (only `qemu-system-aarch64` was
+    built), so QEMU refused to start with its own `-L`; `ninja` of the 32 keymap
+    targets fixed it.
+  - Login window keyboard: could not reproduce. After a cold boot with autologin
+    off, after `pkill loginwindow`, and with the HIToolbox prefs removed, VNC
+    typing and HMP `sendkey` both logged in. The failing first boot after the
+    OTA had no input menu and SecurityAgent logged "No selected input source
+    for user", so it looks like a first-boot-after-update state. Added a
+    system `/Library/Preferences/com.apple.HIToolbox.plist` (ABC) in the guest.
+    Autologin is back on.
+  - Backup before the sound change: `~/vm-artifacts/vms/macos27.pre-sound-20261109/`
+    (27.2.1, reflinks). The `.failed-vcap-20261109` images and `~/m27work`
+    scratch are deleted.
+
 - **`macos27` is on macOS 27.2.1 (26B131)** and boots to the desktop
   (autologin `aquarat`, Setup Assistant done: Apple Account skipped, no
   FileVault, updates download-only). Two more QEMU fixes on top of the bdif
