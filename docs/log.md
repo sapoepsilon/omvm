@@ -5,6 +5,38 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`macos` showed a black Reims window: it was stuck in a macOS 27 upgrade
+  reboot loop; it now runs 27.2.** At 09:44 the guest user (uid 501, with
+  admin authorization, from Software Update in the guest; automatic installs
+  are off) started the 27.2 (26B123) update, and at 09:45:34 the VM rebooted
+  into it. `macos` had no `guest_major`, so it ran `build/qemu-sb` and the
+  26-era AVPBooter, and first-stage iBoot panicked and reset about twice a
+  second from then on (QMP `GUEST_CRASHLOADED`/`RESET`, PC `0x100000`,
+  `Duplicate block info` spam from virtqemud, no disk write since 09:45:34).
+  The user's restarts at 14:16 looped too, since the aux NVRAM holds
+  `boot-command=upgrade`. Not caused by `macos27` running beside it or by
+  today's rebuilds: `qemu-sb` was relinked at 09:23 (patch 0004,
+  `apple-vendor-cap` default off, same behaviour as before) and never linked
+  the 14:05 iOS Simulator library.
+  - Fix: `echo 27 > ~/vm-artifacts/vms/macos/guest_major`, `omvm virt macos`
+    (local mode kept: `REIMS_VGPU_WINDOW=1`, 120 Hz, the `-wl` Mesa), destroy
+    and start. Reflink backups first in `~/vm-artifacts/vms/macos/`:
+    `disk.img.pre-27-20261109`, `aux.img.trimmed.pre-27-20261109`,
+    `domain-pre-27-20261109.xml` (the 26 domain).
+  - ssh answered 2 minutes later on 27.2 (26B123); post-upgrade migration then
+    ran behind the Apple logo in the Reims window. `macos` and `macos27` both
+    run `build/qemu-sb-bdifw` now. docs/graphics.md "macOS 27 updates"
+    describes the failure.
+  - First boot on 27.2: the lock screen ignored keys (the known
+    first-boot-after-update state; `macos` had no system input source), and
+    at 14:36 the guest turned its display off (pmset log) although
+    `displaysleep` is 0, which froze the Reims window on its last frame until
+    `caffeinate -u` over ssh. Copied macos27's
+    `/Library/Preferences/com.apple.HIToolbox.plist` (ABC) into `macos`,
+    rebooted the guest (`shutdown -r now`, back in 20 s), and the password
+    typed with HMP `sendkey` logged in. After two Setup Assistant panes
+    (Liquid Glass, Welcome) the desktop shows in the 120 Hz Reims window.
+
 - **The iOS Simulator runs in `macos27`.** Xcode 27.2 (27B52) was already in
   the guest; `sudo xcodebuild -runFirstLaunch` and `xcodebuild -downloadPlatform iOS`
   (no Apple ID, ~8.3 GB at 10-20 MB/s over Wi-Fi) installed the iOS 27.2
