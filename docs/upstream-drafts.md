@@ -76,22 +76,71 @@ omarchy-mac-pkgs. A kernel PR waits until the patch licence is resolved.
 
 ## 3. Graphics fixes upstream (send these first)
 
-### 3a. Mesa (Asahi/Honeykrisp): merge request
-**Title:** hk: expose VK_EXT_fragment_shader_interlock (pixel interlock)
+### 3a. Mesa (Asahi/Honeykrisp): two merge requests
+
+Prepared 2026-11-08 on omarchy in the worktree `~/src/mesa-upstream-mr`
+(off `~/src/mesa-honeykrisp-sb`), each branch one commit on upstream `main`
+@ `1f935e49`. Nothing pushed yet. Diff backups of the old 26.2.6 trees:
+`~/src/mesa-backup-2026-11-08/`.
+
+Mesa policy (docs/submittingpatches.rst): commit messages, code comments and
+MR text must be in your own words, and AI involvement must be disclosed. Both
+commits carry `Assisted-by: LLM`; rewrite the messages and the code comments
+yourself before pushing.
+
+CTS: VK-GL-CTS main (built 2026-11-08, `~/src/cts`), deqp-runner 0.24.0,
+M1 Max (G13C C0), `VK_ICD_FILENAMES` pointing at each branch's build.
+Raw results: `~/src/cts/out/<run>/results.csv`.
+
+#### MR 1: `hk-fragment-shader-interlock` (a3561cde39cc)
+**Title:** hk: expose VK_EXT_fragment_shader_interlock
 
 > The AGX compiler already lowers `begin_invocation_interlock` to `wait_pix`.
 > Gallium uses this to order spilled render-target image load/store. This MR
 > exposes `fragmentShaderPixelInterlock` in Honeykrisp and makes
 > `end_invocation_interlock` a no-op, since the pixel is released when the
-> fragment ends.
+> fragment ends. Also updates features.txt and new_features.txt.
 >
 > Use case: reims-vgpu translates macOS guests' Metal framebuffer-fetch
 > shaders to Vulkan. That needs either pixel interlock or
 > rasterization-order attachment access. With this patch, a macOS 26 desktop
 > renders correctly on an M1 Max under KVM.
 >
-> Patch: `patches/graphics/mesa/0003-hk-fragment-shader-interlock.patch`.
-> CTS: TODO, run `dEQP-VK.fragment_shader_interlock.*` before submitting.
+> CTS `dEQP-VK.fragment_shader_interlock.*` (576 cases):
+> Pass 128, Fail 64, NotSupported 384. Without the patch: NotSupported 576.
+
+**Blocker, do not open as-is:** all 64 failures are
+`pixel_{ordered,unordered}.4xaa.no_sample_shading.*` (image and ssbo,
+discard and nodiscard, every size). Pixel interlock passes at 1x and with
+sample shading. A test-only build that also sets
+`fragmentShaderSampleInterlock = true` passes every `sample_*` case
+(320 pass, the same 64 fail). So `wait_pix` looks per-sample: two fragments
+covering different samples of one pixel are not ordered. Options: expose
+sample interlock (passes) and fix or restrict pixel interlock under MSAA
+before submitting.
+
+#### MR 2: `agx-16bit-flat-varyings` (2b37de4b9864)
+**Title:** agx: fix 16-bit flat varyings
+
+> 16-bit varyings (e.g. SPIR-V Float16 outputs/inputs) reached `st_vary` as
+> 16-bit values and 16-bit flat loads returned a 32-bit def, which aborted
+> the backend ("unaligned reg" / `st_vary` packing assertion). Widen 16-bit
+> outputs by type in agx_nir_lower_uvs and narrow flat inputs in
+> agx_nir_lower_interpolation.
+>
+> CTS: hk does not expose `storageInputOutput16`, so the 16-bit CTS cases
+> are NotSupported on a stock build. Varying subset (`dEQP-VK.glsl.linkage.
+> varying.*`, `draw.*differing_interpolation*`, `rasterization.flatshading.*`,
+> `spirv_assembly.instruction.graphics.16bit_storage.input_output_*`, 1786
+> cases): Pass 96, Fail 0, NotSupported 1690, same as main (no regressions).
+>
+> With `storageInputOutput16 = true` forced in a test-only build,
+> `16bit_storage.input_output_*` (1686 cases): main crashes 1030
+> (`st_vary ^r0h, ^r0l`: `value.size == AGX_SIZE_32`), pass 176; with this
+> patch: Pass 1106, Fail 100, NotSupported 480 (64-bit cases), Crash 0.
+> All float16 cases pass. The 100 remaining failures are integer 16-bit
+> varyings (wrong values, "fragment output data point mismatch"), crashes
+> on main too; follow-up needed before `storageInputOutput16` can be exposed.
 
 ### 3b. steelbrain/metal2vulkan: issue + PR
 **Title:** Importer without VK_EXT_external_memory_host (dma-buf route, Honeykrisp)
