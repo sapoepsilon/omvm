@@ -56,9 +56,11 @@ Xcode 27.2
   or computer can drive the Omarchy desktop or any VM on a virtual monitor sized to the
   client, with the lid closed too ([docs/streaming.md](docs/streaming.md)).
 - **GUI (optional):** `omvm-gui` is a small GTK4/libadwaita window over the same CLI:
-  VM state and power, local/remote mode, resolution, Moonlight hosts and pairing, and a
-  log of every command it runs. `omvm-gui --install` adds "macOS VM" to the app launcher
-  (needs `python-gobject gtk4 libadwaita`; the CLI works without them).
+  VM state and power (start, pause/resume, stop, restart, with progress and toasts),
+  local/remote mode, resolution, Moonlight hosts and pairing, and a log of every command it
+  runs. It follows the Omarchy theme and floats like other Omarchy tools. `omvm-gui
+  --install` adds "macOS VM" to the app launcher and the Hyprland float rule (needs
+  `python-gobject gtk4 libadwaita`; the CLI works without them); `--selftest` checks it.
 - **Switching:** `share/hypr-macos-vm.lua` (append it to `~/.config/hypr/bindings.lua`)
   adds keys that work in both modes, even while the VM has the keyboard captured:
 

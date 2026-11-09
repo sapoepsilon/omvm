@@ -5,6 +5,37 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- **`omvm start|stop|restart|pause|resume NAME`** for libvirt VMs (`bin/omvm`,
+  `cmd_power`; `omvm start NAME IMAGE` / `omvm stop NAME` of a throwaway run are
+  unchanged). stop: watchdog timer *and* its service off first (they used to race
+  the shutdown: the GUI stopped the timer and sent `virsh shutdown` in parallel and
+  left a running `ensure-vm` alone), resumes a paused guest, then `vm_shutdown`.
+  start: `virsh start` (or resume) + watchdog on. pause/resume: `virsh
+  suspend|resume`. `vm_shutdown` now treats `in shutdown`/`paused` as still on.
+- **`omvm-gui` rework**: power buttons go through the CLI above (no duplicated stop
+  sequence); Start / Pause⇄Resume / Stop / Restart show a spinner + "Stopping…" in
+  the button and state row, every button is disabled while an action runs, state is
+  polled every 2 s during an action and every 10 s idle (polls no longer flash the
+  header spinner), success/failure as Adw toasts (stderr's last line; "Force off"
+  on a failed stop) + an `omarchy-notification-send` desktop notification for
+  start/stop/restart/mode. Confirm dialogs for Stop, Restart, mode switch.
+  Omarchy look: colors from `~/.local/state/omarchy/current/theme/colors.toml`
+  (accent, backgrounds, red/green/yellow) as libadwaita CSS variables, dark/light
+  from its `mode`, the monospace font (`fc-match monospace`, JetBrainsMono Nerd
+  Font), follows `omarchy theme set` live; `--install` adds
+  `o.window("^dev\\.omvm\\.Gui$", { tag = "+floating-window" })` to
+  `~/.config/hypr/looknfeel.lua` (875x600, floating, centered). Esc / Ctrl+W
+  close, Ctrl+R / F5 refresh. Open desktop uses `omvm show`. Resolution only in
+  remote mode. Fixes: `--install` from a shell without `OMVM_*` wiped
+  `~/.config/omvm/gui.env` (now merges); subprocess timeouts kill the whole process
+  group; PATH gets `~/.local/bin` for launcher starts; paired-client parsing
+  tolerates missing keys and marks disabled clients. `omvm-gui --selftest` checks
+  the read-only paths headlessly (19 checks pass).
+- Tested in the owner's session (local mode) through AT-SPI clicks + grim:
+  Pause→Resume (paused/running), Stop (confirm, spinner, off in ~15 s), Start
+  (guest SSH in ~9 s), Restart (off at +14 s, running at +15 s), mode switch confirm
+  → Cancel (stays local), Esc closes. VM left running in local mode, watchdog on.
+
 - **Switching keys** (`share/hypr-macos-vm.lua`, installed into
   `~/.config/hypr/bindings.lua`): Ctrl+Alt+M toggles macOS ⇄ Omarchy (from the VM
   to the most recently focused other window, by Hyprland's focus history; from

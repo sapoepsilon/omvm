@@ -5,33 +5,68 @@
 # Every action shells out to `omvm`, `virsh -c qemu:///session`, `systemctl --user`,
 # `hyprctl`, `vncviewer` or `lsusb`; the CLI stays the source of truth and works
 # without GTK installed. Needs: sudo pacman -S --needed python-gobject gtk4 libadwaita
+# It follows the current Omarchy theme (colors.toml, monospace font) and floats
+# centered like other Omarchy tools. Esc closes, Ctrl+R refreshes.
 #
 #   omvm-gui                 open the window (VM name: $OMVM_VM or "macos")
 #   omvm-gui --install       add "macOS VM" to the app launcher, link ~/.local/bin/omvm-gui,
-#                            and remember this shell's OMVM_* variables for the launcher
-#   omvm-gui --uninstall     remove the launcher entry and the link
+#                            float it in Hyprland, remember this shell's OMVM_* variables
+#   omvm-gui --uninstall     remove the launcher entry, the link and the window rule
+#   omvm-gui --selftest      check the read-only paths headlessly (no window, no changes)
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import tomllib
 from pathlib import Path
 
 SELF = Path(os.path.realpath(__file__))
 HOME = Path.home()
 VM = os.environ.get("OMVM_VM", "macos")
 VIRSH = ["virsh", "-q", "-c", "qemu:///session"]
-ENV_FILE = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "omvm" / "gui.env"
+XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+ENV_FILE = XDG_CONFIG / "omvm" / "gui.env"
 DESKTOP = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications" / "omvm-gui.desktop"
 LINK = HOME / ".local/bin/omvm-gui"
+APP_ID = "dev.omvm.Gui"
+HYPR_RULES = XDG_CONFIG / "hypr" / "looknfeel.lua"
+APP_RE = APP_ID.replace(".", "\\\\.")  # Lua string for the regex ^dev\.omvm\.Gui$
+HYPR_RULE = (f'o.window("^{APP_RE}$", {{ tag = "+floating-window" }})'
+             "  -- omvm-gui: float + center like other Omarchy tools")
+THEME_DIRS = [HOME / ".local/state/omarchy/current", XDG_CONFIG / "omarchy/current"]
 TAILSCALE_FALLBACK = "100.72.93.99"
 HOSTS = [  # (Moonlight host, Sunshine config dir, base port, user unit)
-    ("omarchy", HOME / ".config/sunshine", 47989, "omvm-sunshine"),
-    (VM, HOME / f".config/sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
+    ("omarchy", XDG_CONFIG / "sunshine", 47989, "omvm-sunshine"),
+    (VM, XDG_CONFIG / f"sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
 ]
+WATCHDOG = f"omvm-vm@{VM}.timer"
+# libvirt domstate -> (label, css class)
+STATES = {
+    "running": ("Running", "success"),
+    "paused": ("Paused", "warning"),
+    "in shutdown": ("Shutting down", "warning"),
+    "shut off": ("Off", "dim-label"),
+    "crashed": ("Crashed", "error"),
+    "pmsuspended": ("Suspended", "warning"),
+    "blocked": ("Blocked", "warning"),
+}
+# omvm verb -> (in-progress text, done text, timeout s, confirm (heading, body) or None)
+POWER = {
+    "start": ("Starting…", "Started", 180, None),
+    "stop": ("Stopping…", "Stopped", 300,
+             ("Shut the VM down?", "macOS gets a clean shutdown (up to 4 min); unsaved work in the "
+              "guest may be lost. The watchdog stays off until you start it again.")),
+    "restart": ("Restarting…", "Restarted", 420,
+                ("Restart the VM?", "Clean shutdown, then start again.")),
+    "pause": ("Pausing…", "Paused", 30, None),
+    "resume": ("Resuming…", "Resumed", 30, None),
+}
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def omvm_bin():
@@ -40,7 +75,7 @@ def omvm_bin():
 
 
 def load_env():
-    """The launcher does not read ~/.bashrc: apply the OMVM_* saved by --install."""
+    """The launcher does not read ~/.bashrc: apply the OMVM_* saved by --install, fix PATH."""
     env = dict(os.environ)
     try:
         for line in ENV_FILE.read_text().splitlines():
@@ -49,6 +84,11 @@ def load_env():
                 env[k] = v
     except OSError:
         pass
+    path = env.get("PATH", "").split(":")
+    for d in (str(HOME / ".local/bin"), "/usr/local/bin", "/usr/bin"):
+        if d not in path:
+            path.append(d)
+    env["PATH"] = ":".join(p for p in path if p)
     env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     env.setdefault("WAYLAND_DISPLAY", "wayland-1")
     if "HYPRLAND_INSTANCE_SIGNATURE" not in env:
@@ -57,37 +97,62 @@ def load_env():
             env["HYPRLAND_INSTANCE_SIGNATURE"] = max(hy.iterdir(), key=lambda p: p.stat().st_mtime).name
         except (OSError, ValueError):
             pass
+    env.pop("NO_COLOR", None)
     return env
 
 
 ENV = load_env()
 
 
+# ---------------------------------------------------------------- install
 def install():
+    # merge: a shell without the OMVM_* (ssh, another terminal) must not wipe the saved ones
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    saved = {k: v for k, v in os.environ.items() if k.startswith("OMVM_")}
+    saved = {}
+    try:
+        for line in ENV_FILE.read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k.startswith("OMVM_"):
+                saved[k] = v
+    except OSError:
+        pass
+    saved.update({k: v for k, v in os.environ.items() if k.startswith("OMVM_")})
     ENV_FILE.write_text("".join(f"{k}={v}\n" for k, v in sorted(saved.items())))
     DESKTOP.parent.mkdir(parents=True, exist_ok=True)
     DESKTOP.write_text(
         "[Desktop Entry]\nType=Application\nName=macOS VM\n"
-        "Comment=Start, stop and stream the omvm macOS VM\n"
+        "Comment=Start, stop, pause and stream the omvm macOS VM\n"
         f"Exec={SELF}\nIcon=computer\nTerminal=false\nCategories=System;Emulator;\n"
-        "Keywords=omvm;macOS;VM;Moonlight;Sunshine;\nStartupWMClass=dev.omvm.Gui\n")
+        "Keywords=omvm;macOS;VM;Moonlight;Sunshine;power;\n"
+        f"StartupWMClass={APP_ID}\nStartupNotify=true\n")
     LINK.parent.mkdir(parents=True, exist_ok=True)
     if LINK.is_symlink() or not LINK.exists():
         LINK.unlink(missing_ok=True)
         LINK.symlink_to(SELF)
     print(f"installed {DESKTOP}, {LINK} -> {SELF}")
     print(f"saved {', '.join(sorted(saved)) or 'no OMVM_* variables'} to {ENV_FILE}")
+    if HYPR_RULES.exists():
+        text = HYPR_RULES.read_text()
+        if APP_RE not in text:
+            HYPR_RULES.write_text(text.rstrip("\n") + "\n\n" + HYPR_RULE + "\n")
+            print(f"added the floating-window rule to {HYPR_RULES}")
+    else:
+        print(f"no {HYPR_RULES}: add this to your Hyprland config to float the window:\n  {HYPR_RULE}")
 
 
 def uninstall():
     DESKTOP.unlink(missing_ok=True)
     if LINK.is_symlink():
         LINK.unlink()
-    print(f"removed {DESKTOP} and {LINK}")
+    if HYPR_RULES.exists():
+        lines = HYPR_RULES.read_text().splitlines(keepends=True)
+        kept = [l for l in lines if l.strip() != HYPR_RULE]
+        if kept != lines:
+            HYPR_RULES.write_text("".join(kept).rstrip("\n") + "\n")
+    print(f"removed {DESKTOP}, {LINK} and the window rule")
 
 
+# ---------------------------------------------------------------- helpers (no GTK)
 SECRET = re.compile(r"(password|passwd|creds|omvm-webui-login|credentials|-u \S+:\S+)", re.I)
 
 
@@ -97,228 +162,536 @@ def redact(text):
 
 
 def run_sync(argv, timeout=30):
+    """-> (rc, stdout, stderr). Own process group, so a timeout also kills ssh & co."""
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=ENV,
-                           stdin=subprocess.DEVNULL)
-        return p.returncode, (p.stdout + p.stderr).strip()
-    except FileNotFoundError:
-        return 127, f"{argv[0]}: not found"
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             stdin=subprocess.DEVNULL, env=ENV, start_new_session=True)
+    except OSError as e:
+        return 127, "", f"{argv[0]}: {e.strerror or e}"
+    try:
+        out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return 124, f"timed out after {timeout}s"
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(p.pid, sig)
+                out, err = p.communicate(timeout=5)
+                break
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                out, err = "", ""
+        return 124, ANSI.sub("", out or "").strip(), f"timed out after {timeout}s"
+    return p.returncode, ANSI.sub("", out).strip(), ANSI.sub("", err).strip()
+
+
+def last_line(*texts):
+    for t in texts:
+        lines = [l.strip() for l in (t or "").splitlines() if l.strip()]
+        if lines:
+            return re.sub(r"^error:\s*", "", lines[-1])
+    return ""
+
+
+def parse_state(rc, out):
+    return out.splitlines()[0].strip() if rc == 0 and out.strip() else "unknown"
+
+
+def parse_mode(rc, out):
+    m = out.strip().splitlines()[-1].strip() if rc == 0 and out.strip() else None
+    return m if m in ("local", "remote") else None
+
+
+def parse_features(out):
+    """Commands `omvm help` lists, e.g. {"mode", "show", "restart", "pause", ...}."""
+    feats = set()
+    for m in re.finditer(r"^\s*omvm ([\w|-]+)", out, re.M):
+        feats.update(m.group(1).split("|"))
+    return feats
+
+
+def parse_lsusb(rc, out):
+    """-> (devices [(bus, dev, vidpid, desc)], note or None)."""
+    lines = [l for l in out.splitlines() if l.strip()] if rc == 0 else []
+    devs = []
+    for l in lines:
+        m = re.match(r"Bus (\d+) Device (\d+): ID ([0-9a-f]{4}:[0-9a-f]{4})\s*(.*)", l)
+        if m:
+            devs.append(m.groups())
+    if devs:
+        return devs, None
+    if rc == 127:
+        return [], "lsusb not found (sudo pacman -S usbutils)"
+    if rc in (0, 1) and not out.strip():  # lsusb exits 1 with no output when there are no devices
+        return [], "no USB devices on this host"
+    return [], "lsusb failed: see log" if rc not in (0, 1) else "no USB devices listed"
 
 
 def paired_clients(conf_dir):
     """Names only, from Sunshine's state file (never the certificates or login)."""
     try:
         j = json.loads((conf_dir / "sunshine_state.json").read_text())
-        return [d.get("name", "?") for d in j.get("root", {}).get("named_devices", [])]
-    except (OSError, ValueError):
+        devs = (j.get("root") or {}).get("named_devices") or []
+        return [(d.get("name") or "?") + ("" if d.get("enabled", True) else " (disabled)")
+                for d in devs if isinstance(d, dict)]
+    except (OSError, ValueError, AttributeError):
         return None
 
 
+def theme():
+    """-> (name, colors dict, monospace font) of the current Omarchy theme (or Nones)."""
+    for d in THEME_DIRS:
+        f = d / "theme" / "colors.toml"
+        try:
+            colors = tomllib.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        try:
+            name = (d / "theme.name").read_text().strip()
+        except OSError:
+            name = d.name
+        return name, colors, None
+    return None, {}, None
+
+
+def mono_font():
+    rc, out, _ = run_sync(["fc-match", "monospace", "-f", "%{family}"], timeout=5)
+    return out.split(",")[0].strip() if rc == 0 and out.strip() else "monospace"
+
+
+def theme_css(colors, font):
+    c = {k: v for k, v in colors.items() if isinstance(v, str) and re.fullmatch(r"#[0-9a-fA-F]{3,8}", v)}
+    bg = c.get("background")
+    css = [f'window, dialog, popover, toast {{ font-family: "{font}", monospace; }}',
+           "button, .card, entry, row.entry, toast, list.boxed-list { border-radius: 4px; }",
+           ".omvm-state { font-weight: bold; }",
+           "button:disabled { opacity: 0.4; }",
+           "button:disabled.suggested-action, button:disabled.destructive-action {"
+           " background: alpha(currentColor, 0.08); color: alpha(currentColor, 0.5); }",
+           "textview.omvm-log, textview.omvm-log text { font-size: 0.9em; }"]
+    if not bg:
+        return "\n".join(css)
+    pick = lambda *ks: next((c[k] for k in ks if k in c), bg)  # noqa: E731
+    named = {
+        "accent": pick("accent", "blue"), "accent_bg": pick("accent", "blue"), "accent_fg": pick("darker_background", "background"),
+        "window_bg": bg, "window_fg": pick("foreground"),
+        "view_bg": pick("dark_background", "background"), "view_fg": pick("foreground"),
+        "headerbar_bg": pick("dark_background", "background"), "headerbar_fg": pick("foreground"),
+        "headerbar_backdrop": pick("dark_background", "background"),
+        "card_bg": pick("lighter_background", "selection"), "card_fg": pick("foreground"),
+        "dialog_bg": pick("lighter_background", "background"), "dialog_fg": pick("foreground"),
+        "popover_bg": pick("lighter_background", "background"), "popover_fg": pick("foreground"),
+        "sidebar_bg": pick("dark_background", "background"),
+        "destructive": pick("red"), "destructive_bg": pick("red"), "destructive_fg": pick("darker_background", "background"),
+        "success": pick("green"), "success_bg": pick("green"), "success_fg": pick("darker_background", "background"),
+        "warning": pick("yellow"), "warning_bg": pick("yellow"), "warning_fg": pick("darker_background", "background"),
+        "error": pick("red"), "error_bg": pick("red"), "error_fg": pick("darker_background", "background"),
+    }
+    # libadwaita >= 1.6 reads CSS variables; older releases read the @define-color names
+    css.insert(0, ":root { " + " ".join(f"--{k.replace('_', '-')}-color: {v};" for k, v in named.items()) + " }")
+    css[1:1] = [f"@define-color {k}_color {v};" for k, v in named.items()]
+    return "\n".join(css)
+
+
+def notify(head, body="", urgent=False):
+    """Desktop notification the Omarchy way (omarchy-notification-send), else notify-send."""
+    if shutil.which("omarchy-notification-send", path=ENV["PATH"]):
+        argv = ["omarchy-notification-send", "--app-name", "omvm", "-g", "󰍹",
+                "-u", "critical" if urgent else "normal", head] + ([body] if body else [])
+    else:
+        argv = ["notify-send", "-a", "omvm", "-u", "critical" if urgent else "normal", head] + ([body] if body else [])
+    try:
+        subprocess.Popen(argv, env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- self-test
+def selftest():
+    """Exercise the read-only paths without a window. Exit 1 if a required one fails."""
+    fails = 0
+
+    def check(name, good, detail, required=True):
+        nonlocal fails
+        print(f"  {'ok ' if good else 'FAIL' if required else 'warn'} {name}: {detail}")
+        fails += 0 if good or not required else 1
+
+    print(f"omvm-gui self-test (VM {VM}, omvm {omvm_bin()})")
+    check("PATH has /usr/bin", "/usr/bin" in ENV["PATH"].split(":"), ENV["PATH"])
+    rc, out, err = run_sync([omvm_bin(), "help"], 10)
+    feats = parse_features(out)
+    check("omvm help", rc == 0 and "mode" in feats, f"rc {rc}, {len(feats)} commands")
+    check("omvm power verbs", {"restart", "pause", "resume"} <= feats,
+          "start|stop|restart|pause|resume listed" if {"restart", "pause", "resume"} <= feats else
+          "missing: update bin/omvm")
+    rc, out, err = run_sync(VIRSH + ["domstate", VM], 10)
+    st = parse_state(rc, out)
+    check("virsh domstate", st in STATES, f"{st}" + (f" ({last_line(err)})" if rc else ""))
+    rc, out, err = run_sync([omvm_bin(), "mode", VM], 20)
+    check("omvm mode", parse_mode(rc, out) is not None, parse_mode(rc, out) or last_line(err, out))
+    rc, out, err = run_sync(["systemctl", "--user", "is-active", WATCHDOG], 10)
+    check("watchdog", rc in (0, 3), f"{WATCHDOG} {out or '?'}")
+    for name, conf, port, unit in HOSTS:
+        cl = paired_clients(conf)
+        check(f"paired clients {name}", cl is not None, f"{len(cl)} ({conf.name}/sunshine_state.json)"
+              if cl is not None else "unreadable", required=False)
+        rc, out, _ = run_sync(["systemctl", "--user", "is-active", unit], 10)
+        check(f"sunshine {name}", rc in (0, 3), out or "?", required=False)
+    rc, out, err = run_sync(["lsusb"], 10)
+    devs, note = parse_lsusb(rc, out)
+    check("lsusb", rc != 127, f"{len(devs)} devices" + (f", '{note}'" if note else ""), required=False)
+    # parser edge cases
+    check("parse lsusb empty", parse_lsusb(1, "") == ([], "no USB devices on this host"), "rc 1, no output")
+    check("parse lsusb line", parse_lsusb(0, "Bus 001 Device 002: ID 05ac:024f Apple Keyboard")[0]
+          == [("001", "002", "05ac:024f", "Apple Keyboard")], "one device")
+    check("parse state error", parse_state(1, "error: failed") == "unknown", "virsh error -> unknown")
+    check("parse features", {"start", "stop", "restart", "show"} <= parse_features(
+        "  omvm start|stop|restart|pause|resume NAME\n  omvm show [NAME]\n"), "a|b|c verbs")
+    rc, out, err = run_sync(["tailscale", "ip", "-4"], 10)
+    check("tailscale ip", rc == 0, out.split()[0] if rc == 0 and out else last_line(err), required=False)
+    name, colors, _ = theme()
+    css = theme_css(colors, mono_font())
+    check("Omarchy theme", bool(colors.get("background")), f"{name}, accent {colors.get('accent')}, font {mono_font()}",
+          required=False)
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw, Gtk  # noqa: F401
+        errors = []
+        prov = Gtk.CssProvider()
+        prov.connect("parsing-error", lambda _p, _s, e: errors.append(e.message))
+        prov.load_from_string(css)
+        check("GTK4 + libadwaita", True, f"Gtk {Gtk.get_major_version()}.{Gtk.get_minor_version()}, "
+              f"Adw {Adw.get_major_version()}.{Adw.get_minor_version()}")
+        check("theme CSS parses", not errors, "; ".join(errors[:3]) or f"{len(css)} bytes")
+    except (ImportError, ValueError) as e:
+        check("GTK4 + libadwaita", False, str(e))
+    print("self-test " + ("passed" if not fails else f"failed ({fails})"))
+    return 1 if fails else 0
+
+
+# ---------------------------------------------------------------- GUI
 def main_gui():
     try:
         import gi
         gi.require_version("Gtk", "4.0")
         gi.require_version("Adw", "1")
-        from gi.repository import Adw, Gio, GLib, Gtk, Pango
+        from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
     except (ImportError, ValueError) as e:
         sys.exit(f"omvm-gui needs GTK4 + libadwaita ({e}).\n"
                  "  sudo pacman -S --needed python-gobject gtk4 libadwaita\n"
                  "The omvm CLI works without them.")
 
+    def busy_child(text):
+        box = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        box.append(Adw.Spinner())
+        box.append(Gtk.Label(label=text))
+        return box
+
     class Window(Adw.ApplicationWindow):
         def __init__(self, app):
-            super().__init__(application=app, title="macOS VM", default_width=620, default_height=900)
+            super().__init__(application=app, title="macOS VM", default_width=875, default_height=600)
             self.features = set()
-            self.state = "?"
-            self.mode = None
-            self.busy = 0
+            self.state = None          # libvirt domstate
+            self.mode = None           # local | remote
+            self.action = None         # verb of the power/mode action in progress
+            self.action_text = ""      # what the state row says meanwhile, e.g. "Stopping…"
+            self.busy_btn = None       # (button, label) showing a spinner
             self._setting_mode = False
+            self._poll_src = None
+            self._polling = False
 
+            self.toasts = Adw.ToastOverlay()
             view = Adw.ToolbarView()
             header = Adw.HeaderBar()
+            self.wtitle = Adw.WindowTitle(title="macOS VM", subtitle=VM)
+            header.set_title_widget(self.wtitle)
             self.spinner = Adw.Spinner(visible=False)
             header.pack_start(self.spinner)
-            refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
+            refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh (Ctrl+R)")
             refresh.connect("clicked", lambda *_: self.refresh_all(log=True))
             header.pack_end(refresh)
             view.add_top_bar(header)
 
             page = Adw.PreferencesPage()
-            page.add(self.build_vm())
-            page.add(self.build_display())
-            page.add(self.build_moonlight())
-            page.add(self.build_usb())
-            page.add(self.build_shares())
-            page.add(self.build_log())
+            for g in (self.build_vm(), self.build_display(), self.build_moonlight(),
+                      self.build_usb(), self.build_shares(), self.build_log()):
+                page.add(g)
             view.set_content(page)
-            self.set_content(view)
+            self.toasts.set_child(view)
+            self.set_content(self.toasts)
+
+            keys = Gtk.ShortcutController(scope=Gtk.ShortcutScope.MANAGED)
+            for accel, fn in (("Escape", lambda: self.close()), ("<Control>w", lambda: self.close()),
+                              ("<Control>q", lambda: self.close()),
+                              ("<Control>r", lambda: self.refresh_all(log=True)), ("F5", lambda: self.refresh_all(log=True))):
+                keys.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string(accel),
+                                               action=Gtk.CallbackAction.new(lambda *_a, f=fn: (f(), True)[1])))
+            self.add_controller(keys)
 
             self.refresh_all(log=True)
-            GLib.timeout_add_seconds(5, self.poll_state)
 
         # ---------------------------------------------------------- runner
-        def run(self, argv, label=None, done=None, timeout=120, log=True, ok=(0,)):
-            """Run argv off the UI thread; log the command + output; call done(rc, out) on the UI thread."""
-            self.set_busy(+1)
+        def run(self, argv, label=None, done=None, timeout=120, log=True, ok=(0,), quiet=False):
+            """Run argv off the UI thread; log it; call done(rc, out, err) on the UI thread."""
+            if not quiet:
+                self.set_busy(+1)
 
             def work():
-                rc, out = run_sync(argv, timeout)
-                GLib.idle_add(finish, rc, out)
+                res = run_sync(argv, timeout)
+                GLib.idle_add(finish, *res)
 
-            def finish(rc, out):
-                self.set_busy(-1)
+            def finish(rc, out, err):
+                if not quiet:
+                    self.set_busy(-1)
                 if log:
-                    self.log(f"$ {shlex.join(argv)}", out, 0 if rc in ok else rc, label)
+                    text = "\n".join(t for t in (out, err) if t)
+                    self.log(f"$ {shlex.join(argv)}", text, 0 if rc in ok else rc, label)
                 if done:
-                    done(rc, out)
+                    done(rc, out, err)
                 return False
 
             threading.Thread(target=work, daemon=True).start()
 
         def set_busy(self, d):
-            self.busy += d
-            self.spinner.set_visible(self.busy > 0)
+            self.busy = getattr(self, "busy", 0) + d
+            self.spinner.set_visible(self.busy > 0 or self.action is not None)
 
         def log(self, cmd, out="", rc=0, label=None):
             buf = self.logview.get_buffer()
-            end = buf.get_end_iter()
             head = f"{label}: " if label else ""
-            buf.insert_with_tags_by_name(end, f"{head}{cmd}\n", "cmd")
+            buf.insert_with_tags_by_name(buf.get_end_iter(), f"{head}{cmd}\n", "cmd")
             if out:
                 buf.insert(buf.get_end_iter(), redact(out) + "\n")
             if rc:
                 buf.insert_with_tags_by_name(buf.get_end_iter(), f"(exit {rc})\n", "err")
             buf.insert(buf.get_end_iter(), "\n")
-            GLib.idle_add(lambda: self.logview.scroll_to_mark(buf.get_insert(), 0, False, 0, 0) and False)
             buf.place_cursor(buf.get_end_iter())
+            GLib.idle_add(lambda: (self.logview.scroll_to_mark(buf.get_insert(), 0, False, 0, 0), False)[1])
 
-        def toast_ok(self, rc, msg_ok, msg_fail):
-            self.status_row.set_subtitle(msg_ok if rc == 0 else msg_fail)
+        def toast(self, text, timeout=4, action=None):
+            t = Adw.Toast(title=GLib.markup_escape_text(text), timeout=timeout)
+            if action:
+                t.set_button_label(action[0])
+                t.connect("button-clicked", lambda *_: action[1]())
+            self.toasts.add_toast(t)
+
+        def button_busy(self, btn, text):
+            self.button_idle()
+            self.busy_btn = (btn, btn.get_label())
+            btn.set_child(busy_child(text))
+            btn.set_sensitive(False)
+
+        def button_idle(self):
+            if self.busy_btn:
+                btn, label = self.busy_btn
+                btn.set_label(label)
+                btn.set_sensitive(True)
+                self.busy_btn = None
 
         # ---------------------------------------------------------- 1. VM
         def build_vm(self):
             g = Adw.PreferencesGroup(title="VM", description=f"libvirt domain “{VM}” (qemu:///session)")
             self.status_row = Adw.ActionRow(title="State", subtitle="…")
-            self.state_label = Gtk.Label(label="…", css_classes=["title-4"])
+            self.state_spinner = Adw.Spinner(visible=False)
+            self.state_label = Gtk.Label(label="…", css_classes=["omvm-state"])
+            self.status_row.add_suffix(self.state_spinner)
             self.status_row.add_suffix(self.state_label)
             g.add(self.status_row)
 
             row = Adw.ActionRow(title="Power")
             box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-            self.btn_start = Gtk.Button(label="Start", css_classes=["suggested-action"])
-            self.btn_stop = Gtk.Button(label="Stop")
-            self.btn_restart = Gtk.Button(label="Restart")
-            self.btn_start.connect("clicked", lambda *_: self.vm_start())
-            self.btn_stop.connect("clicked", lambda *_: self.confirm(
-                "Shut the VM down?", "macOS gets a clean shutdown; unsaved work in the guest may be lost.",
-                "Stop", lambda: self.vm_stop()))
-            self.btn_restart.connect("clicked", lambda *_: self.confirm(
-                "Restart the VM?", "Clean shutdown, then start again.", "Restart",
-                lambda: self.vm_stop(then=self.vm_start)))
-            for b in (self.btn_start, self.btn_stop, self.btn_restart):
+            self.btn = {}
+            for verb, label, css in (("start", "Start", ["suggested-action"]), ("pause", "Pause", []),
+                                     ("stop", "Stop", ["destructive-action"]), ("restart", "Restart", [])):
+                b = Gtk.Button(label=label, css_classes=css, sensitive=False)
+                b.connect("clicked", lambda _b, v=verb: self.on_power(v))
                 box.append(b)
+                self.btn[verb] = b
             row.add_suffix(box)
             g.add(row)
 
-            desk = Adw.ActionRow(title="Open desktop", subtitle="local: focus the window · remote: VNC viewer")
-            b = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
-            b.connect("clicked", lambda *_: self.open_desktop())
-            desk.add_suffix(b)
+            desk = Adw.ActionRow(title="Open desktop", subtitle="local: focus its window · remote: VNC viewer")
+            self.btn_open = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+            self.btn_open.connect("clicked", lambda *_: self.open_desktop())
+            desk.add_suffix(self.btn_open)
             g.add(desk)
             return g
 
+        def schedule_poll(self, seconds=None):
+            if self._poll_src:
+                GLib.source_remove(self._poll_src)
+            secs = seconds if seconds is not None else (2 if self.action else 10)
+            self._poll_src = GLib.timeout_add_seconds(secs, self._poll_fire)
+
+        def _poll_fire(self):
+            self._poll_src = None
+            self.poll_state()
+            return False
+
         def poll_state(self):
-            self.run(VIRSH + ["domstate", VM], done=self.got_state, timeout=10, log=False)
-            return True
+            if self._polling:
+                return
+            self._polling = True
+            self.run(VIRSH + ["domstate", VM], done=self.got_state, timeout=10, log=False, quiet=True)
 
-        def got_state(self, rc, out):
-            self.state = out.splitlines()[0].strip() if rc == 0 and out else "unknown"
-            self.state_label.set_label(self.state)
-            running = self.state == "running"
-            self.btn_start.set_sensitive(not running)
-            self.btn_stop.set_sensitive(running)
-            self.btn_restart.set_sensitive(running)
+        def got_state(self, rc, out, err):
+            self._polling = False
+            self.state = parse_state(rc, out)
+            self.render_state()
+            self.schedule_poll()
 
-        def vm_start(self):
-            def started(rc, out):
-                self.toast_ok(rc, "started", "start failed: see log")
-                self.run(["systemctl", "--user", "start", f"omvm-vm@{VM}.timer"], "watchdog on")
-                self.poll_state()
-            self.run(VIRSH + ["start", VM], "Start", started)
+        def render_state(self):
+            label, css = STATES.get(self.state, (self.state or "…", "error"))
+            if self.action:
+                label, css = self.action_text, "accent"
+            self.state_label.set_label(label)
+            self.state_label.set_css_classes(["omvm-state", css])
+            self.state_spinner.set_visible(self.action is not None)
+            self.spinner.set_visible(self.action is not None or getattr(self, "busy", 0) > 0)
+            self.wtitle.set_subtitle(f"{VM} · {label.lower()}" + (f" · {self.mode}" if self.mode else ""))
+            s, idle = self.state, self.action is None
+            on = s in ("running", "paused", "pmsuspended", "blocked")
+            self.btn["start"].set_sensitive(idle and s in ("shut off", "crashed"))
+            if not (self.busy_btn and self.busy_btn[0] is self.btn["pause"]):
+                self.btn["pause"].set_label("Resume" if s == "paused" else "Pause")
+            self.btn["pause"].set_sensitive(idle and s in ("running", "paused"))
+            self.btn["stop"].set_sensitive(idle and on)
+            self.btn["restart"].set_sensitive(idle and on)
+            self.mode_group.set_sensitive(idle and self.mode is not None and s in ("running", "shut off", "crashed"))
+            self.res_row.set_sensitive(idle and self.mode == "remote" and s == "running")
+            self.btn_open.set_sensitive(idle and s != "in shutdown")
+            if self.busy_btn and self.busy_btn[0] in self.btn.values():
+                self.busy_btn[0].set_sensitive(False)
 
-        def vm_stop(self, then=None):
-            # the watchdog (omvm-vm@VM.timer) would start the VM again within a minute
-            self.run(["systemctl", "--user", "stop", f"omvm-vm@{VM}.timer"], "watchdog off")
-            self.status_row.set_subtitle("shutting down…")
-            tries = {"n": 0}
+        def update_subtitle(self, watchdog=None):
+            if watchdog is not None:
+                self._watchdog = watchdog
+            parts = [f"{self.mode} mode" if self.mode else "mode unknown",
+                     f"watchdog {getattr(self, '_watchdog', '?')}"]
+            self.status_row.set_subtitle(" · ".join(parts))
 
-            def check(rc, out):
-                if out.strip() != "running":
-                    self.status_row.set_subtitle("off")
-                    self.poll_state()
-                    if then:
-                        then()
-                    return
-                tries["n"] += 1
-                if tries["n"] == 5:  # vmapple ignores libvirt's power button: ask macOS itself
-                    self.run([omvm_bin(), "ssh", VM, "sudo -n shutdown -h now"], "guest shutdown", timeout=30)
-                if tries["n"] > 120:
-                    self.status_row.set_subtitle("still running after 4 min: see log")
-                    self.log("Stop gave up", f"force with: virsh -c qemu:///session destroy {VM}", 1)
-                    return
-                GLib.timeout_add_seconds(2, lambda: self.run(VIRSH + ["domstate", VM], done=check,
-                                                            timeout=10, log=False) and False)
+        def on_power(self, verb):
+            if verb == "pause" and self.state == "paused":
+                verb = "resume"
+            if self.action:
+                return
+            if {"restart", "pause", "resume"} - self.features and self.features:
+                self.toast("this omvm has no start|stop|restart|pause|resume NAME: update bin/omvm")
+                return
+            busy, done_text, timeout, ask = POWER[verb]
+            if ask:
+                self.confirm(ask[0], ask[1], verb.capitalize(), lambda: self.power(verb), destructive=True)
+            else:
+                self.power(verb)
 
-            self.run(VIRSH + ["shutdown", VM], "Stop",
-                     lambda rc, out: self.run(VIRSH + ["domstate", VM], done=check, log=False))
+        def power(self, verb):
+            busy, done_text, timeout, _ = POWER[verb]
+            btn = self.btn["pause" if verb in ("pause", "resume") else verb]
+            self.begin_action(verb, btn, busy)
+            long_ = verb in ("start", "stop", "restart")
+
+            def finished(rc, out, err):
+                if rc == 0:
+                    msg = f"{VM}: {done_text.lower()}"
+                    self.toast(msg)
+                    if long_:
+                        notify(f"macOS VM {done_text.lower()}", last_line(out))
+                else:
+                    why = last_line(err, out) or f"exit {rc}"
+                    self.toast(f"{verb.capitalize()} failed: {why}", timeout=0,
+                               action=("Force off", self.force_off) if verb in ("stop", "restart") else None)
+                    if long_:
+                        notify(f"macOS VM: {verb} failed", why, urgent=True)
+                self.end_action()
+            self.run([omvm_bin(), verb, VM], verb.capitalize(), finished, timeout=timeout)
+
+        def force_off(self):
+            self.confirm("Force the VM off?", "Like pulling the power cord: macOS does not shut down cleanly.",
+                         "Force off", lambda: (self.begin_action("stop", self.btn["stop"], "Forcing off…"),
+                                               self.run(VIRSH + ["destroy", VM], "Force off",
+                                                        lambda rc, out, err: (self.toast(
+                                                            "forced off" if rc == 0 else f"force off failed: {last_line(err, out)}"),
+                                                            self.end_action()))), destructive=True)
+
+        def begin_action(self, verb, btn, text):
+            self.action, self.action_text = verb, text
+            if btn:
+                self.button_busy(btn, text)
+            self.render_state()
+            self.schedule_poll(2)
+
+        def end_action(self):
+            self.action = None
+            self.button_idle()
+            self.render_state()
+            self.poll_state()
+            self.refresh_watchdog()
+
+        def refresh_watchdog(self):
+            self.run(["systemctl", "--user", "is-active", WATCHDOG], log=False, quiet=True, timeout=10,
+                     done=lambda rc, out, err: self.update_subtitle(out.strip() or "?"))
 
         def open_desktop(self):
+            if "show" in self.features:
+                self.button_busy(self.btn_open, "Opening…")
+
+                def shown(rc, out, err):
+                    self.button_idle()
+                    self.render_state()
+                    if rc != 0:
+                        self.toast(f"Open failed: {last_line(err, out) or rc}")
+                self.run([omvm_bin(), "show", VM], "Open desktop", shown, timeout=120)
+                return
             if self.mode == "local":
                 self.run(["hyprctl", "dispatch", "hl.dsp.focus({ window = 'class:reims-vgpu' })"],
                          "Open desktop (local)")
                 return
 
-            def got_port(rc, out):
-                m = re.search(r":(\d+)\s*$", out.strip().splitlines()[0]) if rc == 0 and out else None
-                target = f"localhost:{5900 + int(m.group(1))}" if m else "localhost:5900"
-                argv = ["vncviewer", target]
+            def got_port(rc, out, err):
+                m = re.search(r":(\d+)\s*$", out.strip().splitlines()[0]) if rc == 0 and out.strip() else None
+                if not m:
+                    self.toast("no VNC display: is the VM running in remote mode?")
+                    return
+                argv = ["vncviewer", "-Shared=1", f"127.0.0.1:{5900 + int(m.group(1))}"]
                 try:
-                    subprocess.Popen(argv, env=ENV, start_new_session=True,
+                    subprocess.Popen(argv, env=ENV, start_new_session=True, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     self.log(f"$ {shlex.join(argv)} &", "", 0, "Open desktop (remote)")
                 except OSError as e:
                     self.log(f"$ {shlex.join(argv)}", str(e), 1, "Open desktop (remote)")
+                    self.toast(f"Open failed: {e}")
             self.run(VIRSH + ["vncdisplay", VM], done=got_port, log=False)
 
         # ---------------------------------------------------------- 2. display
         def build_display(self):
-            g = Adw.PreferencesGroup(title="Display mode",
-                                     description="local: 120 Hz window on this screen · remote: VNC + Moonlight")
-            row = Adw.ActionRow(title="Mode", subtitle="switching restarts the VM")
-            self.mode_group = Adw.ToggleGroup(valign=Gtk.Align.CENTER)
+            g = Adw.PreferencesGroup(title="Display")
+            row = Adw.ActionRow(title="Mode", subtitle="local: 120 Hz window here · remote: VNC + Moonlight "
+                                                        "· switching restarts the VM")
+            self.mode_group = Adw.ToggleGroup(valign=Gtk.Align.CENTER, sensitive=False)
             self.mode_group.add(Adw.Toggle(name="local", label="Local"))
             self.mode_group.add(Adw.Toggle(name="remote", label="Remote"))
             self.mode_group.connect("notify::active-name", self.on_mode_toggled)
             row.add_suffix(self.mode_group)
             g.add(row)
 
-            self.res_row = Adw.EntryRow(title="Resolution (WxH, e.g. 2560x1440)", show_apply_button=True)
+            self.res_row = Adw.EntryRow(title="Resolution (remote mode, WxH e.g. 2560x1440)",
+                                        show_apply_button=True, sensitive=False)
             self.res_row.connect("apply", self.on_res_apply)
             g.add(self.res_row)
             return g
 
-        def got_mode(self, rc, out):
-            m = out.strip().splitlines()[-1] if rc == 0 and out else None
-            self.mode = m if m in ("local", "remote") else None
+        def got_mode(self, rc, out, err):
+            self.mode = parse_mode(rc, out)
             self._setting_mode = True
             if self.mode:
                 self.mode_group.set_active_name(self.mode)
             self._setting_mode = False
-            self.status_row.set_subtitle(f"{self.mode} mode" if self.mode else "not a libvirt VM? see log")
+            self.update_subtitle()
+            self.render_state()
             if self.mode == "remote" and self.state == "running":
-                self.run([omvm_bin(), "res", VM], "Current size", timeout=20)
+                self.run([omvm_bin(), "res", VM], "Current size", timeout=20,
+                         done=lambda rc, out, err: rc == 0 and out and
+                         self.res_row.set_title(f"Resolution (now {out.split()[0]}; WxH e.g. 2560x1440)"))
 
         def on_mode_toggled(self, group, _pspec):
             new = group.get_active_name()
@@ -328,29 +701,42 @@ def main_gui():
             self._setting_mode = True
             group.set_active_name(old)  # until confirmed
             self._setting_mode = False
+            if self.action:
+                return
 
             def go():
-                self.status_row.set_subtitle(f"switching to {new} (shutting down + restarting)…")
-                self.run([omvm_bin(), "mode", new, VM], f"Mode → {new}",
-                         lambda rc, out: (self.toast_ok(rc, f"{new} mode", "mode switch failed: see log"),
-                                          self.refresh_all(log=False)), timeout=600)
+                self.begin_action("mode", None, f"Switching to {new}…")
+
+                def done(rc, out, err):
+                    if rc == 0:
+                        self.toast(f"{VM}: {new} mode")
+                        notify(f"macOS VM: {new} mode", last_line(out))
+                    else:
+                        why = last_line(err, out) or f"exit {rc}"
+                        self.toast(f"Mode switch failed: {why}", timeout=0)
+                        notify("macOS VM: mode switch failed", why, urgent=True)
+                    self.end_action()
+                    self.run([omvm_bin(), "mode", VM], "Display mode", self.got_mode, timeout=20)
+                self.run([omvm_bin(), "mode", new, VM], f"Mode → {new}", done, timeout=600)
             self.confirm(f"Switch to {new} mode?",
                          "This shuts the VM down cleanly and starts it again in the new mode.",
-                         "Restart VM", go)
+                         "Restart VM", go, destructive=True)
 
         def on_res_apply(self, row):
             v = row.get_text().strip()
             if not re.fullmatch(r"\d+x\d+", v):
-                self.log("Resolution", f"'{v}' is not WxH", 1)
+                self.toast(f"'{v}' is not WxH, e.g. 2560x1440")
                 return
-            self.run([omvm_bin(), "res", VM, v], "Resolution", timeout=30)
+            self.run([omvm_bin(), "res", VM, v], "Resolution", timeout=30,
+                     done=lambda rc, out, err: self.toast(f"asked macOS for {v}" if rc == 0 else
+                                                          f"Resolution failed: {last_line(err, out)}"))
 
         # ---------------------------------------------------------- 3. moonlight
         def build_moonlight(self):
             g = Adw.PreferencesGroup(title="Moonlight", description="Sunshine hosts (add in Moonlight as ADDRESS:PORT)")
             self.host_rows = []
             for name, conf, port, unit in HOSTS:
-                r = Adw.ExpanderRow(title=f"{name}  :{port}", subtitle="…", expanded=True)
+                r = Adw.ExpanderRow(title=f"{name}  :{port}", subtitle="…")
                 g.add(r)
                 self.host_rows.append((r, name, conf, port, unit, []))
 
@@ -360,20 +746,21 @@ def main_gui():
             self.pin_row = Adw.EntryRow(title="PIN", input_purpose=Gtk.InputPurpose.DIGITS)
             self.devname_row = Adw.EntryRow(title="Device name", text="phone")
             btn_row = Adw.ActionRow()
-            b = Gtk.Button(label="Pair", css_classes=["suggested-action"], valign=Gtk.Align.CENTER)
-            b.connect("clicked", lambda *_: self.pair())
-            btn_row.add_suffix(b)
+            self.btn_pair = Gtk.Button(label="Pair", css_classes=["suggested-action"], valign=Gtk.Align.CENTER)
+            self.btn_pair.connect("clicked", lambda *_: self.pair())
+            self.pin_row.connect("entry-activated", lambda *_: self.pair())
+            btn_row.add_suffix(self.btn_pair)
             for r in (self.pair_target, self.pin_row, self.devname_row, btn_row):
                 pair.add_row(r)
             g.add(pair)
             return g
 
         def refresh_moonlight(self, log):
-            def got_ip(rc, out):
-                ip = out.split()[0] if rc == 0 and out else TAILSCALE_FALLBACK
+            def got_ip(rc, out, err):
+                ip = out.split()[0] if rc == 0 and out.strip() else TAILSCALE_FALLBACK
                 for r, name, conf, port, unit, kids in self.host_rows:
-                    self.run(["systemctl", "--user", "is-active", unit], log=log, label=f"{name} host",
-                             done=lambda rc, out, r=r, ip=ip, port=port: r.set_subtitle(
+                    self.run(["systemctl", "--user", "is-active", unit], log=log, label=f"{name} host", ok=(0, 3),
+                             quiet=True, done=lambda rc, out, err, r=r, ip=ip, port=port: r.set_subtitle(
                                  f"{ip}:{port} · sunshine {out.strip() or '?'}"))
                     for k in kids:
                         r.remove(k)
@@ -382,27 +769,32 @@ def main_gui():
                     if log:
                         self.log(f"paired clients of {name} ({conf}/sunshine_state.json, names only)",
                                  ", ".join(clients) if clients else "none" if clients is not None else "unreadable")
-                    for c in clients or []:
-                        k = Adw.ActionRow(title=c, subtitle="paired client")
+                    rows = [Adw.ActionRow(title=c, subtitle="paired client") for c in clients or []] or [
+                        Adw.ActionRow(title="no paired clients" if clients is not None else "no Sunshine config")]
+                    for k in rows:
                         r.add_row(k)
                         kids.append(k)
-                    if not clients:
-                        k = Adw.ActionRow(title="no paired clients" if clients is not None else "no Sunshine config")
-                        r.add_row(k)
-                        kids.append(k)
-            self.run(["tailscale", "ip", "-4"], done=got_ip, log=log, label="Tailscale IP", timeout=10)
+            self.run(["tailscale", "ip", "-4"], done=got_ip, log=log, label="Tailscale IP", timeout=10, quiet=True)
 
         def pair(self):
             pin = self.pin_row.get_text().strip()
             name = self.devname_row.get_text().strip() or "phone"
             if not re.fullmatch(r"\d{4}", pin):
-                self.log("Pair", "the PIN is the 4 digits Moonlight shows", 1)
+                self.toast("the PIN is the 4 digits Moonlight shows")
                 return
             argv = [omvm_bin(), "remote"]
             if self.pair_target.get_selected() == 1:
                 argv += ["-i", VM]
             argv += ["pin", pin, name]
-            self.run(argv, "Pair", lambda rc, out: (self.pin_row.set_text(""), self.refresh_moonlight(False)))
+            self.button_busy(self.btn_pair, "Pairing…")
+
+            def paired(rc, out, err):
+                self.button_idle()
+                self.pin_row.set_text("")
+                self.toast(f"paired {name}" if rc == 0 else f"Pair failed: {last_line(err, out) or rc}",
+                           timeout=4 if rc == 0 else 0)
+                self.refresh_moonlight(False)
+            self.run(argv, "Pair", paired, timeout=60)
 
         # ---------------------------------------------------------- 4. usb + shares
         def build_usb(self):
@@ -412,7 +804,7 @@ def main_gui():
             return self.usb_group
 
         def refresh_usb(self, log):
-            def got(rc, out):
+            def got(rc, out, err):
                 for r in self.usb_rows:
                     self.usb_group.remove(r)
                 self.usb_rows.clear()
@@ -420,26 +812,21 @@ def main_gui():
                 if not avail:
                     self.add_usb_row(Adw.ActionRow(title="omvm usb: not available yet",
                                                    subtitle="buttons enable when `omvm help` lists it"))
-                lines = [l for l in out.splitlines() if l.strip()] if rc == 0 else []
-                if not lines:  # lsusb exits 1 with no output when the host has no USB devices
-                    self.add_usb_row(Adw.ActionRow(
-                        title="lsusb not found (sudo pacman -S usbutils)" if rc == 127 else
-                        "no USB devices on this host" if rc in (0, 1) and not out else "lsusb failed: see log"))
-                for l in lines:
-                    m = re.match(r"Bus (\d+) Device (\d+): ID ([0-9a-f]{4}:[0-9a-f]{4})\s*(.*)", l)
-                    if not m:
-                        continue
-                    bus, dev, vidpid, desc = m.groups()
+                devs, note = parse_lsusb(rc, out)
+                if note:
+                    self.add_usb_row(Adw.ActionRow(title=note))
+                for bus, dev, vidpid, desc in devs:
                     r = Adw.ActionRow(title=desc or vidpid, subtitle=f"{vidpid} · bus {bus} device {dev}")
                     box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
                     for verb in ("attach", "detach"):
                         b = Gtk.Button(label=verb.capitalize(), sensitive=avail)
                         b.connect("clicked", lambda _b, v=verb, d=vidpid: self.run(
-                            [omvm_bin(), "usb", v, d, VM], f"USB {v}"))
+                            [omvm_bin(), "usb", v, d, VM], f"USB {v}", done=lambda rc, out, err, v=v: self.toast(
+                                f"USB {v}: " + ("done" if rc == 0 else last_line(err, out)))))
                         box.append(b)
                     r.add_suffix(box)
                     self.add_usb_row(r)
-            self.run(["lsusb"], "USB devices", got, timeout=10, log=log, ok=(0, 1))
+            self.run(["lsusb"], "USB devices", got, timeout=10, log=log, ok=(0, 1), quiet=True)
 
         def add_usb_row(self, r):
             self.usb_group.add(r)
@@ -447,34 +834,31 @@ def main_gui():
 
         def build_shares(self):
             g = Adw.PreferencesGroup(title="Shared folders", description="omvm share add|remove PATH")
-            self.share_avail_row = Adw.ActionRow(title="…")
-            g.add(self.share_avail_row)
             self.share_row = Adw.EntryRow(title="Folder on this machine")
-            pick = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Choose…")
+            pick = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Choose…",
+                              css_classes=["flat"])
             pick.connect("clicked", lambda *_: self.pick_folder())
             self.share_row.add_suffix(pick)
-            g.add(self.share_row)
-            btns = Adw.ActionRow()
-            box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
             self.share_btns = []
             for verb in ("add", "remove"):
-                b = Gtk.Button(label=verb.capitalize())
+                b = Gtk.Button(label=verb.capitalize(), valign=Gtk.Align.CENTER)
                 b.connect("clicked", lambda _b, v=verb: self.share(v))
-                box.append(b)
+                self.share_row.add_suffix(b)
                 self.share_btns.append(b)
-            btns.add_suffix(box)
-            g.add(btns)
+            g.add(self.share_row)
+            self.shares_group = g
             return g
 
         def update_share_avail(self):
             avail = "share" in self.features
-            self.share_avail_row.set_title("available" if avail else "omvm share: not available yet")
+            self.shares_group.set_description("omvm share add|remove PATH" if avail else
+                                              "omvm share: not available yet")
             for b in self.share_btns:
                 b.set_sensitive(avail)
 
         def pick_folder(self):
             d = Gtk.FileDialog(title="Folder to share with the VM")
-            d.select_folder(self, None, lambda dlg, res: self._picked(dlg, res))
+            d.select_folder(self, None, self._picked)
 
         def _picked(self, dlg, res):
             try:
@@ -487,9 +871,10 @@ def main_gui():
         def share(self, verb):
             path = self.share_row.get_text().strip()
             if not path:
-                self.log(f"Share {verb}", "choose a folder first", 1)
+                self.toast("choose a folder first")
                 return
-            self.run([omvm_bin(), "share", verb, path], f"Share {verb}")
+            self.run([omvm_bin(), "share", verb, path], f"Share {verb}",
+                     done=lambda rc, out, err: self.toast(f"share {verb}: " + ("done" if rc == 0 else last_line(err, out))))
 
         # ---------------------------------------------------------- 5. log
         def build_log(self):
@@ -498,44 +883,88 @@ def main_gui():
                                css_classes=["flat"])
             g.set_header_suffix(clear)
             self.logview = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
-                                        top_margin=8, bottom_margin=8, left_margin=8, right_margin=8)
+                                        top_margin=8, bottom_margin=8, left_margin=8, right_margin=8,
+                                        css_classes=["omvm-log"])
             buf = self.logview.get_buffer()
             buf.create_tag("cmd", weight=Pango.Weight.BOLD)
-            buf.create_tag("err", foreground="#e01b24")
+            self.err_tag = buf.create_tag("err", foreground="#e01b24")
             clear.connect("clicked", lambda *_: buf.set_text(""))
-            sw = Gtk.ScrolledWindow(min_content_height=220, child=self.logview, css_classes=["card"])
+            sw = Gtk.ScrolledWindow(min_content_height=160, child=self.logview, css_classes=["card"])
             g.add(sw)
             return g
 
         # ---------------------------------------------------------- misc
-        def confirm(self, heading, body, verb, action):
+        def confirm(self, heading, body, verb, action, destructive=False):
             d = Adw.AlertDialog(heading=heading, body=body)
             d.add_response("cancel", "Cancel")
             d.add_response("ok", verb)
-            d.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE)
+            d.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE if destructive
+                                      else Adw.ResponseAppearance.SUGGESTED)
             d.set_default_response("cancel")
+            d.set_close_response("cancel")
             d.connect("response", lambda _d, r: action() if r == "ok" else None)
             d.present(self)
 
         def refresh_all(self, log):
-            def feats(rc, out):
-                self.features = {m.group(1) for m in re.finditer(r"^\s*omvm (\w[\w-]*)", out, re.M)}
+            def feats(rc, out, err):
+                self.features = parse_features(out)
                 self.update_share_avail()
                 self.refresh_usb(log)
-            self.run([omvm_bin(), "help"], "Features", feats, timeout=10, log=False)
-            self.run(VIRSH + ["domstate", VM], "VM state",
-                     lambda rc, out: (self.got_state(rc, out),
-                                      self.run([omvm_bin(), "mode", VM], "Display mode", self.got_mode,
-                                               timeout=20, log=log)),
-                     timeout=10, log=log)
+            self.run([omvm_bin(), "help"], "Features", feats, timeout=10, log=False, quiet=True)
+
+            def state(rc, out, err):
+                self.got_state(rc, out, err)
+                self.run([omvm_bin(), "mode", VM], "Display mode", self.got_mode, timeout=20, log=log)
+            self._polling = True
+            self.run(VIRSH + ["domstate", VM], "VM state", state, timeout=10, log=log)
+            self.refresh_watchdog()
             self.refresh_moonlight(log)
 
     class App(Adw.Application):
         def __init__(self):
-            super().__init__(application_id="dev.omvm.Gui", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+            self.css = None
+            self.err_color = None
+
+        def do_startup(self):
+            Adw.Application.do_startup(self)
+            self.apply_theme()
+            for d in THEME_DIRS:  # follow `omarchy theme set`
+                if d.exists():
+                    self.mon = Gio.File.new_for_path(str(d)).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+                    self.mon.connect("changed", self.on_theme_changed)
+                    break
+
+        def on_theme_changed(self, *_):
+            if getattr(self, "_theme_src", None):
+                GLib.source_remove(self._theme_src)
+            self._theme_src = GLib.timeout_add(400, lambda: (self.apply_theme(), setattr(self, "_theme_src", None),
+                                                             False)[2])
+
+        def apply_theme(self):
+            name, colors, _ = theme()
+            sm = Adw.StyleManager.get_default()
+            mode = colors.get("mode")
+            sm.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT if mode == "light" else
+                                Adw.ColorScheme.FORCE_DARK if mode == "dark" else Adw.ColorScheme.PREFER_DARK)
+            prov = Gtk.CssProvider()
+            prov.load_from_string(theme_css(colors, mono_font()))
+            disp = Gdk.Display.get_default()
+            if self.css:
+                Gtk.StyleContext.remove_provider_for_display(disp, self.css)
+            Gtk.StyleContext.add_provider_for_display(disp, prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self.css = prov
+            w = self.get_active_window()
+            if w and colors.get("red"):
+                w.err_tag.set_property("foreground", colors["red"])
+            self.err_color = colors.get("red")
 
         def do_activate(self):
-            w = self.get_active_window() or Window(self)
+            w = self.get_active_window()
+            if not w:
+                w = Window(self)
+                if self.err_color:
+                    w.err_tag.set_property("foreground", self.err_color)
             w.present()
 
     return App().run([sys.argv[0]])
@@ -547,7 +976,10 @@ if __name__ == "__main__":
         install()
     elif arg == "--uninstall":
         uninstall()
+    elif arg == "--selftest":
+        sys.exit(selftest())
     elif arg in ("-h", "--help"):
-        print("\n".join(l[2:] for l in open(SELF).read().splitlines()[2:12]))
+        head = open(SELF).read().split("\nimport ")[0].splitlines()[2:]
+        print("\n".join(l[2:] for l in head))
     else:
         sys.exit(main_gui())
