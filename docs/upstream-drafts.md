@@ -80,7 +80,7 @@ omarchy-mac-pkgs. A kernel PR waits until the patch licence is resolved.
 
 Prepared 2026-11-08 on omarchy in the worktree `~/src/mesa-upstream-mr`
 (off `~/src/mesa-honeykrisp-sb`), each branch one commit on upstream `main`
-@ `1f935e49`. Nothing pushed yet. Diff backups of the old 26.2.6 trees:
+@ `1f935e49`. Interim copies are on GitHub (see Posted). Diff backups of the old 26.2.6 trees:
 `~/src/mesa-backup-2026-11-08/`.
 
 Mesa policy (docs/submittingpatches.rst): commit messages, code comments and
@@ -187,4 +187,9 @@ before submitting.
 - omarchy-mac-pkgs proposal: https://github.com/omacom/omarchy-mac-pkgs/issues/107
 - steelbrain/reims-vgpu#150, steelbrain/metal2vulkan#12, aquarat/apple-macos-arm64-vm-guest#1
 - PAC licence request, +1 comment: steelbrain/experiment-macOS-arm64-on-asahi-linux-arm64#1
-- Not posted: the Mesa MR (needs a gitlab.freedesktop.org account; run the CTS first).
+- Not posted: the Mesa MRs on gitlab.freedesktop.org (account awaiting verification; run the CTS first).
+- Interim Mesa branches on GitHub (no official GitHub mirror to fork, so https://github.com/sapoepsilon/mesa):
+  [hk-fragment-shader-interlock](https://github.com/sapoepsilon/mesa/tree/hk-fragment-shader-interlock)
+  ([diff vs upstream main](https://github.com/sapoepsilon/mesa/compare/1f935e49...hk-fragment-shader-interlock)),
+  [agx-16bit-flat-varyings](https://github.com/sapoepsilon/mesa/tree/agx-16bit-flat-varyings)
+  ([diff vs upstream main](https://github.com/sapoepsilon/mesa/compare/1f935e49...agx-16bit-flat-varyings)).

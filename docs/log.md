@@ -5,6 +5,11 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- Mesa branches published on GitHub while the gitlab.freedesktop.org account
+  awaits verification: https://github.com/sapoepsilon/mesa (no official GitHub mirror exists, so not a fork;
+  full history pushed from `~/src/mesa-upstream-mr`, remote `gh`).
+  `hk-fragment-shader-interlock` a3561cde, `agx-16bit-flat-varyings` 2b37de4b;
+  compare against upstream main: `https://github.com/sapoepsilon/mesa/compare/1f935e49...<branch>`.
 - **`omvm start|stop|restart|pause|resume NAME`** for libvirt VMs (`bin/omvm`,
   `cmd_power`; `omvm start NAME IMAGE` / `omvm stop NAME` of a throwaway run are
   unchanged). stop: watchdog timer *and* its service off first (they used to race
