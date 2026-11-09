@@ -46,6 +46,8 @@ omvm remote pin <PIN> <name>   # finish pairing on whichever host asked
 
 `omvm remote keepalive NAME` (also run by `-i NAME enable`) turns on libvirt autostart, enables linger so the user manager starts at boot without a login, and installs `omvm-vm@NAME.service` (start the VM if it isn't running, at boot) plus `omvm-vm@NAME.timer`, which re-runs it every minute. Ending a stream only resizes the guest back, it never stops it. To really shut the VM down, first `systemctl --user disable --now omvm-vm@NAME.timer`. Sunshine itself still needs the graphical session (Hyprland), so the hosts appear after the autologin; the LUKS passphrase still has to be typed after a reboot.
 
+The VM can instead show in a window on the laptop's own screen at 120 Hz (`omvm mode local`, see [graphics.md](graphics.md#local-window-omvm-mode-local)). Streaming needs remote mode: in local mode the VM's tiles fail at once with "macos is in local mode … run 'omvm mode remote'", and `omvm mode remote` brings the stream back.
+
 On the phone or tablet:
 
 1. Install **Moonlight**. It must be on the same network as the laptop, or on the same tailnet.

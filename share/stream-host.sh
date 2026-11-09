@@ -31,6 +31,7 @@
 #   stream-host.sh [-i VM] enable | disable   # also start at login (-i: and keep the VM running)
 #   stream-host.sh pin 1234 [name]    # finish pairing (finds the instance that asked)
 #   stream-host.sh keepalive VM       # start VM at boot (linger) + restart it if it dies
+#   stream-host.sh ensure-vm VM       # (the watchdog) start VM unless running; local mode waits for Wayland
 #   stream-host.sh [-i VM] display WxH[@Hz]   # resize the live REMOTE monitor
 #   stream-host.sh [-i VM] status | stop | log
 set -euo pipefail
@@ -90,6 +91,10 @@ vms() {
     echo "${name:-vm$port} $port"
   done
 }
+
+# A libvirt VM's display mode (omvm mode): remote (VNC, streamable) or local
+# (reims-vgpu window on the laptop's own screen, nothing to stream).
+vm_mode() { virsh -q -c qemu:///session dumpxml --inactive "$1" 2>/dev/null | python3 "$(dirname "$SELF")/libvirt-mode.py" get 2>/dev/null; }
 
 vm_port() { # NAME|PORT -> VNC port of that running VM
   if [[ $1 =~ ^[0-9]+$ ]]; then echo "$1"; return; fi
@@ -215,6 +220,11 @@ session_do() { # desktop | vm PORT|NAME [WxH|client][@MAXFPS] [auto|0|1 HiDPI]
   mkdir -p "$STATE"
   local w=${SUNSHINE_CLIENT_WIDTH:-1920} h=${SUNSHINE_CLIENT_HEIGHT:-1080} fps=${SUNSHINE_CLIENT_FPS:-60}
   local size=${3:-client} hidpi=${4:-auto} mode
+  if [[ $1 == vm && ! $2 =~ ^[0-9]+$ && $(vm_mode "$2") == local ]]; then
+    # fail the Moonlight launch at once instead of waiting for a VNC server
+    echo "$(date +%T) refused: $2 is in local mode" >>"$STATE/sessions.log"
+    die "$2 is in local mode (its window is on the laptop screen): run 'omvm mode remote' to stream it"
+  fi
   if [[ $1 == vm ]]; then
     [[ ${size%@*} =~ ^([0-9]+)x([0-9]+)$ ]] && { w=${BASH_REMATCH[1]}; h=${BASH_REMATCH[2]}; }
     [[ $size == *@* ]] && (( fps > ${size#*@} )) && fps=${size#*@}
@@ -329,13 +339,13 @@ EOF
 cmd_keepalive() { # VM
   local vm=${1:?usage: $0 keepalive VM}
   mkdir -p "$UDIR"
-  cat >"$UDIR/omvm-vm@.service" <<'EOF'
+  cat >"$UDIR/omvm-vm@.service" <<EOF
 [Unit]
 Description=Start the %i VM (libvirt session) if it is not running (omvm)
 
 [Service]
 Type=oneshot
-ExecStart=-/bin/sh -c 'virsh -c qemu:///session domstate %i 2>/dev/null | grep -qx running || virsh -c qemu:///session start %i'
+ExecStart=-$SELF ensure-vm %i
 TimeoutStartSec=120
 
 [Install]
@@ -359,11 +369,30 @@ EOF
     rm -f "$UDIR/omvm-vm-$vm.service"
   fi
   systemctl --user daemon-reload
-  virsh -c qemu:///session autostart "$vm" >/dev/null
+  # local mode (omvm mode) keeps libvirt autostart off: no Wayland at boot
+  [[ $(vm_mode "$vm") == local ]] || virsh -c qemu:///session autostart "$vm" >/dev/null
   systemctl --user enable "omvm-vm@$vm.service" >/dev/null 2>&1
   systemctl --user enable --now "omvm-vm@$vm.timer"
   [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) == yes ]] || sudo loginctl enable-linger "$USER"
   echo "$vm: libvirt autostart on, omvm-vm@$vm.timer checks every minute, linger=$(loginctl show-user "$USER" -p Linger --value)"
+}
+
+# The watchdog's check. remote: libvirt autostart and this start the VM at
+# boot. local: the VM's window needs the Wayland session its domain names, so
+# wait (skip) until that socket exists; closing the window powers the guest
+# off, and this starts it again within a minute.
+cmd_ensure_vm() { # VM
+  local vm=${1:?usage: $0 ensure-vm VM} wl xdg
+  [[ $(virsh -q -c qemu:///session domstate "$vm" 2>/dev/null) == running ]] && return 0
+  if [[ $(vm_mode "$vm") == local ]]; then
+    read -r wl xdg < <(virsh -q -c qemu:///session dumpxml --inactive "$vm" | python3 -c '
+import sys, xml.etree.ElementTree as ET
+q = "{http://libvirt.org/schemas/domain/qemu/1.0}"
+env = {e.get("name"): e.get("value") for e in ET.parse(sys.stdin).getroot().iter(q + "env")}
+print(env.get("WAYLAND_DISPLAY", "wayland-1"), env.get("XDG_RUNTIME_DIR", "/run/user/%d" % __import__("os").getuid()))')
+    if [[ ! -S $xdg/$wl ]]; then echo "$vm: local mode, no Wayland session at $xdg/$wl yet: not starting"; return 0; fi
+  fi
+  virsh -q -c qemu:///session start "$vm"
 }
 
 cmd_setup() {
@@ -444,6 +473,7 @@ case "${1:-}" in
           systemctl --user enable --now "$LIDUNIT" "$UNIT" ;;
   disable) systemctl --user disable --now "$UNIT"; [[ -n $INSTANCE ]] || systemctl --user disable --now "$LIDUNIT" ;;
   keepalive) cmd_keepalive "${2:-}" ;;
+  ensure-vm) cmd_ensure_vm "${2:-}" ;;
   prepare) cmd_prepare ;;
   session-do) shift; session_do "$@" ;;
   session-undo) session_undo ;;

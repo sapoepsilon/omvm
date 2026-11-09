@@ -65,6 +65,63 @@ How it works:
 
 Tested on 26.4 over VNC. The VM started at 1728x1117 and was then resized to 1280x800, 3008x1692, 1728x1117, 2560x1600, 1920x1200, 2560x1440, 1440x900 and 2304x1296. Each size ran at 1x with the full desktop.
 
+## Local window (`omvm mode local`)
+
+A `virt` VM shows its screen one of two ways, switched with `omvm mode`:
+
+```sh
+omvm mode                 # prints local or remote (default VM: macos; or omvm mode NAME)
+omvm mode local [NAME]    # reims-vgpu's own window on the laptop screen
+omvm mode remote [NAME]   # back to VNC + Sunshine (the default)
+```
+
+| | remote (default) | local |
+|---|---|---|
+| libvirt display | `<graphics type='vnc'>` on 127.0.0.1 | none, so QEMU runs `-display none` |
+| reims-vgpu | headless (`REIMS_VGPU_WINDOW=0`) | SDL3/Vulkan window (`REIMS_VGPU_WINDOW=1`), borderless full screen, zero-copy |
+| Guest mode | follows the VNC viewer, 60 Hz | `resolution` = the panel at its density (`3024x1964@254`, HiDPI) at the panel's rate (`REIMS_VGPU_WINDOW_REFRESH=120`) |
+| Frame rate | VNC caps at ~33 fps (QEMU `ui/vnc.c` refreshes every 30 ms) | the guest's own rate, up to 120 |
+| Moonlight | the VM's host and tiles work | tiles fail at once: "macos is in local mode" |
+| Boot | libvirt autostart + `omvm-vm@NAME.timer` | autostart off; the timer starts it once the Wayland session exists |
+
+A switch backs up the domain (`$OMVM_IMAGES/vms/NAME/domain-<mode>-<time>.xml`), stops the
+watchdog timer, shuts the guest down cleanly (`virsh shutdown`, then `sudo shutdown -h now`
+over SSH after 10 s, gives up after 4 minutes), rewrites the domain with
+`share/libvirt-mode.py` and starts it again. The mode is the libvirt definition itself, so it
+survives reboots. `local -> remote` gives back the exact XML `omvm virt` wrote. A reboot of
+the guest logs its user out, so log in again (VNC/Moonlight or the window).
+
+Closing the window powers the guest off. The watchdog starts it again within a minute; to keep
+it off, `systemctl --user stop omvm-vm@NAME.timer` first.
+
+Knobs: `OMVM_LOCAL_RESOLUTION` (default: the built-in panel from `hyprctl`),
+`OMVM_LOCAL_REFRESH`, `OMVM_LOCAL_ICD`, `OMVM_STATS=1` (reims-vgpu writes guest and window
+frames per second once a second to `~/.cache/libvirt/qemu/log/NAME.log`). `omvm gui` takes
+`OMVM_MODE=local` for a throwaway run in a window.
+
+**The window needs Mesa with Wayland WSI.** The stack's Mesa above is built with
+`-Dplatforms=`, and SDL then refuses the window ("Installed Vulkan doesn't implement the
+VK_KHR_wayland_surface extension"). Local mode uses a second build of the same tree (26.2.6 +
+the three patches) with `-Dplatforms=wayland`, in `~/opt/mesa-honeykrisp-sb-wl`; remote mode
+keeps the original ICD:
+
+```sh
+rsync -a --exclude /build ~/src/mesa-honeykrisp-sb/ ~/src/mesa-honeykrisp-sb-wl/
+cd ~/src/mesa-honeykrisp-sb-wl
+meson setup build --prefix=$HOME/opt/mesa-honeykrisp-sb-wl --buildtype=release -Db_ndebug=true \
+  -Dvulkan-drivers=asahi -Dgallium-drivers= -Dplatforms=wayland -Dglx=disabled -Degl=disabled \
+  -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dllvm=enabled -Dvideo-codecs= -Dtools=
+ninja -C build install     # about 5 minutes on an M1 Max
+```
+
+Measured 2026-11-08 (M1 Max, 3024x1964 panel at 120 Hz, guest at the login window,
+`OMVM_STATS=1`): the window opened borderless full screen on eDP-1 (1512x982 points at 2x =
+3024x1964 pixels); the guest's display timing reads 120 Hz (`ioreg`: `VerticalAttributes`
+`SyncRate` = 7864320 = 120 x 65536; remote mode is 60 Hz); reims-vgpu counted 86-93 guest
+frames/s and the same number of window presents/s, window GPU time 1.2-1.3 ms, with one
+~235 ms idle gap per second, i.e. 120 Hz pacing whenever the guest draws. Remote mode, same
+guest, measured 54-60 fps in the guest (display link) and ~33 fps through VNC.
+
 ## Known limits
 
 - The very first login (cold pipeline cache, e.g. after a new Mesa or library build) takes about 2 minutes while shaders compile. Later boots use the cache: the desktop is complete about 30 s after login.

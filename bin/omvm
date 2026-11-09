@@ -15,6 +15,8 @@
 #   omvm gui NAME [IMAGE]       desktop over VNC (paravirtual GPU on the host GPU);
 #                               RESOLUTION=WxH[@PPI] picks the first mode
 #   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt)
+#   omvm mode [local|remote] [NAME]  show or switch a virt VM's display: a window on
+#                               this screen (local) or VNC + Sunshine (remote, default)
 #   omvm clip NAME [off]        share the text clipboard with the host (on with gui)
 #   omvm res NAME [WxH]         show or change the desktop size (or resize the viewer)
 #   omvm remote start|stop|...  control this laptop and its VMs from Moonlight
@@ -287,11 +289,21 @@ cmd_gui() {
     # renders the desktop without artifacts. See docs/graphics.md.
     local sb="$UPSTREAM/build/qemu-sb/build" sbicd="$HOME/opt/mesa-honeykrisp-sb/share/vulkan/icd.d/asahi_icd.aarch64.json"
     if [ "${OMVM_GFX_STACK:-sb}" = sb ] && [ -x "$sb/qemu-system-aarch64" ] && [ -f "$sbicd" ]; then
+        # OMVM_MODE=local: reims-vgpu's own window on this screen instead of VNC (see omvm mode)
+        local window=0 view="-vnc 127.0.0.1:$disp" res="${RESOLUTION:-}"
+        if [ "${OMVM_MODE:-remote}" = local ]; then
+            window=1 view=""; [ -n "$res" ] || res="$(local_screen | cut -d' ' -f1)"
+            export REIMS_VGPU_WINDOW_REFRESH="${REIMS_VGPU_WINDOW_REFRESH:-$(local_screen | cut -d' ' -f2)}" REIMS_VGPU_WINDOW_BORDERLESS=1
+        fi
         (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" \
-            REIMS_VGPU_WINDOW=0 VK_DRIVER_FILES="${VK_DRIVER_FILES:-$sbicd}" QEMU_BIN="$sb/qemu-system-aarch64" \
-            QEMU_EXTRA_ARGS="-L $sb/qemu-bundle/usr/local/share/qemu -machine aux-ram-share=on -vnc 127.0.0.1:$disp${RESOLUTION:+ -global apple-gfx-mmio.resolution=$RESOLUTION}" \
+            REIMS_VGPU_WINDOW=$window VK_DRIVER_FILES="${VK_DRIVER_FILES:-$sbicd}" QEMU_BIN="$sb/qemu-system-aarch64" \
+            QEMU_EXTRA_ARGS="-L $sb/qemu-bundle/usr/local/share/qemu -machine aux-ram-share=on $view${res:+ -global apple-gfx-mmio.resolution=$res}" \
             scripts/vm-run.sh start "$name")
         echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
+        if [ "$window" = 1 ]; then
+            ok "$name: window on this screen at $res (login window in ~40 s), SSH: omvm ssh $name"
+            return
+        fi
         echo "$disp" > "$UPSTREAM/artifacts/runs/$name/vnc_display"
         ok "$name: VNC on 127.0.0.1:$((5900+disp)) at ${RESOLUTION:-1920x1080} (login window in ~40 s), SSH: omvm ssh $name"
         echo "    viewer:  vncviewer -Shared=1 127.0.0.1:$((5900+disp))   (the desktop follows its window, or: omvm res $name WxH)"
@@ -376,9 +388,11 @@ cmd_virt() {
     port="$(cat "$dir/ssh_port" 2>/dev/null || python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     echo "$port" > "$dir/ssh_port"
     guest_env
+    local was; was="$(vm_mode "$name" 2>/dev/null || echo remote)"
     python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
         "$("$UPSTREAM/scripts/extract-ecid.py" "$dir/vm.json")" "$port" "${CPUS:-8}" "${RAM_GIB:-16}" > "$dir/domain.xml"
     virsh -q -c qemu:///session define "$dir/domain.xml" >/dev/null
+    [ "$was" = local ] && define_mode "$name" local
     # Clipboard + display-follow start/stop with the VM, however it is started.
     mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks"
     {
@@ -408,6 +422,96 @@ HOOK
     ok "$name: in virt-manager (QEMU/KVM User session). Start it there or: virsh -c qemu:///session start $name"
     echo "    SSH: omvm ssh $name   clipboard: omvm clip $name"
 }
+
+# ---------------------------------------------------------------- mode
+# local:  reims-vgpu's SDL3/Vulkan window on this laptop's screen (zero-copy, at the
+#         panel's refresh rate); no VNC, so no Moonlight for this VM.
+# remote: QEMU VNC (127.0.0.1) + Sunshine, as `omvm virt` defines it (the default).
+# The mode lives in the libvirt definition itself, so it survives reboots.
+VIRSH=(virsh -q -c qemu:///session)
+vm_mode() { "${VIRSH[@]}" dumpxml --inactive "$1" 2>/dev/null | python3 "$SHARE/libvirt-mode.py" get; }
+
+# "WxH@PPI HZ" of the laptop's built-in screen, for the guest's mode.
+local_screen() {
+    local j
+    j="$(hyprctl monitors -j 2>/dev/null | jq -c '[.[] | select(.name | test("^eDP"))][0] // .[0]' 2>/dev/null || true)"
+    if [ -n "$j" ] && [ "$j" != null ]; then
+        jq -r '"\(.width)x\(.height)@\((.width * 25.4 / .physicalWidth) | floor) \(.refreshRate | round)"' <<<"$j"
+    else
+        echo "3024x1964@254 120"   # MacBook Pro 14"
+    fi
+}
+
+# The window needs a Vulkan driver with Wayland WSI: the graphics stack's Mesa is
+# built with -Dplatforms= (docs/graphics.md), so local mode uses a second build of
+# the same tree with -Dplatforms=wayland.
+local_icd() { echo "${OMVM_LOCAL_ICD:-$HOME/opt/mesa-honeykrisp-sb-wl/share/vulkan/icd.d/asahi_icd.aarch64.json}"; }
+
+define_mode() { # NAME local|remote
+    local n="$1" m="$2" xml new wl="${WAYLAND_DISPLAY:-wayland-1}" xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" scr
+    xml="$(mktemp)"; new="$(mktemp)"
+    "${VIRSH[@]}" dumpxml --inactive "$n" > "$xml"
+    if [ "$m" = local ]; then
+        scr="$(local_screen)"
+        python3 "$SHARE/libvirt-mode.py" local "${OMVM_LOCAL_RESOLUTION:-${scr% *}}" \
+            "${OMVM_LOCAL_REFRESH:-${scr#* }}" "$wl" "$xdg" "$(local_icd)" "${OMVM_STATS:-0}" < "$xml" > "$new"
+    else
+        python3 "$SHARE/libvirt-mode.py" remote < "$xml" > "$new"
+    fi
+    "${VIRSH[@]}" define "$new" >/dev/null
+    rm -f "$xml" "$new"
+    # libvirt autostart runs at boot, before any Wayland session: local leaves
+    # starting to omvm-vm@NAME (which waits for the session).
+    if [ "$m" = local ]; then "${VIRSH[@]}" autostart --disable "$n" >/dev/null
+    else "${VIRSH[@]}" autostart "$n" >/dev/null; fi
+}
+
+vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
+    local n="$1" i
+    [ "$("${VIRSH[@]}" domstate "$n")" = running ] || return 0
+    say "shutting $n down"
+    "${VIRSH[@]}" shutdown "$n" >/dev/null 2>&1 || true
+    for i in $(seq 1 120); do
+        [ "$("${VIRSH[@]}" domstate "$n")" = running ] || { ok "$n is off ($((2 * i - 2))s)"; return 0; }
+        # vmapple ignores libvirt's power button: ask macOS itself after 10 s
+        if [ "$i" = 6 ]; then
+            ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+        fi
+        sleep 2
+    done
+    die "$n still running after 4 min (force it with: virsh -c qemu:///session destroy $n)"
+}
+
+cmd_mode() {
+    local m="" n="${OMVM_VM:-macos}" cur
+    case "${1:-}" in local|remote) m="$1"; n="${2:-$n}" ;; "") ;; *) n="$1" ;; esac
+    command -v virsh >/dev/null || die "no libvirt (omvm virt first)"
+    cur="$(vm_mode "$n")" || die "no libvirt VM '$n' (omvm virt $n)"
+    if [ -z "$m" ]; then echo "$cur"; return; fi
+    if [ "$m" = "$cur" ]; then ok "$n is already in $m mode"; return; fi
+    if [ "$m" = local ]; then
+        local wl="${WAYLAND_DISPLAY:-wayland-1}" xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        [ -S "$xdg/$wl" ] || die "no Wayland session at $xdg/$wl: log in to Hyprland first"
+        [ -f "$(local_icd)" ] || die "no Mesa with Wayland WSI at $(local_icd) (docs/graphics.md, \"Local window\")"
+        export WAYLAND_DISPLAY="$wl" XDG_RUNTIME_DIR="$xdg"
+        export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "$xdg/hypr" 2>/dev/null | head -1)}"
+    fi
+    local backup="$IMAGES/vms/$n/domain-$cur-$(date +%Y%m%d-%H%M%S).xml"
+    mkdir -p "$(dirname "$backup")"; "${VIRSH[@]}" dumpxml --inactive "$n" > "$backup"
+    # the watchdog would restart the VM half-way
+    systemctl --user stop "omvm-vm@$n.timer" 2>/dev/null || true
+    vm_shutdown "$n"
+    define_mode "$n" "$m"
+    "${VIRSH[@]}" start "$n" >/dev/null
+    systemctl --user start "omvm-vm@$n.timer" 2>/dev/null || true
+    if [ "$m" = local ]; then
+        ok "$n: local mode, window on this screen ($(vm_mode_res "$n")); Moonlight tiles for $n are off"
+    else
+        ok "$n: remote mode, VNC on 127.0.0.1:$(vnc_port_of "$n" 2>/dev/null || echo 59xx) + Sunshine"
+    fi
+    echo "    previous definition: $backup"
+}
+vm_mode_res() { "${VIRSH[@]}" dumpxml --inactive "$1" | grep -o 'apple-gfx-mmio.resolution=[^"'"'"']*' | cut -d= -f2; }
 
 vnc_port_of() { # NAME -> QEMU VNC port (omvm gui run or libvirt domain)
     local n="$1" f="$UPSTREAM/artifacts/runs/$1/vnc_display" d
@@ -443,12 +547,13 @@ clip) shift; cmd_clip "$@" ;;
 res) shift; upstream; cmd_res "$@" ;;
 remote) shift; exec "$SHARE/stream-host.sh" "$@" ;;
 virt) shift; cmd_virt "$@" ;;
+mode) shift; cmd_mode "$@" ;;
 virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1" ;; stopped) clip_stop "$1" ;; esac ;;
 ssh) shift; cmd_ssh "$@" ;;
 stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;
 images) cmd_images ;;
 version|--version) echo "omvm $VERSION" ;;
-help|-h|--help) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+help|-h|--help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//' ;;
 *) die "unknown command '$1' (omvm help)" ;;
 esac

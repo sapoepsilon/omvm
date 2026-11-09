@@ -44,6 +44,9 @@ Xcode 27.2
 
 - `omvm virt NAME` registers a persistent VM in **virt-manager** (libvirt), so you can
   start, stop and view it from a GUI ([docs/virt-manager.md](docs/virt-manager.md)).
+- `omvm mode local|remote` switches a virt VM between a window on the laptop screen (120 Hz,
+  zero-copy) and VNC + Moonlight streaming (the default); `omvm mode` prints the current one
+  ([docs/graphics.md](docs/graphics.md#local-window-omvm-mode-local)).
 - **Clipboard** (text) is shared both ways with the Wayland host, and the guest's
   **resolution follows the viewer window** (`RESOLUTION=WxH` sets the start size;
   `omvm res NAME 2560x1440` changes it from the shell).
