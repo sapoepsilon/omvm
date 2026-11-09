@@ -5,6 +5,24 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-08
 
+- **Guest user renamed `aquarat` -> `killerisya`** (macOS 26.4 VM `macos`; short
+  name, home `/Users/killerisya`, full name; UID 501 unchanged). `dscl` RecordName,
+  RealName, `admin` GroupMembership, `/etc/sudoers.d/killerisya` (NOPASSWD; the
+  `aquarat` file is gone) and loginwindow `RecentUsers`/`FirstLogins` were changed over
+  SSH. The home move and `NFSHomeDirectory` are blocked by TCC on a live system
+  (SIP on; `mv /Users/aquarat` = "Operation not permitted" even as root over SSH or
+  from a LaunchDaemon), so they ran in a KVM single-user boot (create-account.sh's
+  method: `apfs_boot_util`, bootstrap opendirectoryd, `mv`, `dscl -create`) on a
+  reflink copy that was then copied back. display-follow LaunchAgent rebuilt for the
+  new home. Backups (reflink, VM off): `~/vm-artifacts/vms/macos/{disk.img,aux.img.trimmed,vm.json}.pre-rename-20261108`
+  + `domain-pre-rename-20261108.xml`; `disk.img.failed-rename-20261108` = a first
+  attempt (record renamed, home not moved) before it was restored from backup.
+- **`OMVM_GUEST_USER`** (default `aquarat`): the guest account `omvm` (ssh, run,
+  stop, display-follow, clipboard, setup -> upstream `GUEST_USER`, Xcode bake),
+  `stream-host.sh` and `omvm-clip.py` log in as. `bin/omvm` and `stream-host.sh`
+  fall back to `~/.config/omvm/gui.env` (Sunshine/systemd don't read `~/.bashrc`);
+  the libvirt hook exports it. This host: `OMVM_GUEST_USER=killerisya` in
+  `gui.env`, `~/.bashrc` and `~/.config/libvirt/hooks/qemu`.
 - Mesa branches published on GitHub while the gitlab.freedesktop.org account
   awaits verification: https://github.com/sapoepsilon/mesa (no official GitHub mirror exists, so not a fork;
   full history pushed from `~/src/mesa-upstream-mr`, remote `gh`).
