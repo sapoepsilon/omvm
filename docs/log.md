@@ -5,6 +5,32 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`macos` (27.2, local mode) runs at ~110 fps again; the lag was `macos27`
+  sharing the GPU, not the 60 Hz cap.** The domain carried
+  `REIMS_VGPU_MAX_REFRESH_HZ=60` from `libvirt-domain.py` (the headless
+  remote default, there since the first virt-manager commit), but the
+  steelbrain reims that `qemu-sb`/`qemu-sb-bdifw` link never reads it (only
+  qemu-fleet's reims does): the guest's modes all read 120 Hz (`ioreg`
+  `SyncRate` 7864320) and a CADisplayLink probe (`~/bin/fpsprobe` in the
+  guest, NSView display link at 120, animating a layer) ticked 117-120/s.
+  What reached the window was the problem: with `macos27` running headless
+  (QEMU at ~200 % CPU, host swap 15-28 GB, kswapd busy) reims-vgpu counted
+  12-26 guest frames/s, max gaps 120-280 ms, window GPU 16-47 ms per frame.
+  `omvm stop macos27` alone brought it to 100-120/s (avg ~110), max gaps
+  17-38 ms, window GPU 1.1-1.5 ms, swap 1 GB. Both VMs on the one AGX queue
+  starve the local window; keep only one running for a smooth desktop.
+  - `share/libvirt-mode.py` now sets `REIMS_VGPU_MAX_REFRESH_HZ` to the
+    panel's rate in local mode and back to 60 in remote, so a reims that
+    honours the cap also offers 120 Hz locally. `omvm virt macos` rewrote the
+    domain (backup `domain-local-pre-120hz-20261109.xml`). Measured after,
+    `OMVM_STATS=1`, probe at 3024x1964: guest 99-116 frames/s (first second
+    76), window presents the same, window GPU 1.2-1.5 ms.
+  - The guest now logs in by itself after a reboot (`sysadminctl -autologin`
+    plus `/etc/kcpassword`; `sysadminctl` printed error 22 and wrote only the
+    `autoLoginUser` key, so `kcpassword` was written by hand).
+  - Still open: the guest runs 3024x1964 at 1x (scale 1.0), not the HiDPI
+    1512x982 the docs expect; `mds` indexes after each boot (~47 % CPU).
+
 - **`macos` showed a black Reims window: it was stuck in a macOS 27 upgrade
   reboot loop; it now runs 27.2.** At 09:44 the guest user (uid 501, with
   admin authorization, from Software Update in the guest; automatic installs

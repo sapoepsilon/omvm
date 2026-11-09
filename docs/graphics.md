@@ -122,6 +122,13 @@ frames/s and the same number of window presents/s, window GPU time 1.2-1.3 ms, w
 ~235 ms idle gap per second, i.e. 120 Hz pacing whenever the guest draws. Remote mode, same
 guest, measured 54-60 fps in the guest (display link) and ~33 fps through VNC.
 
+Measured 2026-11-09 on macOS 27.2 (`qemu-sb-bdifw`): 99-116 guest frames/s, window GPU
+1.2-1.5 ms, with no other VM running. With `macos27` running headless beside it the window
+fell to 12-26 frames/s (window GPU 16-47 ms): both guests share the one GPU queue, so stop
+the other VM (`omvm stop NAME`) for a smooth local desktop. Local mode also sets
+`REIMS_VGPU_MAX_REFRESH_HZ` to the panel's rate (remote: 60); the steelbrain reims these
+builds link ignores it, but qemu-fleet's reims caps the guest's modes with it.
+
 ## macOS 27 updates
 
 A macOS 26 guest can take the macOS 27 OTA (tested: 26.4 25E246 to 27.2.1 26B131 on `macos27`) with these QEMU changes and the 27-era AVPBooter:

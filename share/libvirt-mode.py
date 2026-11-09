@@ -12,7 +12,8 @@ remote: QEMU's VNC server (libvirt <graphics type='vnc'>, 127.0.0.1, autoport)
         VNC viewers show it. This is what `omvm virt` defines.
 local:  no <graphics> (libvirt passes -display none), and reims-vgpu opens its
         own SDL3/Vulkan window on the host's Wayland screen (REIMS_VGPU_WINDOW=1):
-        zero-copy, at the screen's refresh rate. RES is apple-gfx's resolution
+        zero-copy, at the screen's refresh rate (REIMS_VGPU_WINDOW_REFRESH, and
+        REIMS_VGPU_MAX_REFRESH_HZ raised from remote's 60). RES is apple-gfx's resolution
         property (WxH@PPI, or host). ICD is a Vulkan driver with Wayland WSI
         (the remote one, built with -Dplatforms=, has none); the remote ICD is
         kept in OMVM_REMOTE_VK_DRIVER_FILES and put back by remote.
@@ -38,6 +39,11 @@ LOCAL_ENV = ("REIMS_VGPU_WINDOW_REFRESH", "REIMS_VGPU_WINDOW_BORDERLESS",
              "WAYLAND_DISPLAY", "REIMS_VGPU_STATS")
 RES_PREFIX = "apple-gfx-mmio.resolution="
 SAVED_ICD = "OMVM_REMOTE_VK_DRIVER_FILES"
+# reims-vgpu's cap on the display modes and VBL it offers the guest (qemu-fleet's
+# reims; steelbrain's ignores it and offers the window's rate). `omvm virt`
+# writes 60 for the headless remote mode; local mode runs at the panel's rate.
+MAX_REFRESH = "REIMS_VGPU_MAX_REFRESH_HZ"
+REMOTE_MAX_REFRESH = "60"
 
 
 def get_env(c, name):
@@ -134,6 +140,7 @@ def main():
         add_arg_pair(c, "-global", RES_PREFIX + res)
         set_env(c, "REIMS_VGPU_WINDOW", "1")
         set_env(c, "REIMS_VGPU_WINDOW_REFRESH", refresh)
+        set_env(c, MAX_REFRESH, refresh)
         set_env(c, "REIMS_VGPU_WINDOW_BORDERLESS", "1")
         set_env(c, "WAYLAND_DISPLAY", wl)
         set_env(c, "XDG_RUNTIME_DIR", xdg)
@@ -146,6 +153,7 @@ def main():
         emu = devices.find("emulator")
         devices.insert(list(devices).index(emu) + 1 if emu is not None else 0, g)
         set_env(c, "REIMS_VGPU_WINDOW", "0")
+        set_env(c, MAX_REFRESH, REMOTE_MAX_REFRESH)
     else:
         sys.exit("usage: libvirt-mode.py get | local RES REFRESH WAYLAND_DISPLAY XDG_RUNTIME_DIR ICD [STATS] | remote | sound")
     write(dom)
