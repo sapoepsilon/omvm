@@ -33,6 +33,11 @@ DATA="${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}"
 UPSTREAM="${OMVM_UPSTREAM:-$DATA/upstream}"
 IMAGES="${OMVM_IMAGES:-$DATA/images}"
 KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
+# The guest account omvm logs in as. Upstream's create-account.sh names it aquarat
+# unless told otherwise; set OMVM_GUEST_USER before `omvm setup` (or after renaming
+# the account) and keep it in ~/.config/omvm/gui.env, which services also read.
+cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1; }
+GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"; GUEST_USER="${GUEST_USER:-aquarat}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
 KPKG=linux-aurora-vmapple
@@ -218,8 +223,8 @@ cmd_setup() {
     if ! test -d "$v0"; then
         local pwf="$DATA/guest-password"
         (umask 077; test -f "$pwf" || python3 -c 'import secrets;print(secrets.token_urlsafe(18))' > "$pwf")
-        say "creating guest account 'aquarat' + SSH (single-user boot, ~3 min); password in $pwf"
-        (cd "$UPSTREAM" && GUEST_PASSWORD="$(cat "$pwf")" images/host/create-account.sh "$src" "$v0" "$KEY.pub")
+        say "creating guest account '$GUEST_USER' + SSH (single-user boot, ~3 min); password in $pwf"
+        (cd "$UPSTREAM" && GUEST_USER="$GUEST_USER" GUEST_PASSWORD="$(cat "$pwf")" images/host/create-account.sh "$src" "$v0" "$KEY.pub")
     fi
     if ! test -d "$v1"; then
         say "headless settings + Command Line Tools (~5 min)"
@@ -230,7 +235,7 @@ cmd_setup() {
     if [ "${1:-}" = --xcode ] && ! test -d "$v2"; then
         test -f "$IMAGES/Xcode.dmg" || die "no Xcode.dmg (the macOS step copies your installed Xcode.app)"
         say "installing Xcode (~15 min)"
-        OMVM_REPO="$UPSTREAM" bash "$SHARE/bake-xcode-dmg.sh" "$v1" "$v2" "$IMAGES/Xcode.dmg"
+        OMVM_REPO="$UPSTREAM" GUEST_USER="$GUEST_USER" bash "$SHARE/bake-xcode-dmg.sh" "$v1" "$v2" "$IMAGES/Xcode.dmg"
     fi
     ok "ready: omvm run -- 'sw_vers; xcodebuild -version'"
 }
@@ -255,17 +260,17 @@ cmd_start() {
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-run.sh start "$name")
     echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
-    for _ in $(seq 1 90); do timeout 5 ssh -n "${ssh_opts[@]}" -p "$port" aquarat@127.0.0.1 true 2>/dev/null && break; sleep 2; done
+    for _ in $(seq 1 90); do timeout 5 ssh -n "${ssh_opts[@]}" -p "$port" "$GUEST_USER@127.0.0.1" true 2>/dev/null && break; sleep 2; done
     ok "$name is up: omvm ssh $name   (stop: omvm stop $name; changes are discarded on stop)"
 }
 
-cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 "$@"; }
+cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" "$@"; }
 
 cmd_stop() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power stop "$1"; return; fi
     local n="${1:?usage: omvm stop NAME}" run="$UPSTREAM/artifacts/runs/$1"
     clip_stop "$n"
-    ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+    ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
     (cd "$UPSTREAM" && scripts/vm-run.sh quit "$n") >/dev/null 2>&1 || true
     rm -rf "$run"; ok "stopped $n"
@@ -372,7 +377,7 @@ follow_start() {
     [ "${OMVM_DISPLAY_FOLLOW:-1}" = 1 ] || return 0
     local n="$1" run port; run="$(run_dir "$1")"; port="$(port_of "$1")"
     setsid nohup bash -c '
-        ssh=(ssh "${@:3}" -p "$1" aquarat@127.0.0.1)
+        ssh=(ssh "${@:4}" -p "$1" "$3@127.0.0.1")
         for _ in $(seq 120); do "${ssh[@]}" true 2>/dev/null && break; sleep 5; done
         "${ssh[@]}" "mkdir -p ~/Library/omvm && cat > ~/Library/omvm/omvm-display-follow.swift.new &&
             { cmp -s ~/Library/omvm/omvm-display-follow.swift.new ~/Library/omvm/omvm-display-follow.swift &&
@@ -380,7 +385,7 @@ follow_start() {
               mv ~/Library/omvm/omvm-display-follow.swift.new ~/Library/omvm/omvm-display-follow.swift; }" \
             < "$2/omvm-display-follow.swift" &&
         "${ssh[@]}" bash -s < "$2/omvm-display-follow.sh"
-    ' _ "$port" "$SHARE" "${ssh_opts[@]}" >"$run/logs/display-follow.log" 2>&1 </dev/null &
+    ' _ "$port" "$SHARE" "$GUEST_USER" "${ssh_opts[@]}" >"$run/logs/display-follow.log" 2>&1 </dev/null &
 }
 
 # Two-way text clipboard with the host (Wayland), over SSH; runs until the VM stops.
@@ -388,7 +393,7 @@ clip_start() {
     local n="$1" run; run="$(run_dir "$1")"
     command -v wl-paste >/dev/null || { warn "no wl-clipboard: clipboard sharing off"; return 0; }
     clip_stop "$n"
-    setsid nohup python3 "$SHARE/omvm-clip.py" "$(port_of "$n")" "$KEY" >"$run/logs/clip.log" 2>&1 </dev/null &
+    setsid nohup python3 "$SHARE/omvm-clip.py" "$(port_of "$n")" "$KEY" "$GUEST_USER" >"$run/logs/clip.log" 2>&1 </dev/null &
     echo $! > "$run/clip.pid"
 }
 clip_stop() {
@@ -437,7 +442,7 @@ cmd_virt() {
         echo '#!/bin/sh'
         echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
         echo "[ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0"
-        echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY'"
+        echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY' OMVM_GUEST_USER='$GUEST_USER'"
         echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-wayland-1}'"
         echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" >/dev/null 2>&1 </dev/null"
     } > "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
@@ -514,7 +519,7 @@ vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
         vm_on "$n" || { ok "$n is off ($((2 * i - 2))s)"; return 0; }
         # vmapple ignores libvirt's power button: ask macOS itself after 10 s
         if [ "$i" = 6 ]; then
-            ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" aquarat@127.0.0.1 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+            ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
         fi
         sleep 2
     done

@@ -167,12 +167,15 @@ GUEST_KEY="${OMVM_STREAM_GUEST_KEY:-$HOME/.ssh/vmapple_runner}"
 # VNC port -> guest ssh port (QEMU hostfwd), e.g. "5900=42541 5931=40123".
 # A VM without an entry just skips the guest-side steps (HiDPI).
 GUEST_SSH="${OMVM_STREAM_GUEST_SSH:-5900=42541}"
+# The guest account (Sunshine/systemd don't read ~/.bashrc: fall back to gui.env).
+GUEST_USER="${OMVM_STREAM_GUEST_USER:-${OMVM_GUEST_USER:-$(sed -n 's/^OMVM_GUEST_USER=//p' "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1)}}"
+GUEST_USER="${GUEST_USER:-aquarat}"
 guest_ssh_port() { local kv; for kv in $GUEST_SSH; do [[ ${kv%%=*} == "$1" ]] && echo "${kv#*=}"; done; return 0; }
 gssh() { # VNCPORT CMD...
   local p; p=$(guest_ssh_port "$1"); shift
   [[ -n $p && -r $GUEST_KEY ]] || return 1
   ssh -i "$GUEST_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=4 -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$p" aquarat@127.0.0.1 "$@"
+      -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$p" "$GUEST_USER@127.0.0.1" "$@"
 }
 # The guest's pixel size: asked of macOS when we can (the VNC server reports a
 # padded, sometimes stale size), else of the VNC server.

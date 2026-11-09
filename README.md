@@ -127,6 +127,10 @@ omvm setup --xcode     # account + SSH, headless settings + CLT, Xcode
 omvm run -- 'xcodebuild -version'
 ```
 
+The guest account is `aquarat` (upstream's default). To use another name, set
+`OMVM_GUEST_USER` before `omvm setup`, or after renaming the account in macOS,
+and save it with `omvm-gui --install` (services read `~/.config/omvm/gui.env`).
+
 ## How it works
 
 | Piece | What it is | Where it comes from |

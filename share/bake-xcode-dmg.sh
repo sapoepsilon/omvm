@@ -16,6 +16,7 @@ set -euo pipefail
 repo_root="${OMVM_REPO:?set OMVM_REPO}"
 src="$1"; dst="$2"; xip="$3"; ios="${4:-}"
 key="${RUNNER_KEY:?set RUNNER_KEY}"
+user="${GUEST_USER:-aquarat}"   # the guest account (omvm: OMVM_GUEST_USER)
 test -f "$xip" || { echo "no such .dmg: $xip" >&2; exit 1; }
 
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
@@ -25,12 +26,12 @@ GOLDEN="$src" SSH_PORT="$port" CPUS="${CPUS:-8}" RAM="${RAM:-16G}" INJECT="${INJ
 ssh_opts=(-i "$key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 for _ in $(seq 1 150); do
-    timeout 10 ssh -n "${ssh_opts[@]}" -p "$port" aquarat@127.0.0.1 true 2>/dev/null && break
+    timeout 10 ssh -n "${ssh_opts[@]}" -p "$port" "$user@127.0.0.1" true 2>/dev/null && break
     sleep 2
 done
 echo "copying $(du -h "$xip" | cut -f1) into the guest"
-scp "${ssh_opts[@]}" -P "$port" "$xip" aquarat@127.0.0.1:Xcode.dmg
-ssh -n "${ssh_opts[@]}" -p "$port" aquarat@127.0.0.1 "$(cat <<EOF
+scp "${ssh_opts[@]}" -P "$port" "$xip" "$user@127.0.0.1:Xcode.dmg"
+ssh -n "${ssh_opts[@]}" -p "$port" "$user@127.0.0.1" "$(cat <<EOF
 set -e
 cd ~ && mnt=\$(mktemp -d) && hdiutil attach -nobrowse -readonly -mountpoint "\$mnt" Xcode.dmg
 app=\$(cd "\$mnt" && ls -d Xcode*.app | head -1)
