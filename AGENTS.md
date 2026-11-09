@@ -20,6 +20,10 @@ subagents or background jobs.
 
 ## Rules
 
+- **Log your changes.** After each change to this repo or the host setup, add a
+  dated, factual bullet to `docs/log.md` (newest first) and commit it with the
+  change.
+
 - **Never** download AVPBooter, IPSWs, Xcode or guest images from anywhere
   except the user's own Mac or Apple's own servers. Never upload, commit or
   share them. That includes `vm.json`, which holds the VM's identity.
