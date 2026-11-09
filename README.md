@@ -49,6 +49,10 @@ Xcode 27.2
 - `omvm mode local|remote` switches a virt VM between a window on the laptop screen (120 Hz,
   zero-copy) and VNC + Moonlight streaming (the default); `omvm mode` prints the current one
   ([docs/graphics.md](docs/graphics.md#local-window-omvm-mode-local)).
+- `omvm perf always|ac|off` picks when a local-mode VM runs the CPU at the `performance`
+  governor, which cuts pointer lag from ~51 to ~20 ms: always (the default), only on AC
+  power (switching on plug/unplug), or never; `omvm perf` prints the setting and the
+  governor now ([docs/graphics.md](docs/graphics.md#pointer-latency)).
 - **Clipboard** (text) is shared both ways with the Wayland host, and the guest's
   **resolution follows the viewer window** (`RESOLUTION=WxH` sets the start size;
   `omvm res NAME 2560x1440` changes it from the shell).
@@ -57,7 +61,7 @@ Xcode 27.2
   client, with the lid closed too ([docs/streaming.md](docs/streaming.md)).
 - **GUI (optional):** `omvm-gui` is a small GTK4/libadwaita window over the same CLI:
   VM state and power (start, pause/resume, stop, restart, with progress and toasts),
-  local/remote mode, resolution, Moonlight hosts and pairing, and a log of every command it
+  local/remote mode, CPU performance (`omvm perf`), resolution, Moonlight hosts and pairing, and a log of every command it
   runs. It follows the Omarchy theme and floats like other Omarchy tools. `omvm-gui
   --install` adds "macOS VM" to the app launcher and the Hyprland float rule (needs
   `python-gobject gtk4 libadwaita`; the CLI works without them); `--selftest` checks it.

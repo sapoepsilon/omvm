@@ -199,6 +199,17 @@ def parse_mode(rc, out):
     return m if m in ("local", "remote") else None
 
 
+PERF = {"always": "Always", "ac": "On AC", "off": "Off"}
+
+
+def parse_perf(rc, out):
+    """`omvm perf` -> (setting, status line) or (None, why)."""
+    lines = out.strip().splitlines() if rc == 0 else []
+    if not lines or lines[0].strip() not in PERF:
+        return None, last_line(out) or "unavailable"
+    return lines[0].strip(), (lines[1].strip() if len(lines) > 1 else "")
+
+
 def parse_features(out):
     """Commands `omvm help` lists, e.g. {"mode", "show", "restart", "pause", ...}."""
     feats = set()
@@ -327,6 +338,11 @@ def selftest():
     check("virsh domstate", st in STATES, f"{st}" + (f" ({last_line(err)})" if rc else ""))
     rc, out, err = run_sync([omvm_bin(), "mode", VM], 20)
     check("omvm mode", parse_mode(rc, out) is not None, parse_mode(rc, out) or last_line(err, out))
+    rc, out, err = run_sync([omvm_bin(), "perf"], 10)
+    pv, pst = parse_perf(rc, out)
+    check("omvm perf", pv is not None, f"{pv} ({pst})" if pv else pst, required=False)
+    check("parse perf", parse_perf(0, "ac\n  governor schedutil, power battery, local VMs: none\n")[0] == "ac"
+          and parse_perf(1, "")[0] is None, "setting + status, error -> None")
     rc, out, err = run_sync(["systemctl", "--user", "is-active", WATCHDOG], 10)
     check("watchdog", rc in (0, 3), f"{WATCHDOG} {out or '?'}")
     for name, conf, port, unit in HOSTS:
@@ -674,6 +690,17 @@ def main_gui():
             row.add_suffix(self.mode_group)
             g.add(row)
 
+            self.perf_row = Adw.ActionRow(title="CPU performance (local mode)",
+                                          subtitle="less pointer lag, more power")
+            self.perf_group = Adw.ToggleGroup(valign=Gtk.Align.CENTER, sensitive=False, homogeneous=False)
+            for name, label in PERF.items():
+                self.perf_group.add(Adw.Toggle(name=name, label=label))
+            self.perf_group.connect("notify::active-name", self.on_perf_toggled)
+            self.perf = None
+            self._setting_perf = False
+            self.perf_row.add_suffix(self.perf_group)
+            g.add(self.perf_row)
+
             self.res_row = Adw.EntryRow(title="Resolution (remote mode, WxH e.g. 2560x1440)",
                                         show_apply_button=True, sensitive=False)
             self.res_row.connect("apply", self.on_res_apply)
@@ -692,6 +719,31 @@ def main_gui():
                 self.run([omvm_bin(), "res", VM], "Current size", timeout=20,
                          done=lambda rc, out, err: rc == 0 and out and
                          self.res_row.set_title(f"Resolution (now {out.split()[0]}; WxH e.g. 2560x1440)"))
+
+        def got_perf(self, rc, out, err):
+            self.perf, status = parse_perf(rc, out)
+            self._setting_perf = True
+            if self.perf:
+                self.perf_group.set_active_name(self.perf)
+            self._setting_perf = False
+            self.perf_group.set_sensitive(self.perf is not None)
+            # "governor performance, power AC, local VMs: macos" -> "now performance · AC"
+            m = re.match(r"governor (\S+), power (\S+)", status or "")
+            now = f" · now {m.group(1)} · {m.group(2)}" if m else ""
+            self.perf_row.set_subtitle(f"less pointer lag, more power{now}" if self.perf else f"omvm perf: {status}")
+            self.perf_row.set_tooltip_text("performance CPU governor while a local-mode VM runs: Always, "
+                                           "only on AC power, or Off (omvm perf always|ac|off)")
+
+        def on_perf_toggled(self, group, _pspec):
+            new = group.get_active_name()
+            if self._setting_perf or not self.perf or new == self.perf:
+                return
+            self.perf_group.set_sensitive(False)
+
+            def done(rc, out, err):
+                self.toast(f"CPU performance: {PERF[new]}" if rc == 0 else f"omvm perf {new} failed")
+                self.run([omvm_bin(), "perf"], "CPU performance", self.got_perf, timeout=10, log=False)
+            self.run([omvm_bin(), "perf", new], f"CPU performance → {PERF[new]}", done, timeout=30)
 
         def on_mode_toggled(self, group, _pspec):
             new = group.get_active_name()
@@ -919,6 +971,7 @@ def main_gui():
             self.run(VIRSH + ["domstate", VM], "VM state", state, timeout=10, log=log)
             self.refresh_watchdog()
             self.refresh_moonlight(log)
+            self.run([omvm_bin(), "perf"], "CPU performance", self.got_perf, timeout=10, log=log)
 
     class App(Adw.Application):
         def __init__(self):

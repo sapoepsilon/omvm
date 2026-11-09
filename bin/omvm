@@ -17,6 +17,8 @@
 #   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt)
 #   omvm mode [local|remote] [NAME]  show or switch a virt VM's display: a window on
 #                               this screen (local) or VNC + Sunshine (remote, default)
+#   omvm perf [always|ac|off]   show or set the CPU governor for local-mode VMs: performance
+#                               always (default), only on AC power, or never
 #   omvm show [NAME]            bring the VM to the front (its window or a VNC viewer),
 #                               starting it if needed; Ctrl+Alt+M and "macOS" in the launcher
 #   omvm clip NAME [off]        share the text clipboard with the host (on with gui)
@@ -494,35 +496,108 @@ local_screen() {
     fi
 }
 
-# CPU governor while a local-mode VM runs. With schedutil the cores idle at low clocks
-# between the guest's bursts, and every pointer move waits for them to ramp up: on the
-# M1 Max a move took 51 ms to reach the screen (10 ms to reach the guest), with the
-# performance governor 18 ms (1.4 ms). docs/graphics.md, "Pointer latency".
-# OMVM_LOCAL_GOVERNOR=keep leaves the governor alone. Needs passwordless sudo.
+# CPU governor while a local-mode VM runs (omvm perf). With schedutil the cores idle at
+# low clocks between the guest's bursts, and every pointer move waits for them to ramp
+# up: on the M1 Max a move took 51 ms to reach the screen (10 ms to reach the guest),
+# with the performance governor 18 ms (1.4 ms). docs/graphics.md, "Pointer latency".
+#   always  performance while a local VM runs, on AC and on battery (the default)
+#   ac      performance only on AC power; a udev rule re-applies on plug/unplug
+#   off     leave the governor alone
+# Kept in ~/.config/omvm/perf; OMVM_LOCAL_GOVERNOR overrides it (keep = off, a governor
+# name = always with that governor). Needs passwordless sudo.
 GOV_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omvm-governor"
+PERF_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omvm/perf"
+PERF_RULE=/etc/udev/rules.d/90-omvm-power.rules
+PERF_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omvm-power.service"
+perf_setting() { # always|ac|off
+    case "${OMVM_LOCAL_GOVERNOR:-}" in keep) echo off; return ;; ?*) echo always; return ;; esac
+    local v; v="$(cat "$PERF_FILE" 2>/dev/null || true)"
+    case "$v" in always|ac|off) echo "$v" ;; *) echo always ;; esac
+}
+on_ac() { # any Mains supply online (none at all: treat as AC); OMVM_AC_ONLINE=0|1 simulates
+    [ -n "${OMVM_AC_ONLINE:-}" ] && { [ "$OMVM_AC_ONLINE" = 1 ]; return; }
+    local d seen=0
+    for d in /sys/class/power_supply/*; do
+        [ "$(cat "$d/type" 2>/dev/null)" = Mains ] || continue
+        seen=1; [ "$(cat "$d/online" 2>/dev/null)" = 1 ] && return 0
+    done
+    [ "$seen" = 0 ]
+}
 vm_is_local_running() { # NAME: its QEMU runs reims-vgpu's window (no virsh: libvirt hooks must not call libvirt)
     local pid; pid="$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/libvirt/qemu/run/$1.pid" 2>/dev/null)" || return 1
     tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx 'REIMS_VGPU_WINDOW=1'
 }
-governor_start() { # NAME
-    local g="${OMVM_LOCAL_GOVERNOR:-performance}" p
-    [ "$g" != keep ] && vm_is_local_running "$1" || return 0
-    mkdir -p "$GOV_DIR"
-    if [ ! -f "$GOV_DIR/saved" ]; then
-        for p in /sys/devices/system/cpu/cpufreq/policy*; do echo "$p $(cat "$p/scaling_governor")"; done > "$GOV_DIR/saved"
-    fi
-    touch "$GOV_DIR/vm.$1"
-    for p in /sys/devices/system/cpu/cpufreq/policy*; do
-        echo "$g" | sudo -n tee "$p/scaling_governor" >/dev/null 2>&1 || { warn "cpufreq: no passwordless sudo, governor left as is"; return 0; }
+local_vms() { # the local-mode VMs running now, from the hook's markers (stale ones dropped)
+    local f n
+    for f in "$GOV_DIR"/vm.*; do
+        [ -e "$f" ] || continue; n="${f##*/vm.}"
+        if vm_is_local_running "$n"; then echo "$n"; else rm -f "$f"; fi
     done
 }
-governor_stop() { # NAME: back to the saved governors once no local VM is left
-    local p g
-    rm -f "$GOV_DIR/vm.$1"
-    compgen -G "$GOV_DIR/vm.*" >/dev/null && return 0
-    [ -f "$GOV_DIR/saved" ] || return 0
-    while read -r p g; do echo "$g" | sudo -n tee "$p/scaling_governor" >/dev/null 2>&1 || true; done < "$GOV_DIR/saved"
-    rm -f "$GOV_DIR/saved"
+set_governors() { # GOVERNOR
+    local p
+    for p in /sys/devices/system/cpu/cpufreq/policy*; do
+        [ "$(cat "$p/scaling_governor")" = "$1" ] && continue
+        echo "$1" | sudo -n tee "$p/scaling_governor" >/dev/null 2>&1 || { warn "cpufreq: no passwordless sudo, governor left as is"; return 1; }
+    done
+}
+governor_apply() { # performance or the saved governors, from the setting, AC and the running local VMs
+    local want=0 p g
+    if [ -n "$(local_vms)" ]; then
+        case "$(perf_setting)" in always) want=1 ;; ac) on_ac && want=1 ;; esac
+    fi
+    if [ "$want" = 1 ]; then
+        mkdir -p "$GOV_DIR"
+        [ -f "$GOV_DIR/saved" ] || for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            echo "$p $(cat "$p/scaling_governor")"; done > "$GOV_DIR/saved"
+        g="${OMVM_LOCAL_GOVERNOR:-performance}"; [ "$g" = keep ] && g=performance
+        set_governors "$g" || true
+    elif [ -f "$GOV_DIR/saved" ]; then
+        while read -r p g; do echo "$g" | sudo -n tee "$p/scaling_governor" >/dev/null 2>&1 || true; done < "$GOV_DIR/saved"
+        rm -f "$GOV_DIR/saved"
+    fi
+}
+governor_start() { # NAME (libvirt hook: started)
+    vm_is_local_running "$1" || return 0
+    mkdir -p "$GOV_DIR"; touch "$GOV_DIR/vm.$1"
+    governor_apply
+}
+governor_stop() { rm -f "$GOV_DIR/vm.$1"; governor_apply; }  # NAME (libvirt hook: stopped)
+perf_install_ac() { # the plug/unplug trigger: udev runs the user unit, which runs `omvm perf apply`
+    mkdir -p "$(dirname "$PERF_UNIT")"
+    cat > "$PERF_UNIT" <<EOF
+# omvm: re-apply the CPU governor setting (omvm perf) when AC power comes or goes
+[Unit]
+Description=omvm: CPU governor for local-mode VMs after a power change
+[Service]
+Type=oneshot
+ExecStart=$(readlink -f "$0") perf apply
+EOF
+    systemctl --user daemon-reload
+    local rule="SUBSYSTEM==\"power_supply\", ATTR{type}==\"Mains\", ACTION==\"change\", RUN+=\"/usr/bin/systemctl --no-block --user -M $(id -un)@ start omvm-power.service\""
+    if [ "$(cat "$PERF_RULE" 2>/dev/null)" != "# omvm perf ac: re-apply the governor on plug/unplug
+$rule" ]; then
+        printf '# omvm perf ac: re-apply the governor on plug/unplug\n%s\n' "$rule" | sudo -n tee "$PERF_RULE" >/dev/null &&
+            sudo -n udevadm control --reload || warn "no passwordless sudo: $PERF_RULE not installed, plug/unplug won't switch"
+    fi
+}
+cmd_perf() {
+    local v="${1:-}" vms
+    case "$v" in
+    "")
+        vms="$(local_vms | tr '\n' ' ')"
+        echo "$(perf_setting)"
+        echo "  governor $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null || echo ?)," \
+             "power $(on_ac && echo AC || echo battery), local VMs: ${vms:-none}" \
+             "$([ -n "${OMVM_LOCAL_GOVERNOR:-}" ] && echo "(OMVM_LOCAL_GOVERNOR=$OMVM_LOCAL_GOVERNOR overrides $PERF_FILE)")" ;;
+    always|ac|off)
+        mkdir -p "$(dirname "$PERF_FILE")"; echo "$v" > "$PERF_FILE"
+        [ "$v" = ac ] && perf_install_ac
+        governor_apply
+        ok "perf: $v (governor now $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor))" ;;
+    apply) governor_apply ;;
+    *) die "usage: omvm perf [always|ac|off]" ;;
+    esac
 }
 
 # The window needs a Vulkan driver with Wayland WSI: the graphics stack's Mesa is
@@ -671,6 +746,7 @@ res) shift; upstream; cmd_res "$@" ;;
 remote) shift; exec "$SHARE/stream-host.sh" "$@" ;;
 virt) shift; cmd_virt "$@" ;;
 mode) shift; cmd_mode "$@" ;;
+perf) shift; cmd_perf "$@" ;;
 show) shift; cmd_show "$@" ;;
 virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1"; governor_start "$1" ;; stopped) clip_stop "$1"; governor_stop "$1" ;; esac ;;
 ssh) shift; cmd_ssh "$@" ;;
@@ -678,6 +754,6 @@ stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;
 images) cmd_images ;;
 version|--version) echo "omvm $VERSION" ;;
-help|-h|--help) sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//' ;;
+help|-h|--help) sed -n '3,/^set -euo/{/^#/p}' "$0" | sed 's/^# \{0,1\}//' ;;
 *) die "unknown command '$1' (omvm help)" ;;
 esac

@@ -5,6 +5,20 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`omvm perf always|ac|off`: the governor switch is a setting.** Default `always`
+  (performance while a local-mode VM runs, on AC and battery), kept in
+  `~/.config/omvm/perf`; `OMVM_LOCAL_GOVERNOR` still overrides it. `ac` installs a udev
+  rule on the Mains supply's change event that starts `omvm-power.service` (user), which
+  runs `omvm perf apply`. `omvm-gui` has the same three-way switch under Display ("CPU
+  performance (local mode)", with the governor and power source now). `omvm help` now
+  prints the whole header, not lines 3-24. Tested with `macos` running local: `off` put
+  back schedutil, `always` set performance on all three policies, `ac` on AC set
+  performance; with `OMVM_AC_ONLINE=0` set in the user manager, `udevadm trigger
+  --action=change` on `macsmc-ac` ran the unit and put back schedutil, `=1` performance
+  again; `omvm stop macos` restored schedutil, `omvm start macos` with `off` left it,
+  and switching to `always` while running set performance. `omvm-gui --selftest`
+  passes with the new perf checks.
+
 - **`macos` pointer lag: the CPU governor; the guest now boots in macOS's default
   scaling.** Measured with a uinput mouse on the host (`/tmp/lat.py`, not in the
   repo) against `~/bin/latprobe` in the guest (a full-screen window that turns

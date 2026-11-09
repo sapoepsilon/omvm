@@ -132,8 +132,20 @@ builds link ignores it, but qemu-fleet's reims caps the guest's modes with it.
 ### Pointer latency
 
 The `omvm` libvirt hook switches every CPU cluster to the `performance` governor while a
-local-mode VM runs and restores the previous governors when the last one stops
-(`OMVM_LOCAL_GOVERNOR=keep` to skip; needs passwordless sudo). With `schedutil` a pointer
+local-mode VM runs and restores the previous governors when the last one stops (needs
+passwordless sudo). `omvm perf` sets when, kept in `~/.config/omvm/perf`:
+
+```sh
+omvm perf          # the setting, then the governor, power source and local VMs now
+omvm perf always   # performance while a local VM runs, on AC and battery (default)
+omvm perf ac       # only on AC power: back to the saved governor on battery
+omvm perf off      # never touch the governor
+```
+
+`ac` installs `/etc/udev/rules.d/90-omvm-power.rules`: a change of the Mains supply
+(`macsmc-ac`) starts the user unit `omvm-power.service`, which runs `omvm perf apply`; no
+polling. `OMVM_LOCAL_GOVERNOR` overrides the file (`keep` = off, a governor name = always with
+that governor). The GUI has the same switch (Display, "CPU performance"). With `schedutil` a pointer
 move took 51 ms to show in the guest's image (10 ms to reach the guest); with `performance`
 20 ms (1.4 ms). The cursor itself is the host's: SDL's colour cursor with the guest's glyph,
 drawn by Hyprland, 13 ms (26 ms with schedutil). Measured 2026-11-09 with a uinput mouse,
