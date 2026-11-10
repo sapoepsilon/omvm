@@ -1,5 +1,27 @@
 # Instructions for AI coding agents
 
+## Agents: read this first (operating the VMs on this host)
+
+VM stalled or won't boot? Do this before anything else (example VM `macos`):
+
+```sh
+export OMVM_UPSTREAM=... OMVM_IMAGES=... OMVM_KEY=... OMVM_GUEST_USER=...   # copy from ~/.config/omvm/gui.env; non-interactive shells need all four
+pgrep -af qemu-system-aarch64        # one per running domain (-name guest=NAME, child of virtqemud); kill any hand-launched QEMU
+mount | grep -iE 'fuse|apfs'; losetup -a   # unmount every mount of a guest disk before the VM runs; never mount a live disk.img
+free -g; cat /sys/class/power_supply/*/capacity   # leave ~20 GB free (one VM at a time), stay on AC above ~20 %
+exec 9>$OMVM_IMAGES/vms/macos/.agent.lock && flock -n 9 && tail -20 $OMVM_IMAGES/vms/macos/agent-notes.log
+virsh -c qemu:///session domstate macos; tail -30 ~/.cache/libvirt/qemu/log/macos.log
+omvm restart macos                   # stuck guest: systemctl --user stop omvm-vm@macos.timer; virsh -c qemu:///session destroy macos; omvm start macos
+timeout 10 omvm ssh macos true       # an open forwarded port means nothing (QEMU accepts it); only an ssh banner counts; wait up to 5 min
+no banner after 5 min: 'info blockstats' twice 30 s apart + 'info registers' (PC ~0x100000 = firmware loop: guest_major + omvm virt), docs/graphics.md "macOS 27 updates"
+up: omvm usb attach iphone macos; append what you did to agent-notes.log; exec 9>&-
+```
+
+Never launch `qemu-system-aarch64` by hand: the libvirt domain (`omvm virt NAME`) carries the
+firmware, QEMU build, `REIMS_VGPU_*`/`VK_DRIVER_FILES` environment and capability switches. Stop a
+VM with `omvm stop NAME` (the `omvm-vm@NAME.timer` watchdog restarts anything else within a
+minute). Full runbook for the owner's agents: the `omvm-vm-ops` skill.
+
 If you are an AI agent (Claude Code, Codex, etc.) helping a user set up macOS
 guests on Omarchy with omvm, follow this.
 

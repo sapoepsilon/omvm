@@ -5,6 +5,11 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **AGENTS.md: "Agents: read this first" quick start for a stalled VM** (stray QEMU,
+  live-disk mounts, memory/battery, lock + agent-notes.log, `omvm restart`, banner vs open
+  port, firmware-loop check). An agent had hand-launched QEMU twice and mounted the live
+  disk (systemd-oomd killed it at 67 GB). The full runbook is the owner's `omvm-vm-ops` skill.
+
 - **GPU gaps of `macos`: ProRes exports fixed; Metal 3 and the M2 scaler are the guest's
   limits, with evidence.**
   - **Green ProRes (FCP GAP-1): fixed.** `patches/graphics/metal2vulkan/0004` (metal2vulkan
