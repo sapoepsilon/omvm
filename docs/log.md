@@ -5,6 +5,42 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **`macos` ssh dead (port 42541 open, no banner): the guest clock was in 2083, fixed
+  inside the guest.**
+  - **Symptom.** slirp `info usernet` showed every connection to 10.0.2.15:22 in
+    `SYN_SENT`; inside the guest (driven over VNC with HMP `sendkey`) sshd was listening,
+    Remote Login on, firewall off, but `netstat -an` held the same connections in
+    `SYN_RCVD` and `netstat -I en0` showed Opkts frozen at 155 while Ipkts grew: RX worked,
+    virtio-net TX was dead (ping 10.0.2.2 and curl out failed too). `date` said
+    Sat 18 Sep 2083. The vCPU PC `...21b4` that looked like a spin is the idle loop: the
+    GUI ran, uptime 12 min, load ~1.
+  - **Cause.** After the battery-empty power-offs the Asahi RTC (macsmc-rtc) had lost the
+    time: this host boot started at 1970-01-01T10:05:15 UTC and NTP corrected it only at
+    18:48:59. `macos` started in that window; the vmapple `avp-rtc` device returns
+    `QEMU_CLOCK_HOST` (host system time, `-rtc base=` does not apply to it), so the guest
+    saw RTC ~36326 s. Its `timed` then learned NTP time and stored
+    `com.apple.System.rtc-offset` = +1794238993 s in NVRAM plus a TDTF sample in
+    `/var/db/timed/com.apple.timed.plist`. That boot was fine; every boot after it (from the
+    19:22 OOM kill on) read the correct RTC, added the offset and landed in 2083, and with
+    that clock the TX queue stalls.
+  - **Not the QEMU binary or the serial/MLB work.** A control boot of the same domain on the
+    saved 18:12 build (the one that served ssh at 18:54) reproduced it; clearing the clock
+    state alone fixed it on that build.
+  - **Fix (guest):** `sudo nvram -d com.apple.System.rtc-offset`, move
+    `/var/db/timed/com.apple.timed.plist` away (kept as `~killerisya/timed.plist.bad-20261109`),
+    `sudo date <now>`, `sudo killall timed`, clean shutdown + `omvm start`. Deleting only the
+    NVRAM key is not enough: timed rewrites it from its plist at the next boot. Verified:
+    `omvm ssh macos` -> 27.2 / killerisya at 20:47, 20:48 and, after a clean reboot into
+    local mode, 20:50 and 20:51; rtc-offset now -2 s.
+  - **Host side:** `hwclock` now matches the system clock and `save-hwclock.service` writes
+    it back at shutdown (added by another agent). It cannot help after a full battery
+    drain; a guard in `ensure-vm` that waits for NTP sync (or a year >= 2026) before
+    starting a VM would. Not done yet.
+  - State left: `build/qemu-sb-bdifw/build/qemu-system-aarch64` is the 18:12 build
+    (`~/vm-artifacts/rollback-ssh-20261109/`), the serial/MLB build is parked beside it as
+    `qemu-system-aarch64.omp-serial-mlb-20261109`; `macos` in local mode, watchdog on; iPhone
+    not on the host bus.
+
 - **AGENTS.md: "Agents: read this first" quick start for a stalled VM** (stray QEMU,
   live-disk mounts, memory/battery, lock + agent-notes.log, `omvm restart`, banner vs open
   port, firmware-loop check). An agent had hand-launched QEMU twice and mounted the live
