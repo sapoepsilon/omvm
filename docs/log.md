@@ -5,6 +5,39 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-09
 
+- **GPU gaps of `macos`: ProRes exports fixed; Metal 3 and the M2 scaler are the guest's
+  limits, with evidence.**
+  - **Green ProRes (FCP GAP-1): fixed.** `patches/graphics/metal2vulkan/0004` (metal2vulkan
+    `87c471ce` on `latency-20261109`): a 4:2:2 texture over a surface is a shadow with a
+    decoded twin, decoded on the CPU from the surface's bytes at each bind of a sampled view
+    that finds them changed. 10 s 1080p clips through `AVAssetExportSession`, compared with
+    their sources (`share/bench/gputest.sh`): ProRes 422 / 422 HQ / 4444 went from 1.5 s of
+    solid green (SSIM 0.00003) to 5-13 s with SSIM 0.979-0.981, level with the H.264 control
+    (0.979); HEVC 10-bit 4:2:0 and 4:2:2 were never affected (0.980). The fcp.md repro (30 s)
+    exports in 11.4 s (2.6x realtime), 17.0 s with the CoreImage effects; no refusal in the
+    VM's log since, VM stays up. reims-vgpu is unchanged (rebuilt and QEMU relinked).
+    Rollback: `~/vm-artifacts/rollback-gpu-20261109/`.
+  - **Metal 3: not ours to give.** reims-vgpu already tells the guest Apple9 (device-info key
+    37 = 1009, key 44 = 0x1f; read back from the guest driver's `_deviceInfo` with
+    `share/bench/pvinfo.m`), and the 27.2 driver still answers Apple5, `featureProfile` 6, no
+    ray tracing, mesh shaders, sparse textures, function pointers or dynamic libraries. Guests
+    on Apple's own hosts report the same Apple5 without Metal3 (Tart 1032, Godot 124859, riff
+    76). Nothing advertised, nothing changed; details in docs/graphics.md.
+  - **M2 scaler: the 27.2 guest has no driver for it.** `AppleM2ScalerParavirtDriver.kext` on
+    disk is codeless, and the boot kernel collection has neither the class nor a
+    `0x1a0b106b` match (it does have `AppleVideoToolboxParavirtualization`, 106b:1a03); the
+    "resets" seen earlier were QEMU's own. `OMVM_M2SCALER=1` stays opt-in for other guests.
+  - **The watchdog killed its own VM after every host reboot.** `omvm-vm@NAME.service` is a
+    oneshot; its first `virsh` call spawned virtqemud inside the unit, QEMU under it, and
+    systemd ended both when the unit finished ("terminating on signal 15 from pid ...
+    (systemd)", then `reason=crashed` every minute). `stream-host.sh ensure-vm` now starts
+    virtqemud in `omvm-virtqemud-PID.scope`. Seen working after the 18:22 power loss (battery
+    empty) and the 18:47 reboot.
+  - Guest Metal after the change (`metalbench`): 0.29 ms compute round trip, 0.051 ms per
+    pipelined 1080p pass, 319 GB/s, 1.22 TFLOP/s, 2.5 ms first use of a new pipeline: as before.
+  - Open: the iPhone is not on the host's USB bus since the 17:31 reboot (`omvm usb list`:
+    none), so it is not attached; FCP itself is still behind the Apple Account wall.
+
 - **`macos` local-mode latency: profiled stage by stage; reims-vgpu's share is ~1.4 ms; a
   refused 4:2:2 dispatch no longer kills the VM.** reims-vgpu got a run-time trace gate and
   tune file (`patches/graphics/reims-vgpu/0002`; local mode sets `REIMS_VGPU_TRACE`,

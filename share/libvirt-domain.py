@@ -64,9 +64,9 @@ args = [
 ]
 # The paravirtual M2 scaler (106b:1a0b, reims-vgpu's scaler on the host GPU), which
 # a guest's VideoToolbox would use for pixel transfers instead of a Metal compute
-# fallback. Opt-in (OMVM_M2SCALER=1): on vmapple with a macOS 27.2 guest the host
-# side starts (kernels made on the M1 Max) but the guest's AppleVirtIOPCITransport
-# only resets the device a few times and never attaches (docs/fcp.md, GAP-1).
+# fallback. Opt-in (OMVM_M2SCALER=1): the host side starts (kernels made on the M1
+# Max), but a macOS 27.2 guest's kernel collection has no AppleM2ScalerParavirtDriver,
+# so nothing binds it there (docs/graphics.md, "The M2 scaler").
 if os.environ.get("OMVM_M2SCALER", "0") == "1":
     args += ["-device", "apple-m2scaler-pci"]
 env = {

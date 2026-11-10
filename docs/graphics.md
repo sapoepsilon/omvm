@@ -6,7 +6,7 @@
 |---|---|---|
 | QEMU | [steelbrain/qemu-reims-vgpu](https://github.com/steelbrain/qemu-reims-vgpu) `1b41f5f5db` (reims-vgpu's `vendor/qemu` pin) | `qemu/0001`: aquarat's vmapple-on-KVM work, rebased. `qemu/0002`: macOS 26 disk compatibility (keeps the guest's protected files readable). `qemu/0003`: the desktop follows the VNC viewer's window size, and `resolution` works headless ("Resolution", below). `qemu/0004`-`0007`: macOS 27 ("macOS 27 updates", below) |
 | GPU library | [steelbrain/reims-vgpu](https://github.com/steelbrain/reims-vgpu) `1fe0acb6` | `reims-vgpu/0001`: dma-buf imports instead of host pointers, memfd-backed own allocations, 10-bit extended-range formats off, unsupported pipelines answered as NSErrors. Each change has an environment switch. `reims-vgpu/0002`: a run-time trace gate and tune file, and the window's latency stages ("Pointer latency"). `reims-vgpu/0003`: a dispatch the runtime refuses as unsupported is skipped, not the VM's end |
-| Shader translator | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) `219f0136` | `metal2vulkan/0001`: an importer that works without `VK_EXT_external_memory_host`. `metal2vulkan/0002`: a cubic sampler in an argument buffer filters bilinearly instead of refusing the draw (the iOS Simulator needs it; `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0` refuses again). `metal2vulkan/0003`: logs what a binding view refused for want of `SAMPLED` is |
+| Shader translator | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) `219f0136` | `metal2vulkan/0001`: an importer that works without `VK_EXT_external_memory_host`. `metal2vulkan/0002`: a cubic sampler in an argument buffer filters bilinearly instead of refusing the draw (the iOS Simulator needs it; `REIMS_VGPU_CUBIC_ARGUMENT_SAMPLERS_LINEAR=0` refuses again). `metal2vulkan/0003`: logs what a binding view refused for want of `SAMPLED` is. `metal2vulkan/0004`: a 4:2:2 texture over a surface (a ProRes frame) gets a decoded twin its samples read (docs/fcp.md, GAP-1) |
 | Vulkan driver | Mesa (Honeykrisp) 26.2.6 (the tested version), plus aquarat's `patches/mesa/0001-0002` | `mesa/0003`: exposes `VK_EXT_fragment_shader_interlock`, which macOS's framebuffer-fetch shaders need |
 
 ## Build (about 40 minutes)
@@ -82,7 +82,7 @@ omvm mode remote [NAME]   # back to VNC + Sunshine (the default)
 | Guest mode | follows the VNC viewer, 60 Hz | `resolution` = the panel at its density (`3024x1964@254`, HiDPI) at the panel's rate (`REIMS_VGPU_WINDOW_REFRESH=120`) |
 | Frame rate | VNC caps at ~33 fps (QEMU `ui/vnc.c` refreshes every 30 ms) | the guest's own rate, up to 120 |
 | Moonlight | the VM's host and tiles work | tiles fail at once: "macos is in local mode" |
-| Boot | libvirt autostart + `omvm-vm@NAME.timer` | autostart off; the timer starts it once the Wayland session exists |
+| Boot | libvirt autostart + `omvm-vm@NAME.timer` | autostart off; the timer starts it once the Wayland session exists (in a scope of its own, `omvm-virtqemud-PID.scope`, so the oneshot's end does not take QEMU with it) |
 
 A switch backs up the domain (`$OMVM_IMAGES/vms/NAME/domain-<mode>-<time>.xml`), stops the
 watchdog timer, shuts the guest down cleanly (`virsh shutdown`, then `sudo shutdown -h now`
@@ -228,6 +228,63 @@ Login window keyboard: on the first boot after the 27.2.1 OTA, typed keys (VNC a
 A 26 guest that takes the 27 OTA *without* `guest_major` (System Settings offers it as recommended, and nothing stops a click on it) reboots into the upgrade under `build/qemu-sb` and the 26-era AVPBooter; first-stage iBoot then panics and resets about twice a second forever. Signs: the Reims window (or VNC) stays black, the vCPU PC sits at `0x100000` and iBoot addresses, QMP events are `GUEST_CRASHLOADED`/`RESET` pairs, virtqemud logs `Duplicate block info` every second, and the guest's ssh never answers. A cold restart loops too, because the aux NVRAM holds `boot-command=upgrade` (`strings aux.img.trimmed | grep -E 'boot-command|ota-os-version'`). Fix: `echo 27 > ~/vm-artifacts/vms/NAME/guest_major`, `omvm virt NAME` (it keeps local or remote mode), then `virsh destroy NAME` and `virsh start NAME`. The upgrade finishes in about 2 minutes, followed by post-upgrade migration behind the Apple logo.
 
 Update from the guest: `softwareupdate -d "macOS 27.2.1-26B131"`, then `echo PASSWORD | sudo softwareupdate -i "macOS 27.2.1-26B131" --agree-to-license --user USER --stdinpass -R`. The guest reboots twice (first stage, then the update iBEC and its ramdisk) and comes back on 27.2.1 in about 5 minutes. Don't power the VM off while the update ramdisk runs: iBoot counts that as a failed attempt and falls back to 26.
+
+## Guest Metal feature set (why there is no Metal 3)
+
+A macOS guest on this stack reports `Apple Paravirtual device` with `MTLGPUFamilyApple1`-`Apple5`,
+`Mac2` and `Common1`-`3`, and no `Apple6`+, `Metal3` or `Metal4`. That is the guest driver's
+choice, not something the host withholds, and it is what Apple's own hosts give a VM.
+
+- **What the host tells the guest.** reims-vgpu answers the guest's device-info request
+  (`crates/reims-vgpu-core/src/guest/abi/device_info.rs`) with the families of an M3 Max:
+  key 37 (the highest family) is 1009, `Apple9`, and key 44 (the family mask) is 0x1f,
+  `Apple5`-`Apple9` (`crates/reims-vgpu-vulkan/src/gpu/caps.rs`, `stand_in::FAMILIES`). The
+  protocol has no key for Metal 3, ray tracing, mesh shaders, sparse textures or MetalFX.
+- **What the guest holds.** `share/bench/pvinfo.m` (guest `~/bin/pvinfo`) reads the driver's
+  own copy (`AppleParavirtDevice._deviceInfo`): `HostGPUFamilyClamped = 1009`,
+  `HostGPUFamilies = 0x1f`, `MaxMetalShaderVersion = 0x20007`. With those in hand the driver
+  still answers `featureProfile = 6`, `supportsFamily(Apple6...) = NO`, `supportsRaytracing`,
+  `supportsMeshShaders`, `supportsSparseTextures`, `supportsFunctionPointers`,
+  `supportsDynamicLibraries` = NO and `requiresMeshShaderEmulation`,
+  `requiresRaytracingEmulation` = YES (macOS 27.2, 26B123).
+- **Apple's own hosts do the same.** On Virtualization.framework guests the device reports
+  `MTLGPUFamilyApple5 (1005)` while the host beside it reports `Apple9` and `Metal3`: Tart
+  issue 1032 (a macOS 15.6 host with Sequoia and Sonoma guests: "`MTLGPUFamilyMetal3` is not
+  exposed in the Guest"; a maintainer adds that a Tahoe guest on a Tahoe host is level 5 too),
+  Godot issue 124859 (a 26.3 guest: "Apple1–5 and Mac2 families, no Metal3"), riff issue 76
+  (GitHub's `macos-14` runners). No report of a guest above Apple5 was found; no Apple host
+  was at hand to measure (the `kentra` VM was off).
+- **Probed in the guest** (`share/bench/metalcaps.swift`, guest `~/bin/metalcaps`): a mesh
+  render pipeline fails to compile (the compiler service ends), a sparse heap asserts in the
+  driver (`IOGPUMetalHeap`), ray tracing is off; argument buffers tier 2, BC textures, 32-bit
+  float filtering and MSAA, barycentrics, pull-model interpolation, rasterization-rate maps,
+  vertex amplification 2 and `MTLIOCommandQueue` are there.
+
+So there is nothing to advertise: the host already offers Apple9, and a guest-side shim that
+overrides `supportsFamily:` per process (what cua's "GPU passthrough" does) would promise
+features the paravirtual protocol cannot carry.
+
+## The M2 scaler (`apple-m2scaler-pci`) cannot attach in a 27.2 guest
+
+QEMU's `apple-m2scaler-pci` (106b:1a0b) is the device a guest's `AppleM2ScalerParavirtDriver`
+drives for VideoToolbox's pixel transfers. In the `macos` guest (27.2, 26B123) nothing ever
+binds it, because the guest's kernel has no such driver:
+
+- `/System/Library/Extensions/AppleM2ScalerParavirtDriver.kext` is a codeless bundle (an
+  `Info.plist` with the two personalities, `IOPCIPrimaryMatch 0x1a0b106b`, no executable).
+- The boot kernel collection (`.../com.apple.kernelcaches/kernelcache`, LZFSE-decoded) holds no
+  `AppleM2ScalerParavirtDriver` string and no `0x1a0b106b` match; `kmutil inspect` lists
+  `AppleM2ScalerCSCDriver` (the hardware scaler's) and `AppleVideoToolboxParavirtualization`
+  (106b:1a03), not the paravirtual scaler. `ioclasscount AppleM2ScalerParavirtDriver`:
+  "no such class". `kmutil load` of the bundle: "Bad code signature".
+- So the personalities are not in the kernel's catalogue, no `AppleVirtIOPCITransport` is
+  made for the PCI function, and the `status=0x0` writes QEMU traced were its own resets at
+  start.
+
+A kernel collection is sealed and signed by Apple, and there is no binary to put in an
+auxiliary one, so this is out of reach from the host. `OMVM_M2SCALER=1` stays as the opt-in
+for a guest whose kernel has the driver. VideoToolbox's fallback, the Metal compute kernel,
+works since `metal2vulkan/0004` (docs/fcp.md, GAP-1).
 
 ## Known limits
 

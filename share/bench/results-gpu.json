@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "date": "2026-11-09",
+  "vm": "macos",
+  "guest": "macOS 27.2 (26B123), 8 vCPU, 16 GB, Apple Paravirtual device",
+  "host": "M1 Max, Asahi (kernel 7.2.11-15vmapple), Mesa Honeykrisp 26.2.6, reims-vgpu 8e76b0e4, metal2vulkan 9f957a02 -> 87c471ce",
+  "items": [
+    {
+      "id": "gap1-422-surface",
+      "title": "ProRes -> H.264 export (4:2:2 surface sampled through RGBA8)",
+      "status": "fixed",
+      "commit": {"metal2vulkan": "87c471ce", "omvm_patch": "patches/graphics/metal2vulkan/0004"},
+      "method": "guest ~/bin/gputest.sh: AVAssetExportSession (AVAssetExportPreset1920x1080) of 10 s 1920x1080 30 fps clips, then ffmpeg psnr/ssim of the export against its source, both as yuv420p; the H.264 8-bit source is the control (never hit the bug)",
+      "clips": [
+        {"source": "prores422_10.mov", "codec": "ProRes 422 10-bit", "before": {"export_s": 1.5, "frames": 300, "psnr_db": 5.55, "ssim": 0.000027, "bytes": 74720, "picture": "solid green"}, "after": {"export_s": 13.5, "frames": 300, "psnr_db": 25.47, "ssim": 0.9808, "bytes": 12674694, "picture": "correct", "note": "first export after boot, cold pipelines"}},
+        {"source": "prores422hq_10.mov", "codec": "ProRes 422 HQ 10-bit", "before": {"export_s": 1.5, "frames": 300, "psnr_db": 5.55, "ssim": 0.000027, "bytes": 74720, "picture": "solid green"}, "after": {"export_s": 6.3, "frames": 300, "psnr_db": 25.46, "ssim": 0.9807, "bytes": 12597124, "picture": "correct"}},
+        {"source": "prores4444_10.mov", "codec": "ProRes 4444 10-bit", "before": {"export_s": 1.7, "frames": 300, "psnr_db": 5.52, "ssim": 0.000027, "bytes": 74720, "picture": "solid green"}, "after": {"export_s": 5.1, "frames": 300, "psnr_db": 25.34, "ssim": 0.9786, "bytes": 12608514, "picture": "correct"}},
+        {"source": "hevc420_10.mov", "codec": "HEVC Main10 4:2:0", "before": {"export_s": 2.8, "frames": 300, "psnr_db": 25.28, "ssim": 0.9803, "bytes": 12651957, "picture": "correct"}, "after": {"export_s": 2.8, "frames": 300, "psnr_db": 25.28, "ssim": 0.9803, "bytes": 12651957, "picture": "correct"}},
+        {"source": "hevc422_10.mov", "codec": "HEVC 4:2:2 10-bit", "before": {"export_s": 2.9, "frames": 300, "psnr_db": 25.28, "ssim": 0.9805, "bytes": 12671335, "picture": "correct"}, "after": {"export_s": 2.9, "frames": 300, "psnr_db": 25.28, "ssim": 0.9805, "bytes": 12671335, "picture": "correct"}},
+        {"source": "h264_420_8.mp4", "codec": "H.264 8-bit 4:2:0 (control)", "before": {"export_s": 3.9, "frames": 300, "psnr_db": 22.45, "ssim": 0.9790, "bytes": 12746879, "picture": "correct"}, "after": {"export_s": 3.4, "frames": 300, "psnr_db": 22.45, "ssim": 0.9790, "bytes": 12746879, "picture": "correct"}}
+      ],
+      "fcp_md_repro": {
+        "source": "clip1080_prores.mov (30 s 1080p ProRes 422 10-bit)",
+        "history": [
+          {"build": "before 63e4c9d", "result": "VM crashed (reims-vgpu fatal)"},
+          {"build": "63e4c9d (dispatch skipped)", "export_s": 4.7, "picture": "solid green"},
+          {"build": "metal2vulkan 87c471ce", "export_s": 11.4, "realtime_x": 2.6, "frames": 900, "ssim": 0.966, "bytes": 41546407, "picture": "correct"},
+          {"build": "metal2vulkan 87c471ce, + CoreImage colour/blur/overlay", "export_s": 17.0, "realtime_x": 1.8, "frames": 900, "bytes": 33221087, "picture": "correct"}
+        ]
+      },
+      "frame_150_patch_rgb_4x3": {
+        "source": "747600d7d930666036565026747700d4d8354654024d5b09777500d7d4312da9006ce82a",
+        "before": "004c00004c00004c00004c00004c00004c00004c00004c00004c00004c00004c00004c00",
+        "after": "7d7500d0c828665d345950277c7500ccc52d424600585d0d7f7300d0c32a27930065d128"
+      },
+      "host_log_refusals_since_boot": {"before": 50, "after": 0},
+      "vm_survived": true,
+      "proof_image": "vm-shots/2026-11-09/gap1-prores422-source-before-after.png"
+    },
+    {
+      "id": "metal3",
+      "title": "Metal 3 in the guest",
+      "status": "not possible (guest driver's choice; Apple's own hosts are the same)",
+      "host_advertises": {"HostGPUFamilyClamped": 1009, "HostGPUFamilies": "0x1f (Apple5-Apple9)", "MaxMetalShaderVersion": "0x20007"},
+      "guest_reports": {
+        "families": {"apple1": true, "apple2": true, "apple3": true, "apple4": true, "apple5": true, "apple6": false, "apple7": false, "apple8": false, "apple9": false, "apple10": false, "mac2": true, "common1": true, "common2": true, "common3": true, "metal3": false, "metal4": false},
+        "featureProfile": 6,
+        "supportsRaytracing": false, "supportsMeshShaders": false, "requiresMeshShaderEmulation": true, "requiresRaytracingEmulation": true,
+        "supportsSparseTextures": false, "supportsSparseHeaps": false, "supportsFunctionPointers": false, "supportsDynamicLibraries": false,
+        "argumentBuffersSupport": 1, "supportsArgumentBuffersTier2": true, "readWriteTextureSupport": 2, "supportsBCTextureCompression": true,
+        "supports32BitFloatFiltering": true, "supports32BitMSAA": true, "supportsShaderBarycentricCoordinates": true,
+        "supportsPullModelInterpolation": true, "supportsQueryTextureLOD": false, "maxBufferLength": 8584691712
+      },
+      "probes": {"meshPipeline": "compile fails (compiler service ends)", "sparseHeap": "driver assertion (IOGPUMetalHeap)", "accelerationStructure": "n/a, supportsRaytracing false", "ioCommandQueue": "ok"},
+      "evidence_apple_hosts": [
+        "https://github.com/openai/tart/issues/1032",
+        "https://github.com/godotengine/godot/issues/124859",
+        "https://github.com/Flip-Engineering/riff/issues/76"
+      ],
+      "before": "Apple5 + Mac2, no Metal 3", "after": "unchanged (nothing to advertise: the host already offers Apple9)"
+    },
+    {
+      "id": "m2scaler",
+      "title": "apple-m2scaler-pci attaches in the guest",
+      "status": "not possible with this guest (no driver in its kernel)",
+      "evidence": {
+        "kext_on_disk": "codeless (Info.plist only)",
+        "kernelcache_strings_AppleM2ScalerParavirtDriver": 0,
+        "kernelcache_strings_0x1a0b106b": 0,
+        "kernelcache_strings_AppleVideoToolboxParavirtualization": 22,
+        "ioclasscount": "no such class",
+        "kmutil_load": "Bad code signature"
+      },
+      "before": "never attaches", "after": "unchanged; VideoToolbox's Metal fallback now works (gap1)"
+    },
+    {
+      "id": "metalbench",
+      "title": "Guest Metal benchmark (share/latency/metalbench.swift), no regression",
+      "before": {"compute_1_group_rt_ms": 0.25, "pipelined_1080p_pass_ms": 0.05, "copy_gb_s": 320, "fma_gflop_s": 1200, "new_pipeline_first_use_ms": 2.8},
+      "after": {"empty_rt_ms": 0.042, "compute_1_group_rt_ms": 0.287, "render_1_tri_rt_ms": 0.335, "blit_4kb_rt_ms": 0.222, "pipelined_empty_ms": 0.011, "pipelined_1080p_pass_ms": 0.051, "new_pipeline_first_use_ms": 2.513, "saxpy_gb_s": 319.4, "blit_gb_s": 324.0, "fma_gflop_s": 1221.3, "render_gpix_s": 220.9}
+    },
+    {
+      "id": "watchdog",
+      "title": "macos comes back after a host reboot",
+      "status": "fixed",
+      "before": "QEMU killed by systemd within a second of every watchdog start (virtqemud spawned inside the oneshot unit)",
+      "after": "virtqemud and QEMU run in omvm-virtqemud-PID.scope; VM up 20 s after the session, twice (18:45, 18:48)"
+    }
+  ]
+}

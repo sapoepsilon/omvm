@@ -1,0 +1,319 @@
+From 87c471ce9a7a0ded092d9413b5e6e35c6c3ba2b2 Mon Sep 17 00:00:00 2001
+From: local <local@localhost>
+Date: Mon, 9 Nov 2026 18:51:22 -0700
+Subject: [PATCH] fix(runtime): decode a 4:2:2 texture over a buffer into a
+ twin its samples read
+
+Local (Asahi/Honeykrisp). A GBGR422 or BGRG422 texture over a buffer's
+bytes (an IOSurface plane of a CoreVideo 2vuy or yuvs surface, a
+software decoder's frame) had no decoded twin, so a binding that sampled
+it was refused for want of SAMPLED on its carrier, and VideoToolbox's
+pixel-transfer kernel could not read a ProRes frame.
+
+Such a texture is now always a shadow with a decoded twin
+(Device::with_surface_twin). The bytes are written by the CPU with no
+call the runtime sees, so the twin is decoded on the CPU from the
+buffer's bytes as each sampled view of the texture is bound, unless they
+are the pairs it was last decoded from (Texture::refresh_surface_twin),
+and copied into the twin on the host or the staging queue. A detach
+keeps the twin's texels and presents the carrier's stand-in.
+---
+ .../src/buffer_texture.rs                     | 29 ++++++
+ crates/metal2vulkan-runtime/src/texture.rs    | 16 +++-
+ .../src/texture/decoded_twin.rs               | 88 ++++++++++++++++++-
+ .../src/texture/stand_in.rs                   | 10 ++-
+ 4 files changed, 136 insertions(+), 7 deletions(-)
+
+diff --git a/crates/metal2vulkan-runtime/src/buffer_texture.rs b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+index de542d06..8d8fcb75 100644
+--- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+@@ -1672,6 +1672,35 @@ pub(super) enum ViewUsage {
+     Only { storage: bool },
+ }
+ 
++impl Texels {
++    /// Local (Asahi/Honeykrisp): the texels of a one-slice texture as the buffer's bytes hold
++    /// them now, where the CPU finds them, its rows packed one after another; `None` for bytes
++    /// the CPU does not reach, detached from their pages, or laid out otherwise.
++    pub(super) fn packed_rows(&self) -> Option<Vec<u8>> {
++        let layout = &self.cpu;
++        if self.buffer.detached() || layout.slices != 1 || layout.rows == 0 {
++            return None;
++        }
++        let contents = self.buffer.contents()?;
++        let n = usize::try_from(layout.row_bytes).ok()?;
++        let last = (layout.rows - 1).checked_mul(layout.row_pitch)?;
++        let end = layout.offset.checked_add(last)?.checked_add(layout.row_bytes)?;
++        if end > self.buffer.length() {
++            return None;
++        }
++        let mut packed = vec![0u8; n.checked_mul(usize::try_from(layout.rows).ok()?)?];
++        for (y, row) in packed.chunks_exact_mut(n).enumerate() {
++            let at = (layout.offset + y as u64 * layout.row_pitch) as usize;
++            // SAFETY: the row lies in the buffer's mapped bytes (checked above); a read racing
++            // a write of them is the program's, as through `contents`.
++            unsafe {
++                std::ptr::copy_nonoverlapping(contents.as_ptr().add(at), row.as_mut_ptr(), n);
++            }
++        }
++        Some(packed)
++    }
++}
++
+ impl ViewUsage {
+     /// The usage a view of [`ViewUsage::Only`] names, or `None` for the buffer's.
+     fn named(self) -> Option<vk::BufferUsageFlags2KHR> {
+diff --git a/crates/metal2vulkan-runtime/src/texture.rs b/crates/metal2vulkan-runtime/src/texture.rs
+index 18bf0dde..a750729c 100644
+--- a/crates/metal2vulkan-runtime/src/texture.rs
++++ b/crates/metal2vulkan-runtime/src/texture.rs
+@@ -2163,6 +2163,12 @@ impl Device {
+         let usage = texture_usage(descriptor.usage, descriptor.swizzle);
+         let plan = plan_image(layout, usage, false, &facts)
+             .map_err(|refusal| image_error(call, refusal))?;
++        // Local (Asahi/Honeykrisp): a 4:2:2 texture's reads and samples are its decoded twin's
++        // (`chroma_pairs.rs`), which a shadow keeps beside its carrier
++        // (`Device::with_surface_twin`); no image over the bytes serves them.
++        let pairs = super::chroma_pairs::holds_pairs(&plan);
++        const PAIRS_WHY: &str = "a 4:2:2 texture's reads and samples are its decoded twin's, \
++                                 which the runtime keeps beside a shadow of the bytes";
+         // Over host pages (a no-copy buffer's, or a no-copy heap's buffer's, imported by their
+         // pointer or as dma-bufs; or fresh pages the runtime imported for a long buffer of its
+         // own, `fresh_pages.rs`), the image in place, with the texture's declared plan alone,
+@@ -2184,7 +2190,7 @@ impl Device {
+         // from its own memory, where in place it reads the pages across the bus at every sample.
+         // It binds no image to the pages, so the in-place check's verdict is not asked.
+         let device_copy = match class {
+-            Some(class) if !in_place::checking() && !texels.buffer.detached() => {
++            Some(class) if !in_place::checking() && !texels.buffer.detached() && !pairs => {
+                 let policy = self.compile_device().policy().host_page_textures;
+                 in_place::in_place(policy, usage, class, |_| Verdict::Passed).is_ok()
+                     && texels.device_copy(self)
+@@ -2205,6 +2211,8 @@ impl Device {
+                          texture was made"
+                             .to_owned(),
+                     )
++                } else if pairs {
++                    ShadowCause::Refused(Refusal::Image, PAIRS_WHY.to_owned())
+                 } else if texels.buffer.copied() {
+                     // A copied host buffer's bytes the GPU uses lie in memory of the device's
+                     // own, no import of the pages (`copied.rs`): the shadow copies them, its
+@@ -2255,6 +2263,7 @@ impl Device {
+                     cause.words()
+                 )
+             }
++            None if pairs => PAIRS_WHY.to_owned(),
+             None => {
+                 // Whether an image may hold the texels: none where their rows (or slices) lie
+                 // with the buffer's bytes between them (`linear_plan::holding`), and else why.
+@@ -2343,6 +2352,10 @@ impl Device {
+             }
+             false => self.new_image(plan, layout, descriptor, hazard)?,
+         };
++        let image = match pairs {
++            true => self.with_surface_twin(image, layout, descriptor)?,
++            false => image,
++        };
+         // A view the device does not make leaves the copies back copies. The copies hold it as
+         // long as the image, which keeps it through a detach (`Image::own_view`).
+         let words = word.and_then(|(format, texel, stores)| {
+@@ -4555,6 +4568,7 @@ impl Texture {
+         let image: &Image = self.image()?;
+         // A sampled view of a texture with a decoded twin presents the twin.
+         if !storage {
++            self.refresh_surface_twin()?;
+             if let Some(view) = self.decoded_view(call, image, desc)? {
+                 return Ok(view);
+             }
+diff --git a/crates/metal2vulkan-runtime/src/texture/decoded_twin.rs b/crates/metal2vulkan-runtime/src/texture/decoded_twin.rs
+index e14b38a1..cfba9286 100644
+--- a/crates/metal2vulkan-runtime/src/texture/decoded_twin.rs
++++ b/crates/metal2vulkan-runtime/src/texture/decoded_twin.rs
+@@ -132,7 +132,7 @@ use super::first_move::{FirstMove, Pattern, Patterned, TexelCopy};
+ use super::twin_decode::{self, Job};
+ use super::{
+     binding_view, buffer_image_copy, texture_aspects, view_error, view_shadow, Image, Owner, Start,
+-    Texture,
++    Storage, Texture,
+ };
+ use crate::device::functions::Vk;
+ use ash::vk;
+@@ -327,6 +327,10 @@ pub(super) struct Decoded {
+     /// A 4:2:2 twin's pairs' image, where it holds the device's own conversion of its pairs (the
+     /// module docs); `None` where it holds Metal's decode.
+     pairs: Option<PairsSampling>,
++    /// Local (Asahi/Honeykrisp): the twin of a 4:2:2 texture over a buffer's bytes
++    /// ([`Device::with_surface_twin`]), and the pairs it was last decoded from; `None` for any
++    /// other twin.
++    pub(super) surface: Option<Mutex<Option<Vec<u8>>>>,
+ }
+ 
+ impl Decoded {
+@@ -500,11 +504,37 @@ impl Device {
+     /// else the caller decodes the whole twin once the image is shared
+     /// ([`Texture::decode_whole`]).
+     pub(super) fn with_decoded_twin(
++        &self,
++        image: Image,
++        layout: &TextureLayout,
++        descriptor: &TextureDescriptor,
++        fresh: bool,
++    ) -> Result<Image, Error> {
++        self.with_twin(image, layout, descriptor, fresh, false)
++    }
++
++    /// Local (Asahi/Honeykrisp): `image`, the shadow of a 4:2:2 texture over a buffer's bytes (an
++    /// IOSurface plane of a CoreVideo `2vuy` or `yuvs` surface), with a decoded twin its sampled
++    /// views present. The bytes are the CPU's (a software decoder's frames), written with no call
++    /// the runtime sees, so the twin is decoded on the CPU from the buffer's bytes as each
++    /// sampled view of the texture is bound ([`Texture::refresh_surface_twin`]): always Metal's
++    /// decode, on the host or the staging queue, whatever the carrier's own copies take.
++    pub(super) fn with_surface_twin(
++        &self,
++        image: Image,
++        layout: &TextureLayout,
++        descriptor: &TextureDescriptor,
++    ) -> Result<Image, Error> {
++        self.with_twin(image, layout, descriptor, false, true)
++    }
++
++    fn with_twin(
+         &self,
+         mut image: Image,
+         layout: &TextureLayout,
+         descriptor: &TextureDescriptor,
+         fresh: bool,
++        surface: bool,
+     ) -> Result<Image, Error> {
+         // An ASTC, PVRTC, ETC2, EAC or 4:2:2 carrier's texels are read through its twin alone
+         // (`astc.rs`, `pvrtc.rs`, `etc.rs`, `chroma_pairs.rs`).
+@@ -525,6 +555,7 @@ impl Device {
+         // format with Metal's reconstruction (the module docs). Every decode is then a GPU pass:
+         // the carrier's CPU copies go through submissions, each followed by its pass.
+         let pairs = match decode {
++            TwinDecode::Chroma(_) if surface => None,
+             TwinDecode::Chroma(chroma) => {
+                 let [width, height, _] = layout.extent;
+                 YCbCrSampler::pairs(self, chroma, [width, height])
+@@ -540,7 +571,7 @@ impl Device {
+         // A twin starts, and takes the CPU's decodes, as the carrier's CPU copies go: on the
+         // host or the staging queue where they do (then made as a `Shared` or `Managed`
+         // texture's image is), else through submissions.
+-        let routed = image.host_copies || image.staging_copies;
++        let routed = surface || image.host_copies || image.staging_copies;
+         let plan = twin_plan(image.plan(), layout, decode, routed);
+         let facts = self
+             .shared()
+@@ -577,6 +608,11 @@ impl Device {
+         // behind work in flight ([`Image::decode_written`]): the blocks' CPU copies then go
+         // through submissions too, in order with the twin's decodes. No measured device makes
+         // such a twin (its formats take the copies its blocks take).
++        if surface && !moved {
++            return Err(Error::Unsupported(Unsupported::not_implemented(
++                Feature::Format,
++            )));
++        }
+         if routed && !moved {
+             image.host_copies = false;
+             image.staging_copies = false;
+@@ -601,6 +637,7 @@ impl Device {
+             started_on_the_cpu: routed && fresh,
+             made_for: (*layout, *descriptor),
+             pairs,
++            surface: surface.then(|| Mutex::new(None)),
+         };
+         self.degrade_carried_twin(layout, &decoded, placed(&image));
+         image.decoded = Some(Box::new(decoded));
+@@ -695,6 +732,52 @@ impl Texture {
+         decoded.image.view(&view).map(Some)
+     }
+ 
++    /// Local (Asahi/Honeykrisp): bring the decoded twin of a 4:2:2 texture over a buffer's bytes
++    /// ([`Device::with_surface_twin`]) in step with the bytes, before a sampled view of it is
++    /// bound: the buffer's pairs, read where the CPU finds them, decoded on this thread and
++    /// copied into the twin as its copies go, unless they are the pairs it was last decoded
++    /// from. Nothing for any other texture, nor while the bytes are detached or out of the
++    /// CPU's reach (the twin keeps its texels).
++    pub(super) fn refresh_surface_twin(&self) -> Result<(), Error> {
++        let Storage::Shadow { image, texels, .. } = &self.0.storage else {
++            return Ok(());
++        };
++        let Some(decoded) = image.decoded.as_deref() else {
++            return Ok(());
++        };
++        let Some(last) = decoded.surface.as_ref() else {
++            return Ok(());
++        };
++        let Some(pairs) = texels.packed_rows() else {
++            return Ok(());
++        };
++        let mut last = lock(last);
++        if last.as_deref() == Some(&pairs[..]) {
++            return Ok(());
++        }
++        let plan = image.plan();
++        let region = ImageRegion {
++            aspect: ImageAspectFlags::COLOR,
++            level: 0,
++            layer: 0,
++            layers: 1,
++            origin: [0, 0, 0],
++            size: [plan.extent[0], plan.extent[1], 1],
++        };
++        image.write_decoded(decoded, &region, Some(&pairs))?;
++        static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++        if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
++            eprintln!(
++                "metal2vulkan: a {:?} texture of {}x{} over a buffer: its sampled views read a \
++                 decoded twin, decoded on the CPU from the buffer's bytes at each bind that finds \
++                 them changed",
++                plan.pixel_format, plan.extent[0], plan.extent[1]
++            );
++        }
++        *last = Some(pairs);
++        Ok(())
++    }
++
+     /// Whether the texture's texels are held in an image with a decoded twin
+     /// ([`decoding_image`](Self::decoding_image)).
+     pub(crate) fn has_decoded_twin(&self) -> bool {
+@@ -1421,6 +1504,7 @@ impl Image {
+             started_on_the_cpu: false,
+             made_for: (layout, own),
+             pairs: None,
++            surface: None,
+         };
+         let mut viewed = layout;
+         viewed.pixel_format = pf;
+diff --git a/crates/metal2vulkan-runtime/src/texture/stand_in.rs b/crates/metal2vulkan-runtime/src/texture/stand_in.rs
+index 87a45cdc..028a34ba 100644
+--- a/crates/metal2vulkan-runtime/src/texture/stand_in.rs
++++ b/crates/metal2vulkan-runtime/src/texture/stand_in.rs
+@@ -249,7 +249,7 @@ impl Device {
+         if !bytes.detached() {
+             return Ok(());
+         }
+-        if image.decoded.is_some() {
++        if image.decoded.as_deref().is_some_and(|d| d.surface.is_none()) {
+             return Err(Error::NotImplemented(RuntimeGap::DetachTextures));
+         }
+         let stand_in = self.stand_in(image.plan())?;
+@@ -303,9 +303,11 @@ impl TextureImages {
+         }
+         self.images
+             .iter()
+-            .map(|image| match image.decoded.is_some() {
+-                true => Err(Error::NotImplemented(RuntimeGap::DetachTextures)),
+-                false => device.stand_in(image.plan()),
++            .map(|image| {
++                match image.decoded.as_deref().is_some_and(|d| d.surface.is_none()) {
++                    true => Err(Error::NotImplemented(RuntimeGap::DetachTextures)),
++                    false => device.stand_in(image.plan()),
++                }
+             })
+             .collect()
+     }
+-- 
+2.56.0
+
