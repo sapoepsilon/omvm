@@ -3,6 +3,52 @@
 A running, dated log of changes to this setup (the omvm repo and the Omarchy
 host it runs on). Newest first. Agents: append an entry after each change.
 
+## 2026-11-10
+
+- **Identity device: the service now starts and the guest completes the handshake
+  and UDID exchange.** The wall recorded in `research/identity/KICK.md` (no
+  descriptor is ever added, because `IdentityService::start` dies on
+  `_hostKey->getLength()`) is broken.
+  - **The actual blocker was the host key.** `AppleVirtualPlatformARMPE::start`
+    fetches it over the config DMA mailbox at GPA `0x4ffff8`; without it the
+    service asserts and nothing is ever queued, which is what every earlier trace
+    showed. The mailbox only exists when `OMVM_MAILBOX=1` is in the domain's
+    `qemu:env` (it is not part of the default domain), and `_hostKey` must be the
+    **20 raw UDID bytes**, not an opaque blob - the kext hex-expands them and
+    `getLength()` is asserted non-zero.
+  - **Second blocker, the reply header.** A reply's `version` is 1 for the `4/1`
+    handshake and **2 for every other type** (`0xfffffe0008a9310c`), and
+    `transportLen` must equal `32 + messageLen + bufferLen`. A `4/3` reply also
+    has to match the fixed descriptor `{messageLen 16, buffersOffset 0,
+    numBuffers 1}` exactly. Sending version 1 is what kept the service from ever
+    starting.
+  - **Result.** Status walks `00 01 03 0b 0f`, the driver arms the queue, the
+    device serves `4/1` then `4/3`, the guest echoes the UDID back inside its next
+    request, `AppleVirtualPlatformIdentityService` registers and matches, and the
+    guest moves on to `4/4` + `4/6`.
+  - **Still open.** `IdentityUserClient` stays 0 and the `4/4` + `4/6` exchange
+    loops, so no consumer opens the device yet and sign-in is not reached.
+  - Full contract and proof addresses: `research/identity/PROTOCOL-REPLY.md`.
+
+- **Identity: an unrelated stage1 panic was corrupt NVRAM, not the device.**
+  Both SysCfg variable regions of `aux.img.trimmed` were zeroed, which halts iBoot
+  stage1 at `0x7006c4c0` (the `hint #0x45; b .` panic stub). Restoring
+  `aux.img.trimmed.pre-kdp2-20261110` fixes it, and the stock `qemu-sb` build
+  halts at the same PC, so the identity device was never the cause. Restore the
+  clean image (`/tmp/aux.pre-dbg`) before each boot: the booter clears
+  `boot-args` in place.
+
+- **Identity device correctness fixes, all found by measurement.**
+  - `ecid` was never wired from the machine into the device, so the UDID was 16
+    zero bytes; `create_identity()` now sets it from `vms->uuid`.
+  - Feature bit 40 (`VIRTIO_F_RING_RESET`) leaked in from the generic virtio-pci
+    defaults and Apple's driver does not know it; it is cleared now.
+  - `APPLE_IDENTITY_CONFIG_SIZE` had lost its definition while still being used.
+  - The mailbox was mapped with `qdev_new` + `sysbus_mmio_map`, which asserts
+    because `qdev_new` alone never realizes; it uses `sysbus_create_simple` now.
+  - The mailbox region overlapped the `pcie-ecam` alias, so the ECAM alias stops
+    one page short.
+
 ## 2026-11-09
 
 - **`macos` ssh dead (port 42541 open, no banner): the guest clock was in 2083, fixed

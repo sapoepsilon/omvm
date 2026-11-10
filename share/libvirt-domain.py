@@ -40,8 +40,19 @@ mac = "52:54:00:%02x:%02x:%02x" % tuple(dom_uuid.bytes[:3])
 xdg = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 AUDIODEV = f"pipewire,id=snd0,out.stream-name={name},in.stream-name={name}"
 
+# The SysCfg serial and MLB Apple personalised this VM with, if known. Both are
+# plain files beside the image so the values stay out of this script; without
+# them QEMU falls back to its placeholders (serial 1234, no MLB).
+identity_args = ""
+for prop, fname in (("serial", "serial"), ("mlb", "mlb")):
+    path = os.path.join(vmdir, fname)
+    if os.path.isfile(path):
+        value = open(path).read().strip()
+        if value:
+            identity_args += f",{prop}={value}"
+
 args = [
-    "-machine", f"uuid={ecid},aux-ram-share=on",
+    "-machine", f"uuid={ecid},aux-ram-share=on,identity=on{identity_args}",
     "-L", f"{qdir}/qemu-bundle/usr/local/share/qemu",
     "-drive", f"if=pflash,format=raw,file.filename={aux},file.locking=off",
     "-drive", f"if=pflash,format=raw,file.filename={disk},file.locking=off",
