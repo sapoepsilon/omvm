@@ -386,6 +386,12 @@ EOF
 # off, and this starts it again within a minute.
 cmd_ensure_vm() { # VM
   local vm=${1:?usage: $0 ensure-vm VM} wl xdg
+  # The first virsh call spawns virtqemud when none runs (after a reboot), and QEMU is its
+  # child. In a scope of its own, or both sit in this oneshot unit and are killed with it
+  # the moment it finishes.
+  pgrep -u "$(id -u)" -x virtqemud >/dev/null ||
+    systemd-run --user --scope --quiet --collect --unit="omvm-virtqemud-$$" \
+      virsh -q -c qemu:///session list >/dev/null
   [[ $(virsh -q -c qemu:///session domstate "$vm" 2>/dev/null) == running ]] && return 0
   if [[ $(vm_mode "$vm") == local ]]; then
     read -r wl xdg < <(virsh -q -c qemu:///session dumpxml --inactive "$vm" | python3 -c '
