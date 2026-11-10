@@ -90,6 +90,10 @@ env = {
     "REIMS_VGPU_LOG": "error",
     "TMPDIR": f"{home}/.cache/reims-vgpu",
     "XDG_RUNTIME_DIR": xdg,   # the user's PipeWire socket, for sound
+    # Maps the AVP config DMA mailbox at 0x4ffff8. The identity device is
+    # useless without it: the platform expert fetches the host key (the UDID)
+    # through that mailbox, and IdentityService asserts on it and never queues.
+    "OMVM_MAILBOX": "1",
 }
 x = lambda s: quoteattr(str(s))
 print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
