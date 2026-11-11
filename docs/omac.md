@@ -39,13 +39,17 @@ comes from `vms/macapps/guest_user`. `OMAC_VM` picks another VM name,
 omac run ~/Downloads/Foo.app            # rsync -a into the guest's ~/Applications, then open
 omac run ~/Downloads/Bar.dmg --flag     # every .app in the image, args go to the app
 omac run TextEdit                       # already in the guest: just open it
-omac list                               # apps in /Applications and ~/Applications
+omac list                               # apps in /Applications, /System/Applications, ~/Applications
 omac desktop Foo                        # "Foo" in the Omarchy launcher (omac run Foo)
 omac show | stop | status | shell [CMD]
 ```
 
-`run` boots the VM first if needed, clears `com.apple.quarantine` on what it
-copied, runs `open -a` in the guest over SSH and then `omvm show macapps`. A `.dmg`
+`run` checks the host path first (a missing path or a file that is neither
+`.app` nor `.dmg` fails before anything boots), boots the VM if needed, clears
+`com.apple.quarantine` on what it copied, runs `open -a` in the guest over SSH and
+then `omvm show macapps`. Without `WAYLAND_DISPLAY`/`DISPLAY` (over SSH, headless)
+it skips the show, so no viewer pops up on someone else's screen; a failed show is
+only a warning, since the app is already open. A `.dmg`
 goes to the guest's `/tmp` by scp, is attached read-only with `-nobrowse`
 (licence prompts are accepted), each `.app` is copied to `~/Applications`, and the
 image is detached and deleted. Copies overwrite the previous version of the same
@@ -67,6 +71,10 @@ and guest disks are never mounted on the host.
   app share it. `omac show` brings it to the front; Ctrl+Alt+M and the "macOS"
   launcher entry are bound to `omvm show`, i.e. the `macos` VM, not `macapps`.
 - **arm64 macOS apps only.** Intel apps under Rosetta are untested.
+- **Self-contained apps only.** A copy of a built-in app (e.g. `/System/Applications/Calculator.app`)
+  will not launch from `~/Applications` (launch constraints, `Launchd job spawn failed`, POSIX 162),
+  and apps nested in Xcode (FileMerge, Accessibility Inspector) need Xcode's frameworks next to them.
+  Run built-in apps by name (`omac run TextEdit`).
 - **No Apple Account.** Apps that need an Apple Account, iMessage, iCloud, the App
   Store, or licence checks tied to Apple hardware or identity will not work.
 - **Graphics:** Metal works through the paravirtual GPU but without Metal 3; see

@@ -12,7 +12,8 @@
 #   omac run APP [ARGS...]      APP = a host App.app, a host App.dmg, or the name of an
 #                               app already in the guest: copy it in, clear quarantine,
 #                               open it, bring the desktop to the front
-#   omac list                   apps in the guest's /Applications and ~/Applications
+#   omac list                   apps in the guest's /Applications, /System/Applications
+#                               (and their Utilities) and ~/Applications
 #   omac desktop APP            add "APP" to the Omarchy launcher (omac run APP)
 #   omac show                   bring the guest's desktop window to the front (omvm show)
 #   omac stop                   shut the app VM down (omvm stop)
@@ -196,8 +197,11 @@ cmd_up() {
         "${VIRSH[@]}" start "$VM" >/dev/null
         say "$VM starting; waiting for SSH (up to $((BOOT_WAIT / 60)) min)"
     fi
-    for ((i = 0; i < BOOT_WAIT; i += 5)); do
-        if reachable; then note up "start for macOS apps" "ssh ok after ${i}s"; unlock; ok "$VM is up (${i}s)"; return 0; fi
+    # Wall-clock deadline: each failed reachable() can itself take up to 10 s.
+    local t0=$SECONDS
+    while ((SECONDS - t0 < BOOT_WAIT)); do
+        i=$((SECONDS - t0))
+        if reachable; then i=$((SECONDS - t0)); note up "start for macOS apps" "ssh ok after ${i}s"; unlock; ok "$VM is up (${i}s)"; return 0; fi
         [ "$(domstate "$VM")" = running ] || { note up "start" "domain $(domstate "$VM")"; die "$VM is $(domstate "$VM")"; }
         sleep 5
     done
@@ -261,13 +265,18 @@ cmd_run() {
     case "$target" in
     *.pkg|*.mpkg) die "installer packages (.pkg) are not supported: use the .app or .dmg, or install it by hand in the guest (omac show)" ;;
     esac
-    cmd_up
-    if [ -d "$target" ] && [[ "${target%/}" == *.app ]]; then
-        out="$(copy_app "$target")"
-    elif [ -f "$target" ] && [[ "$target" == *.dmg ]]; then
-        out="$(copy_dmg "$target")" || die "nothing installed from $(basename "$target")"
-    elif [ -e "$target" ]; then
+    # Check the host side before booting anything.
+    if [ -e "$target" ] && ! { [ -d "$target" ] && [[ "${target%/}" == *.app ]]; } &&
+        ! { [ -f "$target" ] && [[ "$target" == *.dmg ]]; }; then
         die "$target is neither an App.app directory nor a .dmg"
+    elif [ ! -e "$target" ] && [[ "$target" == */* || "$target" == *.dmg ]]; then
+        die "no such file on the host: $target"   # a path, not an app name in the guest
+    fi
+    cmd_up
+    if [ -d "$target" ]; then
+        out="$(copy_app "$target")"
+    elif [ -f "$target" ]; then
+        out="$(copy_dmg "$target")" || die "nothing installed from $(basename "$target")"
     else
         out=""
     fi
@@ -284,14 +293,21 @@ cmd_run() {
     [ $# = 0 ] || cmd="$cmd --args $(printf '%q ' "$@")"
     say "opening $name"
     omvm_vm ssh "$VM" "$cmd" || die "the guest could not open '$name' (omac list shows what is installed)"
-    omvm_vm show "$VM"
+    # From a terminal on the desktop (or the launcher) bring the guest to the front;
+    # over SSH or headless there is no session of ours to show it in. Either way the
+    # app is already open, so a failed show is only a warning.
+    if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+        ok "$name is open in $VM (no display here: omac show from the desktop)"
+    elif ! omvm_vm show "$VM"; then
+        warn "$name is open in $VM, but its desktop could not be shown (omac show)"
+    fi
 }
 
 # ---------------------------------------------------------------- the rest
 cmd_list() {
     [ "$(domstate "$VM")" = running ] || die "$VM is not running (omac up)"
     # shellcheck disable=SC2016  # expanded in the guest
-    omvm_vm ssh "$VM" 'for d in /Applications "$HOME/Applications"; do [ -d "$d" ] && find "$d" -maxdepth 1 -name "*.app" -print; done | sed "s|.*/||; s|\.app\$||" | sort -fu'
+    omvm_vm ssh "$VM" 'for d in /Applications /Applications/Utilities /System/Applications /System/Applications/Utilities "$HOME/Applications"; do [ -d "$d" ] && find "$d" -maxdepth 1 -name "*.app" -print; done | sed "s|.*/||; s|\.app\$||" | sort -fu'
 }
 
 desktop_quote() { # one quoted Exec argument, per the Desktop Entry spec (string escapes, then quoting)
