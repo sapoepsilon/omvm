@@ -38,9 +38,14 @@ def startup_export(point=POINT, der=ATTESTATION):
 class FakeSigner:
     def __init__(self):
         self.payloads = []
+        self.digests = []
 
     def sign(self, payload):
         self.payloads.append(payload)
+        return SIGNATURE
+
+    def sign_digest(self, digest):
+        self.digests.append(digest)
         return SIGNATURE
 
     def close(self):
@@ -106,6 +111,13 @@ class ProviderTest(unittest.TestCase):
         self.assertEqual((status, signature), (0, SIGNATURE))
         self.assertEqual(signer.payloads, [payload])
 
+    def test_digest_protocol_preserves_all_32_digest_bytes(self):
+        digest = bytes(range(32))
+        status, signature, signer = self.exchange(PROVIDER.HEADER.pack(2, 32) + digest)
+        self.assertEqual((status, signature), (0, SIGNATURE))
+        self.assertEqual(signer.digests, [digest])
+        self.assertFalse(signer.payloads)
+
     def test_rejects_untrusted_peer_before_signing(self):
         status, signature, signer = self.exchange(PROVIDER.HEADER.pack(1, 0), fake_uid=424242)
         self.assertEqual((status, signature), (errno.EACCES, b""))
@@ -114,7 +126,12 @@ class ProviderTest(unittest.TestCase):
     def test_rejects_oversized_unknown_and_truncated_requests(self):
         cases = [
             (PROVIDER.HEADER.pack(1, 65537), False, errno.EMSGSIZE),
-            (PROVIDER.HEADER.pack(2, 0), False, errno.EOPNOTSUPP),
+            (PROVIDER.HEADER.pack(3, 0), False, errno.EOPNOTSUPP),
+            (PROVIDER.HEADER.pack(2, 0), False, errno.EINVAL),
+            (PROVIDER.HEADER.pack(2, 31), False, errno.EINVAL),
+            (PROVIDER.HEADER.pack(2, 33), False, errno.EINVAL),
+            (PROVIDER.HEADER.pack(2, 65537), False, errno.EMSGSIZE),
+            (PROVIDER.HEADER.pack(2, 32) + bytes(31), True, errno.EPROTO),
             (b"\x00\x01", True, errno.EPROTO),
             (PROVIDER.HEADER.pack(1, 9) + b"short", True, errno.EPROTO),
         ]
@@ -123,6 +140,7 @@ class ProviderTest(unittest.TestCase):
                 status, signature, signer = self.exchange(wire, half_close=half_close)
                 self.assertEqual((status, signature), (expected, b""))
                 self.assertFalse(signer.payloads)
+                self.assertFalse(signer.digests)
 
     def test_slow_sender_has_a_total_deadline(self):
         started = time.monotonic()
@@ -148,7 +166,7 @@ class ProviderTest(unittest.TestCase):
                 signer.sign(b"first")
             self.assertEqual(timeout.exception.errno, errno.ETIMEDOUT)
             with self.assertRaises(OSError) as busy:
-                signer.sign(b"second")
+                signer.sign_digest(bytes(32))
             self.assertEqual(busy.exception.errno, errno.EBUSY)
             self.assertEqual(hardware.maximum, 1)
         finally:
@@ -174,6 +192,37 @@ class ProviderTest(unittest.TestCase):
                 signer.sign(payload)
             self.assertEqual(error.exception.errno, errno.EKEYREJECTED)
             verify.assert_not_called()
+
+    def test_digest_ioctl_signs_prehashed_input_without_hashing_again(self):
+        signer = object.__new__(PROVIDER.SepSigner)
+        signer.fd, signer.point = 1234, POINT
+        digest = bytes(range(32))
+        def ioctl(_fd, command, response, _mutate):
+            self.assertEqual(command, PROVIDER.IOC_ATTEST)
+            _n, actual_digest, _point, _signature, _reserved = PROVIDER.ATTEST.unpack(response)
+            self.assertEqual(actual_digest, digest)
+            response[:] = PROVIDER.ATTEST.pack(8, actual_digest, POINT, SIGNATURE.ljust(72, b"\0"), bytes(3))
+        with patch.object(PROVIDER.fcntl, "ioctl", side_effect=ioctl), \
+                patch.object(PROVIDER, "verify_signature") as verify:
+            self.assertEqual(signer.sign_digest(digest), SIGNATURE)
+            verify.assert_called_once_with(POINT, digest, SIGNATURE, prehashed=True)
+        with patch.object(PROVIDER.fcntl, "ioctl") as ioctl:
+            for invalid in [b"", bytes(31), bytes(33)]:
+                with self.assertRaises(OSError) as error:
+                    signer.sign_digest(invalid)
+                self.assertEqual(error.exception.errno, errno.EINVAL)
+            ioctl.assert_not_called()
+
+    def test_digest_worker_dispatch_uses_the_same_serial_signer(self):
+        hardware = FakeSigner()
+        signer = PROVIDER.BoundedSigner(hardware)
+        try:
+            digest = bytes(range(32))
+            self.assertEqual(signer.sign_digest(digest), SIGNATURE)
+            self.assertEqual(hardware.digests, [digest])
+            self.assertFalse(hardware.payloads)
+        finally:
+            signer.close()
 
     def test_startup_populates_existing_only_cache_before_any_legacy_sign(self):
         commands = []
@@ -253,6 +302,14 @@ class ProviderTest(unittest.TestCase):
                                                  "-sign", f"/proc/self/fd/{fd}"], input=payload, pass_fds=(fd,))
             point = public[-65:]
             PROVIDER.verify_signature(point, payload, signature)
+            digest = PROVIDER.hashlib.sha256(payload).digest()
+            # An ECDSA-SHA256(message) signature also verifies directly over
+            # SHA256(message), but must fail if that digest is hashed again.
+            PROVIDER.verify_signature(point, digest, signature, prehashed=True)
+            with self.assertRaises(OSError):
+                PROVIDER.verify_signature(point, digest, signature)
+            with self.assertRaises(OSError):
+                PROVIDER.verify_signature(point, bytes(32), signature, prehashed=True)
             with self.assertRaises(OSError):
                 PROVIDER.verify_signature(point, payload + b"changed", signature)
         finally:

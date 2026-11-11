@@ -2,7 +2,9 @@
 """Privileged, bounded access to the existing SEP host-identity signing key.
 
 The Unix protocol is network-byte-order u32 operation, u32 payload length,
-then payload. Operation 1 signs SHA-256(payload). Responses contain positive
+then payload. Operation 1 signs SHA-256(payload); operation 2 signs an exact
+32-byte, already-computed SHA-256 digest without hashing it again. Both use
+the same existing, pinned SEP key. Responses contain positive
 errno (zero on success), u32 result length, then a DER ECDSA signature.
 No certificate issuance, key creation, or replacement is requested here.
 """
@@ -32,6 +34,7 @@ EXPORT_DER_MAX = 4096
 EXPORT_SIZE = EXPORT_HEADER.size + EXPORT_DER_MAX
 IOC_EXPORT_ATTESTATION = 0x9050B10C
 OP_SIGN = 1
+OP_SIGN_DIGEST = 2
 MAX_PAYLOAD = 65536
 MAX_SIGNATURE = 72
 IO_TIMEOUT = 5.0
@@ -84,8 +87,10 @@ def complete_der_sequence(data):
     return length > 0 and header + length == len(data)
 
 
-def verify_signature(point, payload, signature):
+def verify_signature(point, payload, signature, *, prehashed=False):
     """Independently verify with OpenSSL; public material uses anonymous fds."""
+    if prehashed and len(payload) != 32:
+        raise OSError(errno.EINVAL, "a SHA-256 digest must be exactly 32 bytes")
     public_fd = os.memfd_create("omvm-public-key", os.MFD_CLOEXEC)
     signature_fd = os.memfd_create("omvm-signature", os.MFD_CLOEXEC)
     try:
@@ -93,10 +98,23 @@ def verify_signature(point, payload, signature):
         os.write(signature_fd, signature)
         os.lseek(public_fd, 0, os.SEEK_SET)
         os.lseek(signature_fd, 0, os.SEEK_SET)
+        if prehashed:
+            # pkeyutl without -rawin consumes a digest directly. Using dgst
+            # here would hash the supplied digest a second time.
+            command = [
+                "/usr/bin/openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+                "-inkey", f"/proc/self/fd/{public_fd}",
+                "-sigfile", f"/proc/self/fd/{signature_fd}",
+                "-pkeyopt", "digest:sha256",
+            ]
+        else:
+            command = [
+                "/usr/bin/openssl", "dgst", "-sha256", "-keyform", "DER",
+                "-verify", f"/proc/self/fd/{public_fd}",
+                "-signature", f"/proc/self/fd/{signature_fd}",
+            ]
         result = subprocess.run(
-            ["/usr/bin/openssl", "dgst", "-sha256", "-keyform", "DER",
-             "-verify", f"/proc/self/fd/{public_fd}",
-             "-signature", f"/proc/self/fd/{signature_fd}"],
+            command,
             input=payload, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             pass_fds=(public_fd, signature_fd), timeout=3, check=False,
         )
@@ -149,6 +167,18 @@ class SepSigner:
         if len(payload) > MAX_PAYLOAD:
             raise OSError(errno.EMSGSIZE, "challenge is too large")
         digest = hashlib.sha256(payload).digest()
+        signature = self._sign_digest(digest)
+        verify_signature(self.point, payload, signature)
+        return signature
+
+    def sign_digest(self, digest):
+        if len(digest) != 32:
+            raise OSError(errno.EINVAL, "a SHA-256 digest must be exactly 32 bytes")
+        signature = self._sign_digest(digest)
+        verify_signature(self.point, digest, signature, prehashed=True)
+        return signature
+
+    def _sign_digest(self, digest):
         response = bytearray(ATTEST.pack(0, digest, bytes(65), bytes(72), bytes(3)))
         fcntl.ioctl(self.fd, IOC_ATTEST, response, True)
         length, actual_digest, point, padded_signature, reserved = ATTEST.unpack(response)
@@ -157,9 +187,7 @@ class SepSigner:
             raise OSError(errno.EIO, "malformed SEP signing response")
         if not hmac.compare_digest(point, self.point):
             raise OSError(errno.EKEYREJECTED, "SEP signing key differs from the pinned key")
-        signature = padded_signature[:length]
-        verify_signature(self.point, payload, signature)
-        return signature
+        return padded_signature[:length]
 
     def close(self):
         if self.fd is not None:
@@ -189,7 +217,10 @@ class BoundedSigner:
             except queue.Empty:
                 continue
             try:
-                job["result"] = self.signer.sign(job["payload"])
+                if job["operation"] == OP_SIGN_DIGEST:
+                    job["result"] = self.signer.sign_digest(job["payload"])
+                else:
+                    job["result"] = self.signer.sign(job["payload"])
             except OSError as error:
                 job["error"] = error.errno or errno.EIO
             except Exception:
@@ -200,7 +231,15 @@ class BoundedSigner:
                 job["done"].set()
 
     def sign(self, payload):
-        job = {"payload": payload, "done": threading.Event()}
+        return self._submit(OP_SIGN, payload)
+
+    def sign_digest(self, digest):
+        if len(digest) != 32:
+            raise OSError(errno.EINVAL, "a SHA-256 digest must be exactly 32 bytes")
+        return self._submit(OP_SIGN_DIGEST, digest)
+
+    def _submit(self, operation, payload):
+        job = {"operation": operation, "payload": payload, "done": threading.Event()}
         with self.lock:
             if self.stopping.is_set() or self.busy:
                 raise OSError(errno.EBUSY, "SEP signer is busy")
@@ -247,12 +286,17 @@ def handle_connection(connection, signer, allow_uid, io_timeout=IO_TIMEOUT):
             raise OSError(errno.EACCES, "unauthorised peer")
         deadline = time.monotonic() + io_timeout
         operation, length = HEADER.unpack(read_exact(connection, HEADER.size, deadline))
-        if operation != OP_SIGN:
+        if operation not in (OP_SIGN, OP_SIGN_DIGEST):
             raise OSError(errno.EOPNOTSUPP, "unsupported operation")
         if length > MAX_PAYLOAD:
             raise OSError(errno.EMSGSIZE, "challenge is too large")
+        if operation == OP_SIGN_DIGEST and length != 32:
+            raise OSError(errno.EINVAL, "a SHA-256 digest must be exactly 32 bytes")
         payload = read_exact(connection, length, deadline)
-        signature = signer.sign(payload)
+        if operation == OP_SIGN_DIGEST:
+            signature = signer.sign_digest(payload)
+        else:
+            signature = signer.sign(payload)
         if not 8 <= len(signature) <= MAX_SIGNATURE:
             raise OSError(errno.EIO, "invalid signature result")
     except TimeoutError:
