@@ -80,7 +80,50 @@ No `rk` target is included. Exact constant `0c056f736b6770` at VA 0x1B7E61DA6. `
 - `DeviceIdentityCopyAttestationDictionary(SecKeyRef key, NSDictionary *options, NSError **error)` requires com.apple.mobileactivationd.spi at 0x1B7E3DB4C–3DB94, plus device-identifiers entitlement for the host's identifier OIDs at 0x1B7E3DCA4–3DCF4.
 - `DeviceIdentityCreateClientCertificateRequestWithBody` only formats an existing body; it does not generate missing proofs or issue certificates.
 
-No successful or publicly supported standalone Linux certificate issuance API was established. A same-key authentic hardware request is a hypothesis to test, not a demonstrated working substitute for the native two-key path.
+At the time of the initial static pass, no successful standalone Linux issuance was established. Subsequent integration evidence reported by the primary agent: following the approved host reboot, committed UIK attestation and SIK/UIK public-key exports work; an authentic same-key request returned HTTP 200 with two PEM certificates, the leaf matches the SEP point, and its chain validates against the native BAAUCRT root. This is working experimental protocol evidence, not a documented Apple-supported Linux API. VM sign-in remains to be established.
+
+## Authoritative original-host facts
+
+The primary agent located the original Apple Device Tree in phram `/dev/mtd1ro` (approximately 508 KB; `/dev/mtd/by-name/adt` points to mtd1). The read-only parser at `~/Work/macos-vm/linux-aurora/tools/aurora-sep/aurora-adt-extract.py` validates device binding with `check_binding('/dev/mtd1ro', Host())`, then uses `parse_adt(read_device(...))`. The ADT provides `/chosen/unique-chip-id` (8 bytes), board-id/chip-id/security-domain (4 bytes each), root serial-number (32 bytes); `/chosen/manifest-properties/ECID` independently corroborates ECID. Values are little endian. No disk mounts or guest/reference-Mac identifiers are needed.
+
+## Integration: keep three representations separate
+
+### Physical host identity versus host-key-derived guest identity
+
+The physical host certificate extension `1.2.840.113635.100.10.1` property `udid` is compared to physical host MobileGestalt UniqueDeviceID in plugin validator 0x100001504–1578. It is distinct from the host key object's 20-byte identifier.
+
+`AppleVirtualPlatformHostKey.uniqueDeviceIdentifier` is SHA256 of `SecKeyCopyPublicBytes(hostPublicKey)`, first 20 bytes (0x100005AB0–5AF4). A public-only probe on the native reference Mac imported the standard NIST P-256 generator point and proved that SecKeyCopyPublicBytes returns all 65 X9.63 bytes, including leading 0x04; it does not return coordinate-only 64 bytes. Probe: `/tmp/omvm-publicbytes-probe.m`. No private key was created or imported.
+
+Native 4/3 handler loads HostKey data from its request at 0x100007220, obtains uniqueDeviceIdentifier at 0x10000723C, passes it alongside separate guest chip ID/ECID into sw_pka_set_params at 0x100007290, and returns the derived 20 bytes at 0x1000072A4–72D0. Preserve guest ECID separately from physical host identifiers.
+
+Native HostKey.dataRepresentation is kSecAttrTokenOID NSData from SecKeyCopyAttributes (0x1000050FC–5160), not its 20-byte identifier. The mailbox/syscfg HostKey slot's full semantics are not proven by the nonzero-length kernel assertion alone.
+
+### Tunnel certificate result
+
+`_libavp_copy_host_key_and_certs_with_data` appends raw leaf DER followed by intermediate DER at 0x1B7E47308–47350. Runtime dladdr of the imported copy stub at 0x1B7E146370 proved it is SecCertificateCopyData. The result goes under `Value.RKCertification` at 0x1B7E48BA4–48BEC. No ASN.1 enclosing SEQUENCE, PEM wrapper, or archive wraps the two DER objects in this tunnel value.
+
+### Strong-identity archive for 4/4 and 4/6
+
+This is a separate binary property list (format 200), serialized by AppleVirtualPlatformHostCertificate.dataRepresentationWithCachedData:error: at 0x1000032F0 / serialization 0x100003500–3518:
+
+| Archive key | Type | Meaning |
+|---|---|---|
+| BuildVersion | STRING | software build of serialization host |
+| ProductVersion | STRING | software version of serialization host |
+| HostKey | DATA | provider's host-key representation |
+| LeafCertificate | DATA | leaf DER |
+| IntermediateCertificate | DATA | intermediate DER |
+
+These host software metadata are separate from certificate property 1403. Native constructor compares archive BuildVersion to current MG BuildVersion at 0x100001B20–1B34; mismatch only logs, then continues (0x1B38–1B7C). ProductVersion is serialized but not consulted by that constructor. Honest Linux strings avoid fabricating a macOS host version.
+
+In the observed DeviceIdentity guest path, `_vm_copy_host_certificate` gets the archive as opaque NSData at 0x1B7E397A8 and forwards it under request Value at 0x397C4–397FC. Native key/archive import occurs in a host-only function that rejects virtual-machine context first at 0x1B7E4718C–471BC. Thus a custom Linux provider can own an opaque stable context representation for this path without exporting its wrapped private ref-key. No claim is made that every other possible AppleVirtualPlatform consumer ignores the HostKey representation.
+
+Native serialized inner reply framing:
+
+- **4/4 success:** header 32 bytes; messageLen 16, buffersOffset 0, numBuffers 1, bufferLen N, transportLen 48+N. Body one iovec `{base=0,len=N}`, followed by the N-byte archive. Descriptor source 0x10000929C–92D8; archive body 0x100007620–765C.
+- **4/6 success:** header 32 bytes; messageLen 48, buffersOffset 16, numBuffers 2, bufferLen N, transportLen 80+N. Body u64 flags (bit0 validation/refresh indicator), u64 reserved=0, archive iovec `{0,N}`, error iovec `{0,0}`, followed by archive bytes. Fresh validated identity can use flags 0. Descriptor source 0x1000094D0–9510; body source 0x10000784C–7924.
+- Native ProtocolMessage serializer copies inline payload bytes and zeros serialized iovec base fields at 0x100006394. Do not put host pointers in serialized bytes.
+- These are **inner ProtocolMessage** descriptors, not proof of any outer virtio envelope shape. Existing QEMU ID_S3/mirroring-request experiments differ from the native 4/6 descriptor and must be evaluated separately.
 
 ## Physical Linux host facts: verified source
 

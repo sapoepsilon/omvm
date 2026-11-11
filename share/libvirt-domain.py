@@ -10,7 +10,7 @@ guest_major (e.g. 27; docs/graphics.md "macOS 27 updates") and apple_vendor_cap.
 The vmapple machine and its devices are not modelled by libvirt, so they are
 passed as QEMU arguments; libvirt owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
 """
-import os, sys, uuid
+import json, os, sys, uuid
 from xml.sax.saxutils import quoteattr
 
 name, vmdir, qemu, fw, ecid, ssh_port = sys.argv[1:7]
@@ -115,6 +115,30 @@ env.setdefault("ID_BLEN64", "1")
 for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
     if os.environ.get(_k):
         env[_k] = os.environ[_k]
+# Experimental real-SEP identity bridge, explicitly enabled per VM. Keep this
+# beside the VM artifacts so `omvm virt` preserves the operator's provider.
+provider_file = os.path.join(vmdir, "identity-provider.json")
+if os.path.exists(provider_file):
+    with open(provider_file) as provider_stream:
+        provider = json.load(provider_stream)
+    expected = {"certificate_chain", "public_key", "trust_root", "socket"}
+    if not isinstance(provider, dict) or set(provider) != expected:
+        raise SystemExit("identity-provider.json must contain exactly four provider paths")
+    for key, variable in (("certificate_chain", "OMVM_IDENTITY_CERT_CHAIN"),
+                          ("public_key", "OMVM_IDENTITY_PUBLIC_KEY"),
+                          ("trust_root", "OMVM_IDENTITY_TRUST_ROOT")):
+        value = provider[key]
+        if not isinstance(value, str) or not value:
+            raise SystemExit("identity provider file paths must be nonempty strings")
+        path = os.path.abspath(os.path.join(vmdir, value))
+        if not os.path.isfile(path):
+            raise SystemExit("identity provider file is missing: " + key)
+        env[variable] = path
+    endpoint = provider["socket"]
+    if not isinstance(endpoint, str) or not endpoint.startswith("/") or len(endpoint.encode()) >= 108:
+        raise SystemExit("identity provider socket must be a valid absolute Unix path")
+    env["OMVM_IDENTITY_SIGNER"] = endpoint
+
 x = lambda s: quoteattr(str(s))
 print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{name}</name>
