@@ -42,6 +42,7 @@ omac run TextEdit                       # already in the guest: just open it
 omac list                               # apps in /Applications, /System/Applications, ~/Applications
 omac desktop Foo                        # "Foo" in the Omarchy launcher (omac run Foo)
 omac show | stop | status | shell [CMD]
+omac windows [--all] [--watch [--hz N]] # window geometry as JSON (first piece of seamless mode)
 ```
 
 `run` checks the host path first (a missing path or a file that is neither
@@ -65,10 +66,48 @@ and the domain state, and fails. `stop` is `omvm stop macapps`.
 Files move only over SSH (rsync/scp with `OMVM_KEY`): there is no shared folder,
 and guest disks are never mounted on the host.
 
+## Window geometry (`omac windows`)
+
+The first building block for a seamless mode: `share/omac/winlist.swift` is sent
+over SSH, compiled in the guest with `swiftc -O` into
+`~/Library/Application Support/omac/winlist` (rebuilt when the host copy's sha256
+changes, ~3 s) and run there. It reads `CGWindowListCopyWindowInfo`, which works from
+a plain SSH session (no `launchctl asuser` or LaunchAgent needed) and without a
+Screen Recording grant: ids, owner pid/name, bundle id, layer, bounds, alpha and
+on-screen state are all present; only window titles are missing (except the Window
+Server's own "Menubar").
+
+```json
+{"display":{"h":1080,"id":1,"ph":1080,"pw":1920,"scale":1,"w":1920},
+ "overlays":[],
+ "windows":[{"alpha":1,"bounds":{"h":505,"w":603,"x":213,"y":94},"bundle":"com.apple.TextEdit",
+             "id":40,"layer":0,"onscreen":true,"owner":"TextEdit","pid":369}, ...]}
+```
+
+- Default (`--apps`): `windows` = layer-0 app windows, `overlays` = higher-layer
+  windows of the same pids (menus are layer 101) plus UserNotificationCenter
+  permission prompts. `--all` lists everything (Dock, menu bar, Notification Center).
+  Arrays are front to back, matching what the screen shows. Placeholder windows of
+  `talagentd` (restored-app snapshots under the app's owner name) are dropped.
+- `--watch` prints one line (`seq`, `t` in ms) per change, polling at 30 Hz by
+  default. It ends on SIGTERM/SIGINT/SIGHUP, on a closed reader (kqueue EV_EOF) and
+  when its parent sshd goes away; killing `omac windows --watch` leaves nothing in
+  the guest. Guest CPU: ~4 % of a core at 30 Hz, ~10 % at 60 Hz; a one-shot run
+  ~50 ms; SSH adds 2–5 ms per line.
+- Bounds are points from the main display's top left. In remote (VNC) mode the
+  display is 1920x1080 at scale 1, so points equal `virsh screenshot` pixels.
+  Verified by cropping: an app window's rectangle is exact (no shadow; a 1-px dark
+  outline sits just outside it, the rounded corners show the background). Menus are
+  reported with a ~75 pt transparent shadow margin on every side.
+- Moving or resizing another app's window is not possible this way: AppleScript
+  `set bounds` from SSH triggers an Automation prompt ("sshd-keygen-wrapper wants
+  access to control TextEdit") and blocks until it is answered; arbitrary apps need
+  Accessibility (AXUIElement), which this guest has not granted.
+
 ## Limits
 
-- **One window for the whole desktop.** Not seamless; the Dock, menu bar and every
-  app share it. `omac show` brings it to the front; Ctrl+Alt+M and the "macOS"
+- **One window for the whole desktop.** Not seamless yet (`omac windows` only
+  reports geometry); the Dock, menu bar and every app share it. `omac show` brings it to the front; Ctrl+Alt+M and the "macOS"
   launcher entry are bound to `omvm show`, i.e. the `macos` VM, not `macapps`.
 - **arm64 macOS apps only.** Intel apps under Rosetta are untested.
 - **Self-contained apps only.** A copy of a built-in app (e.g. `/System/Applications/Calculator.app`)

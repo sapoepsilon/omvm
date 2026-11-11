@@ -16,6 +16,9 @@
 #                               (and their Utilities) and ~/Applications
 #   omac desktop APP            add "APP" to the Omarchy launcher (omac run APP)
 #   omac show                   bring the guest's desktop window to the front (omvm show)
+#   omac windows [--all] [--watch [--hz N]]
+#                               JSON geometry of the guest's app windows (or --all
+#                               windows); --watch prints a line per change
 #   omac stop                   shut the app VM down (omvm stop)
 #   omac status                 domain state, running guests, SSH reachability
 #   omac shell [CMD...]         SSH into the app VM (omvm ssh)
@@ -336,6 +339,47 @@ cmd_desktop() {
     ok "launcher entry: $file"
 }
 
+# ---------------------------------------------------------------- windows
+# share/omac/winlist.swift is compiled once in the guest (it has Xcode) into
+# ~/Library/Application Support/omac/winlist and rebuilt whenever the host copy
+# changes (its sha256 is kept next to the binary). A plain SSH session sees the
+# logged-in user's WindowServer windows, so it runs straight over SSH.
+WINLIST_DIR="Library/Application Support/omac"
+winlist_install() { # SHA256: copy the source over SSH and compile it in the guest
+    say "building winlist in $VM (swiftc -O)" >&2
+    omvm_vm ssh "$VM" "mkdir -p \"\$HOME/$WINLIST_DIR\" && cat > \"\$HOME/$WINLIST_DIR/winlist.swift\"" \
+        < "$SHARE/omac/winlist.swift"
+    omvm_vm ssh "$VM" "cd \"\$HOME/$WINLIST_DIR\" && swiftc -O winlist.swift -o winlist.new && mv winlist.new winlist && echo $1 > winlist.sha256" </dev/null >&2 ||
+        die "winlist did not compile in $VM"
+}
+cmd_windows() {
+    local args=() all=0 sum rc=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --all) all=1; shift ;;
+        --watch) args+=(--watch); shift ;;
+        --hz) args+=(--hz "${2:?usage: omac windows [--all] [--watch [--hz N]]}"); shift 2 ;;
+        *) die "usage: omac windows [--all] [--watch [--hz N]]" ;;
+        esac
+    done
+    [ "$all" = 1 ] || args+=(--apps)
+    [ "$(domstate "$VM")" = running ] || die "$VM is $(domstate "$VM") (omac up)"
+    [ -f "$SHARE/omac/winlist.swift" ] || die "missing $SHARE/omac/winlist.swift"
+    sum="$(sha256sum "$SHARE/omac/winlist.swift" | cut -d" " -f1)"
+    local run="d=\"\$HOME/$WINLIST_DIR\"; [ -x \"\$d/winlist\" ] && [ \"\$(cat \"\$d/winlist.sha256\" 2>/dev/null)\" = $sum ] || exit 99; exec \"\$d/winlist\" ${args[*]}"
+    # In the background with the signal passed on, so that killing omac (a host
+    # reading --watch) also ends ssh and, through its closed stdout, winlist.
+    # Not omvm_vm: a function would run in a subshell and $! would not be ssh.
+    OMVM_GUEST_USER="$(guest_user)" "$OMVM" ssh "$VM" "$run" </dev/null &
+    local pid=$!
+    trap 'kill -TERM "$pid" 2>/dev/null; exit 143' TERM INT HUP
+    wait "$pid" || rc=$?
+    trap - TERM INT HUP
+    [ "$rc" = 99 ] || return "$rc"
+    winlist_install "$sum"
+    OMVM_GUEST_USER="$(guest_user)" exec "$OMVM" ssh "$VM" "$run" </dev/null
+}
+
 cmd_stop() {
     defined "$VM" || die "no VM '$VM'"
     lock; note stop "user asked" "stopping"
@@ -366,6 +410,7 @@ run) shift; cmd_run "$@" ;;
 list) cmd_list ;;
 desktop) shift; cmd_desktop "$@" ;;
 show) cmd_up; omvm_vm show "$VM" ;;
+windows) shift; cmd_windows "$@" ;;
 stop) cmd_stop ;;
 status) cmd_status ;;
 shell) shift; cmd_shell "$@" ;;
