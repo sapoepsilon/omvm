@@ -80,6 +80,17 @@ args = [
 # so nothing binds it there (docs/graphics.md, "The M2 scaler").
 if os.environ.get("OMVM_M2SCALER", "0") == "1":
     args += ["-device", "apple-m2scaler-pci"]
+# Second NIC on a UDP socket, for kdp. A userspace terminator
+# (/tmp/w/kdpbridge.py) bridges it to a TUN peer: kdp's LLDB transport is
+# guest-initiated and the user-mode net0 cannot carry it. Opt-in (OMVM_KDP=1).
+# The guest UART (0x20010000) is wired to serial_hd(0). Capturing it gives the
+# AVPBooter and XNU panic text, which is otherwise only on a console we do not
+# have. Opt-in (OMVM_SERIAL=/path/to/log).
+if os.environ.get("OMVM_SERIAL"):
+    args += ["-serial", f"file:{os.environ['OMVM_SERIAL']}"]
+if os.environ.get("OMVM_KDP", "0") == "1":
+    args += ["-netdev", "socket,id=net1,udp=127.0.0.1:42001,localaddr=127.0.0.1:42002",
+             "-device", f"virtio-net-pci,netdev=net1,mac=52:54:00:c4:07:47{virtio_asc}"]
 env = {
     "VK_DRIVER_FILES": icd,
     "REIMS_VGPU_WINDOW": "0",
