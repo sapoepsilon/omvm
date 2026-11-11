@@ -106,6 +106,15 @@ env = {
     # through that mailbox, and IdentityService asserts on it and never queues.
     "OMVM_MAILBOX": "1",
 }
+# Identity-payload experiments (see research/identity/STATE-2026-11-11.md).
+# ID_SELFDESC serves the 4/4 and 4/6 payload as a serialised message; the 4/3
+# shape and 32-byte body are what the guest accepts.
+env.setdefault("ID_SELFDESC", "1")
+env.setdefault("ID_S3", "1")
+env.setdefault("ID_BLEN64", "1")
+for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
+    if os.environ.get(_k):
+        env[_k] = os.environ[_k]
 x = lambda s: quoteattr(str(s))
 print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{name}</name>
