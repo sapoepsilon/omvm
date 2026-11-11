@@ -77,6 +77,8 @@ Xcode 27.2
 
   "macOS" in the app launcher (`share/omvm-macos.desktop`, copy it to
   `~/.local/share/applications/`) runs `omvm show` too.
+- **macOS apps:** `omac run Foo.app` (or a `.dmg`) runs an arm64 macOS app in its own app VM,
+  cloned from `macos27`; the whole guest desktop shows in one window ([docs/omac.md](docs/omac.md)).
 - **Keyboard:** the same file makes Hyprland pass every key, Super = Cmd included, to a
   focused VNC viewer; the local-mode window captures keys itself after a click.
 - **Sound:** the guest has a virtio-snd card ("Apple Virtual Sound Device") on the host's
