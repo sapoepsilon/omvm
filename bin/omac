@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # omac: "Wine for macOS apps" on Omarchy. Runs arm64 macOS apps in one shared omvm
-# guest (default macapps) and shows its whole desktop in one window. Not seamless:
-# see docs/omac.md for what works and what does not.
+# guest (default macapps) and shows its whole desktop in one window, or each app
+# window as its own host window (seamless). See docs/omac.md for what works and what not.
 #
 #   omac init [--from VM] [--remote]  clone the shut-off VM (default macos27) into the
 #                               app VM: reflinked disk.img, aux.img.trimmed, vm.json
 #                               plus guest_major, guest_user and a fresh ssh_port,
 #                               then `omvm virt`; local window mode unless --remote
 #   omac up                     start the app VM (no watchdog) and wait for SSH (5 min)
-#   omac run APP [ARGS...]      APP = a host App.app, a host App.dmg, or the name of an
+#   omac run [--seamless] APP [ARGS...]
+#                               APP = a host App.app, a host App.dmg, or the name of an
 #                               app already in the guest: copy it in, clear quarantine,
-#                               open it, bring the desktop to the front
+#                               open it, bring the desktop to the front (--seamless: start
+#                               seamless mode in the background instead, unless it runs)
+#   omac seamless [OPTIONS] [APP...]
+#                               every guest app window as its own Wayland window (remote
+#                               mode only): open the APPs, then run share/omac/seamless.py
+#                               in the foreground; --stop ends a running one
 #   omac list                   apps in the guest's /Applications, /System/Applications
 #                               (and their Utilities) and ~/Applications
-#   omac desktop APP            add "APP" to the Omarchy launcher (omac run APP)
+#   omac desktop [--seamless] APP
+#                               add "APP" to the Omarchy launcher (omac run [--seamless] APP)
 #   omac show                   bring the guest's desktop window to the front (omvm show)
 #   omac windows [--all] [--watch [--hz N]]
 #                               JSON geometry of the guest's app windows (or --all
@@ -263,7 +270,26 @@ GUEST
 }
 
 cmd_run() {
-    local target="${1:?usage: omac run App.app|App.dmg|APP-NAME [ARGS...]}" out name names=() cmd
+    local seamless=0
+    [ "${1:-}" != --seamless ] || { seamless=1; shift; }
+    install_open "$@"
+    if [ "$seamless" = 1 ]; then
+        seamless_background
+        return
+    fi
+    # From a terminal on the desktop (or the launcher) bring the guest to the front;
+    # over SSH or headless there is no session of ours to show it in. Either way the
+    # app is already open, so a failed show is only a warning.
+    if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+        ok "$OPENED is open in $VM (no display here: omac show from the desktop)"
+    elif ! omvm_vm show "$VM"; then
+        warn "$OPENED is open in $VM, but its desktop could not be shown (omac show)"
+    fi
+}
+
+OPENED=""
+install_open() { # TARGET [ARGS...]: boot, copy in if needed, open in the guest; sets OPENED
+    local target="${1:?usage: omac run [--seamless] App.app|App.dmg|APP-NAME [ARGS...]}" out name names=() cmd
     shift
     case "$target" in
     *.pkg|*.mpkg) die "installer packages (.pkg) are not supported: use the .app or .dmg, or install it by hand in the guest (omac show)" ;;
@@ -296,14 +322,68 @@ cmd_run() {
     [ $# = 0 ] || cmd="$cmd --args $(printf '%q ' "$@")"
     say "opening $name"
     omvm_vm ssh "$VM" "$cmd" || die "the guest could not open '$name' (omac list shows what is installed)"
-    # From a terminal on the desktop (or the launcher) bring the guest to the front;
-    # over SSH or headless there is no session of ours to show it in. Either way the
-    # app is already open, so a failed show is only a warning.
-    if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
-        ok "$name is open in $VM (no display here: omac show from the desktop)"
-    elif ! omvm_vm show "$VM"; then
-        warn "$name is open in $VM, but its desktop could not be shown (omac show)"
-    fi
+    OPENED="$name"
+}
+
+# ---------------------------------------------------------------- seamless
+# share/omac/seamless.py: one VNC connection for the pixels and input, one
+# `omac windows --watch` for the window list, one GTK 4 window per guest app window.
+# Needs the VM in remote (VNC) mode; one instance per VM (pid in $XDG_RUNTIME_DIR).
+seamless_pidfile() { echo "${XDG_RUNTIME_DIR:-/tmp}/omac-seamless-$VM.pid"; }
+seamless_pid() { # the pid of a running instance for this VM, or fail
+    local p
+    p="$(cat "$(seamless_pidfile)" 2>/dev/null)" || return 1
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'omac/seamless\.py' &&
+        echo "$p"
+}
+vnc_port() { # the QEMU VNC port of the running VM (remote mode), or fail
+    local d
+    d="$("${VIRSH[@]}" vncdisplay "$VM" 2>/dev/null | head -1)"
+    [[ $d == *:* ]] || return 1
+    echo $((5900 + ${d##*:}))
+}
+seamless_check() {
+    [ -n "${WAYLAND_DISPLAY:-}" ] || die "seamless mode needs a Wayland session (WAYLAND_DISPLAY is not set)"
+    python3 -c 'import gi; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk' 2>/dev/null ||
+        die "seamless mode needs python-gobject and gtk4"
+    [ -f "$SHARE/omac/seamless.py" ] || die "missing $SHARE/omac/seamless.py"
+}
+seamless_background() { # start seamless mode detached, unless it already runs
+    local p log
+    if p="$(seamless_pid)"; then ok "$OPENED: seamless mode already runs (pid $p), its windows appear there"; return 0; fi
+    if [ -z "${WAYLAND_DISPLAY:-}" ]; then ok "$OPENED is open in $VM (no Wayland session here: omac seamless from the desktop)"; return 0; fi
+    seamless_check
+    log="${XDG_STATE_HOME:-$HOME/.local/state}/omac/seamless-$VM.log"
+    mkdir -p "$(dirname "$log")"
+    setsid -f "$SELF" seamless >"$log" 2>&1 </dev/null
+    ok "$OPENED: seamless mode started (log: $log)"
+}
+cmd_seamless() {
+    local apps=() opts=() p port app
+    local usage="usage: omac seamless [--no-menubar] [--no-trim] [--no-round] [--hz N] [--stats N] [--control SOCKET] [--selftest [--selftest-text T]] [APP...] | --stop"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --stop)
+            p="$(seamless_pid)" || { ok "no seamless mode runs for $VM"; return 0; }
+            kill -TERM "$p"
+            for _ in $(seq 1 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+            ! kill -0 "$p" 2>/dev/null || die "seamless mode (pid $p) did not exit"
+            ok "seamless mode stopped (pid $p)"; return 0 ;;
+        --hz|--stats|--control|--selftest-text) [ $# -ge 2 ] || die "$usage"; opts+=("$1" "$2"); shift 2 ;;
+        --no-menubar|--no-trim|--no-round|--selftest) opts+=("$1"); shift ;;
+        --) shift; apps+=("$@"); break ;;
+        -*) die "$usage" ;;
+        *) apps+=("$1"); shift ;;
+        esac
+    done
+    seamless_check
+    cmd_up
+    port="$(vnc_port)" || die "$VM has no VNC display: seamless mode needs remote mode (omvm mode remote $VM)"
+    for app in "${apps[@]}"; do install_open "$app"; ok "$OPENED is open"; done
+    if p="$(seamless_pid)"; then ok "seamless mode already runs for $VM (pid $p)"; return 0; fi
+    echo $$ > "$(seamless_pidfile)"   # exec keeps the pid
+    say "seamless mode: $VM via VNC 127.0.0.1:$port (Ctrl+C or omac seamless --stop ends it)"
+    exec python3 "$SHARE/omac/seamless.py" --port "$port" --omac "$SELF" --vm "$VM" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------- the rest
@@ -317,20 +397,24 @@ desktop_quote() { # one quoted Exec argument, per the Desktop Entry spec (string
     printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\\\\\/g' -e 's/["`$]/\\\\&/g' -e 's/%/%%/g')"
 }
 cmd_desktop() {
-    local app="${1:?usage: omac desktop APP}" name slug dir file bin
+    local seamless=0
+    [ "${1:-}" != --seamless ] || { seamless=1; shift; }
+    local app="${1:?usage: omac desktop [--seamless] APP}" name slug dir file bin run=run comment=", whole desktop in one window"
+    [ "$seamless" = 0 ] || { run="run --seamless"; comment=", seamless: each window its own"; }
     [ -e "$app" ] && app="$(readlink -f "$app")"
     name="$(basename "${app%/}")"; name="${name%.app}"; name="${name%.dmg}"
     slug="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
     [ -n "$slug" ] || die "cannot make a file name from '$name'"
     bin="$HOME/.local/bin/omac"; [ -x "$bin" ] || bin="$SELF"
     dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"; file="$dir/omac-$slug.desktop"
+    [ "$seamless" = 0 ] || file="$dir/omac-$slug-seamless.desktop"
     mkdir -p "$dir"
     {
         echo '[Desktop Entry]'
         echo 'Type=Application'
-        echo "Name=$name"
-        echo "Comment=$name in the macOS app VM ($VM, whole desktop in one window)"
-        echo "Exec=$(desktop_quote "$bin") run $(desktop_quote "$app")"
+        if [ "$seamless" = 1 ]; then echo "Name=$name (macOS)"; else echo "Name=$name"; fi
+        echo "Comment=$name in the macOS app VM ($VM$comment)"
+        echo "Exec=$(desktop_quote "$bin") $run $(desktop_quote "$app")"
         echo 'Icon=computer'
         echo 'Terminal=false'
         echo 'Categories=Utility;'
@@ -409,6 +493,7 @@ up) shift; cmd_up ;;
 run) shift; cmd_run "$@" ;;
 list) cmd_list ;;
 desktop) shift; cmd_desktop "$@" ;;
+seamless) shift; cmd_seamless "$@" ;;
 show) cmd_up; omvm_vm show "$VM" ;;
 windows) shift; cmd_windows "$@" ;;
 stop) cmd_stop ;;
