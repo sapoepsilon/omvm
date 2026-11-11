@@ -5,6 +5,56 @@ host it runs on). Newest first. Agents: append an entry after each change.
 
 ## 2026-11-10
 
+- **`macos` slow / input late: QEMU's main thread pinned by `identity_fdt_poll`, plus two
+  orphaned host loops; fixed without a VM restart.**
+  - **Measured 17:28.** QEMU main thread (tid = pid) 96 % CPU; HMP `info status` 9-16 ms
+    but every ~4th call 1430-1445 ms; `IDFDT` lines in the QEMU log ~7/s. Two orphaned
+    `python3` processes from 2026-11-09 each held a full host core: pid 20996 (19:18, an
+    `MLB` scan of the live `disk.img` whose `seek(s-4)` re-reads forever, 22 h CPU, 241 TB
+    read) and 132240 (23:04, an empty `for va in range(...)` over a kernel VA range, 18 h
+    CPU). Killed both. Guest itself idle (load ~1, 92 % memory free, no thermal warning).
+  - **Cause.** `hw/vmapple/apple-identity.c` (uncommitted identity research in
+    `build/qemu-sb-bdifw/src`) arms `identity_fdt_poll` on a 50 ms `QEMU_CLOCK_REALTIME`
+    timer at realize. After try 500 every tick runs `identity_dt_find` / `memmem` / 4-byte
+    loops over all 16 GB of guest RAM on the main loop under the BQL (~1.4 s), never finds
+    its target (no `IDFDT set`/`stop`/`gave up` in any log), and re-arms for up to 6000
+    tries (~2.5 h at that speed). Input BHs, the monitor and vCPU MMIO exits wait on it.
+    Every new QEMU process restarts it, which is why `/tmp/nofdt` "stopped working" after
+    each restart (it had been removed again each time).
+  - **Fix.** `/tmp/nofdt` touched under the lock at 17:30 and **left in place**: main
+    thread 96 % -> 0-0.3 %, HMP 9-12 ms x20 (max was 1445), IDFDT lines 0/s. Durable: the
+    timer is now armed only when `OMVM_IDENTITY_FDT` is set in the domain's `qemu:env`
+    (not set by `libvirt-domain.py`); rebuilt `qemu-sb-bdifw/build/qemu-system-aarch64`
+    17:31 (sha 124ecc20). The running QEMU keeps the old binary until its next start.
+    Rollback: `~/vm-artifacts/rollback-fdtpoll-20261110/` (old binary sha 78cee06a +
+    `apple-identity.c` as of 17:08).
+  - **`overrun write ... > max:4194304` spam** is `audio/pwaudio.c`
+    `capture_on_process`: the PipeWire mic stream pushes 940 B per 5 ms quantum into
+    QEMU's 4 MB capture ring while nothing drains it, one `error_report` per quantum (on the
+    PipeWire thread, cheap). Bursts 16:31-16:33 and 17:13-17:16, none since. It is what
+    "truncates" the log: virtlogd rotates `macos.log` at 2 MB and keeps 3
+    (`macos.log.0..2`), so a burst rotates away the identity traces within minutes.
+  - **QEMU restarts 17:00-17:09** were `reason=destroyed` (virtqemud SIGTERM = `virsh
+    destroy`, monitor tainted `custom-monitor`) once a minute during the identity rebuild
+    loop, not the watchdog or a crash. Guest panics at 15:31/15:36/15:59/16:07 are all
+    `DebuggerXCallEnter: Debugger synch pending on cpu 0` (debug boot-args era; a vCPU
+    stuck behind the BQL during a 1.4 s scan would also miss that cross-call).
+  - fps / pointer latency not re-measured: `lat.py` injects input and another agent was
+    driving the guest.
+
+- **Apple Account sign-in script (`/tmp/w/signin.sh`, `research/signin/`): review findings.**
+  - `.` was mapped to QMP qcode `period`, which QEMU does not have (`qapi/ui.json` uses `dot`), so
+    the email reaches Apple without its dot (17:29 run). `pw.sh` also passes `shift-2` as one
+    qcode. Use `dot` and split chords.
+  - Each keystroke was 2-4 separate `virsh qemu-monitor-command` processes; with `identity_fdt_poll`
+    holding QEMU's main loop (~97 % CPU, about one HMP call in five stalls ~1.4 s) typing an email
+    takes 30-60 s, and tool timeouts killed runs silently at "type username". QMP abs input needs no
+    host window focus or geometry (0..32767 maps to the guest display).
+  - The 17:00-17:09 QEMU restarts were `virsh destroy` (`reason=destroyed`) from the apple-identity.c
+    `dbg*.py` edit/rebuild loop (each ~10 s after a dbg script), not signin.sh.
+  - Credentials are hardcoded in `research/signin/signin.sh` and `pw.sh` (gitignored); move them to
+    a 0600 file. A stdin-fed `virsh` shell keeps keystrokes out of `ps`.
+
 - **Identity device: the service now starts and the guest completes the handshake
   and UDID exchange.** The wall recorded in `research/identity/KICK.md` (no
   descriptor is ever added, because `IdentityService::start` dies on
