@@ -1,10 +1,6 @@
 # Work log
 
-A running, dated log of changes to this setup (the omvm repo and the Omarchy
-host it runs on). Newest first. Agents: append an entry after each change.
-
-## 2026-11-10
-
+- **2026-11-10 SEP verified working from Linux; attestation ACL support added.** On the host, `apple_sep` attaches and the enclave key store opens: `diag/` shows `attach=attached endpoints=12 keybag=present keystore=open matching=usable abi=2`, and `/dev/sep-bio` `IOC_ATTEST` (0xc0b0b10a, 176-byte struct) returns a real DER P-256 signature with the 65-byte point, which `openssl pkeyutl -verify` accepts; the key is stable across calls and comes from `/var/lib/aurora-sep-refkey.bin`. Found doing so that the module did not build at all: `der.rs` lacks the `RV::Bool` variant `key.rs` already used, so a `Bool` variant and DER BOOLEAN tag were added, and the machine ref-key can now be created with an ACL permitting attestation (`refkey_attest_acl=1`), since `acl` is only settable at create time. The SEP attaches once per boot, so the probe reload left it unattached: a host reboot activates the change. Ops `oc`/`osgn`/`oecd` exist; `oa` attestation-chained needs the SEP device attestation key, still absent.
 - **`macos` slow / input late: QEMU's main thread pinned by `identity_fdt_poll`, plus two
   orphaned host loops; fixed without a VM restart.**
   - **Measured 17:28.** QEMU main thread (tid = pid) 96 % CPU; HMP `info status` 9-16 ms
