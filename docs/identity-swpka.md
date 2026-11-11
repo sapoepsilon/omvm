@@ -151,3 +151,14 @@ Linux ECID mapping is source-proven: upstream `scripts/extract-ecid.py` parses v
 Native common signer0x10000CD30 was called with operationmode2, signingflags0x4004, fixed host-marker context32, an ephemeral SOFTWARE P256 key retained via native set_params, and public test digest bytes0..47. Native returnedstatus0 andDERsignature. SecKeyVerifySignature DigestX962 validated it against full48bytes AND first32bytes; verification failed for last32bytes and for SHA256(digest48). A32byte digest fixture likewise validated directly and failed when hashed again. `/tmp/omvm-swpka-hostdigest-fixtures.m` and `.txt`; no physical SEP/account/guest key involved.
 
 There are TWO separate truncation stages: SIKA builder normalizes hash to SIGNING FLAGS curve size (SHA384->signflagsP256 means LAST32; SHA256->signflagsP384 means16zero||SHA256). Then actual ECDSA key order truncates any oversized supplied digest on the LEFT/MSB side. With actual certified host keyP256 but signingflags0x4004, builder retains48bytes, native Security signs its FIRST32. Therefore a32byte kernel digest ABI can match native P256 by taking first32bytes of the FINAL normalized48byte digest. Do not prematurely choose first32 ofSHA384 when signingflags call for builder last32 normalization.
+
+## Native serialized query fixtures
+
+Runtime native `_sw_pka_handle_message` build26B123 was called using serialized public query bodies, with dummy ChipID/ECIDzero initialized by process-local software-key set_params. No invalid selectors tested. `/tmp/omvm-swpka-query-fixtures.m` and `.txt`.
+
+- Type2, u32LE selectors0..6: all seven return exactly104bytes, header `{2,5,2,104,20,52,1,4}`, i32status0, iovecbase0/length52, payload52bytes0xff. No differences between valid measurement selectors in this native build.
+- Type8, one-byte zero querybody: exactly40bytes, header `{2,5,8,40,8,0,0,0}`, body i32LEstatus0 plus u32LE AONsecurity1.
+- Type9, one-byte zero querybody: exactly37bytes, header `{2,5,9,37,5,0,0,0}`, body i32LEstatus0 plus u8 chiprevision1.
+- Type10, one-byte zero querybody: exactly77bytes, header `{2,5,10,77,20,25,1,4}`, body i32LEstatus0 plus iovecbase0/length25 plus25ASCII guest identity bytes. Fixture dummy identity is `00000000-0000000000000000` and is not a real machine identifier.
+
+These serialized results confirm the previously static descriptor table and constants. Implement operations when actual guest traffic requests them, with bounded argument validation. Native invalid measurement selector abort behavior is not a suitable replacement for an error response.
