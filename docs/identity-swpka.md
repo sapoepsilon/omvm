@@ -162,3 +162,9 @@ Runtime native `_sw_pka_handle_message` build26B123 was called using serialized 
 - Type10, one-byte zero querybody: exactly77bytes, header `{2,5,10,77,20,25,1,4}`, body i32LEstatus0 plus iovecbase0/length25 plus25ASCII guest identity bytes. Fixture dummy identity is `00000000-0000000000000000` and is not a real machine identifier.
 
 These serialized results confirm the previously static descriptor table and constants. Implement operations when actual guest traffic requests them, with bounded argument validation. Native invalid measurement selector abort behavior is not a suitable replacement for an error response.
+
+## Host-attested public-point curve versus attested flags
+
+Native digest builder0x10000E180 fixtures used a process-local nonpermanent SOFTWARE P256 key retained via native set_params and fixed PUBLIC host-marker context. The host-attested point remained65bytes for BOTH attestedflags0x4 and0x4004. TBS used actual64coordinatebytes, label `ssca`, LE32(attestedflags), then fixed PUBLIC24byte host tag; total96bytes. Therefore flags0x4004 selects SHA384 but does NOT require the actual retained host point to be97bytes/P384. Coordinate size follows actual point export, not flags. The24byte tag is present in both cases.
+
+All four combinations attestedflags0x4/0x4004 and signingflags0/0x4004 returnedstatus0 and matched independent Python TBS/hash/normalization exactly. Signingflags0 retains last32bytes; signingflags0x4004 yields48bytes with16leadingzero bytes forSHA256. Native fixture source/results `/tmp/omvm-swpka-hostattested-fixtures.m` and `.txt`; verifier `/tmp/omvm-verify-hostattested.py`. The fixture file holds only an ephemeral software PUBLIC point and computed digests, no actual device IDs, guest contexts, private scalar, SEP keys, or credentials.
