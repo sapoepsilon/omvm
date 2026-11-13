@@ -313,6 +313,26 @@ def check_domain(name,root):
     require([v for k,v in properties if k=='relay-socket']==[str(sock)],'domain has the wrong FairPlay socket')
 
 
+def wait_for_clock(timeout=30):
+    """Do not seed a guest RTC from an unsynchronized Asahi host clock."""
+    deadline=time.monotonic()+timeout
+    while True:
+        remaining=deadline-time.monotonic()
+        if remaining<=0:break
+        try:
+            synchronized=command(['/usr/bin/timedatectl','show','-p','NTPSynchronized','--value'],
+                                 timeout=min(5,remaining)).strip()
+            if synchronized==b'yes':return
+        except (Failure,OSError,subprocess.TimeoutExpired):
+            # Unavailable time service is not evidence of a synchronized clock.
+            pass
+        remaining=deadline-time.monotonic()
+        if remaining<=0:break
+        time.sleep(min(.25,remaining))
+    raise Failure('host clock is not synchronized; check timedatectl and the network/time service, '
+                  'then retry VM start (no guest was started)')
+
+
 def gate(cfg,name,operation,phase,xml):
     require(NAME.fullmatch(name), 'invalid VM name')
     caller=int(os.environ.get('SUDO_UID','0'))
@@ -347,6 +367,10 @@ def gate(cfg,name,operation,phase,xml):
             # an uncertain reservation while the same libvirt daemon could still start.
             require(not Path('/proc/'+str(active['daemon_pid'])).exists(),
                     'another VM start is reserved; wait for release/end or inspect the daemon')
+        # Only guest launch depends on clock synchronization. Existing helpers
+        # can start at boot without network access and are never reinitialized here.
+        wait_for_clock()
+        if reservation.exists():
             reservation.unlink()
         if managed:
             command(['/usr/bin/systemctl','start',unit(name)],timeout=120)

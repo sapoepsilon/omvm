@@ -117,6 +117,12 @@ does not prove Apple Account sign-in, APNs, iMessage or Contact Key Verification
   libvirt recursively. `release/end` clears the reservation after QEMU exits.
   A start interrupted while its libvirt daemon is alive fails closed rather than
   guessing that the slot is free; inspect that failed start before recovery.
+- Before admitting a vmapple launch, the gate waits up to 30 seconds for
+  `timedatectl` to report `NTPSynchronized=yes`. An unavailable or unsynchronized
+  host clock rejects the launch before starting helpers or reserving the VM slot;
+  check the network/time service and retry. This prevents a guest inheriting an
+  invalid Asahi RTC after battery loss. Helper boot and VM release do not wait for
+  network time, and this check never reinitializes a provider or changes the clock.
 - Backend state uses an exclusive lock and atomic checkpoint. Dirty/interrupted
   files indicate uncertain native execution and stop startup. Do not delete those
   files or silently initialize empty state to make a service green.

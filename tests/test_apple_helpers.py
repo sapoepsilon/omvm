@@ -66,6 +66,63 @@ class GateTests(unittest.TestCase):
                 command.assert_not_called()
 
 
+@unittest.skipUnless(os.geteuid()==0 and sys.platform=='linux','Linux root libvirt gate contract')
+class ClockGateTests(unittest.TestCase):
+    def test_unsynchronized_clock_creates_no_reservation_or_helper_start(self):
+        with tempfile.TemporaryDirectory(dir='/run') as d:
+            run=Path(d)
+            original=Path.read_text
+            def process_name(path,*args,**kwargs):
+                if str(path)==f'/proc/{os.getppid()}/comm':return 'virtqemud\n'
+                return original(path,*args,**kwargs)
+            with patch.object(h,'RUN',run),patch.object(h,'running_guests',return_value=set()), \
+                 patch.object(h,'locked',return_value=contextlib.nullcontext()), \
+                 patch.object(h,'command',return_value=b'no\n') as command, \
+                 patch.object(h.time,'monotonic',side_effect=[0,0,30]), \
+                 patch.object(Path,'read_text',process_name), \
+                 patch.object(h,'ready') as ready:
+                with self.assertRaisesRegex(h.Failure,'clock is not synchronized.*retry VM start'):
+                    h.gate(CFG,'one','prepare','begin',XML)
+                self.assertFalse((run/'active.json').exists())
+                self.assertEqual([c.args[0][0] for c in command.call_args_list],['/usr/bin/timedatectl'])
+                ready.assert_not_called()
+
+    def test_launch_is_admitted_after_clock_synchronizes(self):
+        with tempfile.TemporaryDirectory(dir='/run') as d:
+            run=Path(d);events=[];answers=iter([b'no\n',b'yes\n'])
+            original=Path.read_text
+            def process_name(path,*args,**kwargs):
+                if str(path)==f'/proc/{os.getppid()}/comm':return 'virtqemud\n'
+                return original(path,*args,**kwargs)
+            def command(argv,timeout=30):
+                if argv[0]=='/usr/bin/timedatectl':
+                    answer=next(answers);events.append(answer.strip().decode());return answer
+                self.assertEqual(argv,['/usr/bin/systemctl','start','omvm-fairplay@one.service'])
+                events.append('start');return b''
+            with patch.object(h,'RUN',run),patch.object(h,'running_guests',return_value=set()), \
+                 patch.object(h,'command',side_effect=command),patch.object(h,'ready'), \
+                 patch.object(h.time,'sleep'),patch.object(Path,'read_text',process_name):
+                h.gate(CFG,'one','prepare','begin',XML)
+            self.assertEqual(events,['no','yes','start'])
+            self.assertEqual(json.loads((run/'active.json').read_text())['vm'],'one')
+
+    def test_unavailable_clock_query_fails_closed_within_deadline(self):
+        with patch.object(h,'command',side_effect=subprocess.TimeoutExpired('timedatectl',5)) as command, \
+             patch.object(h.time,'monotonic',side_effect=[0,0,30]):
+            with self.assertRaisesRegex(h.Failure,'clock is not synchronized'):h.wait_for_clock()
+            self.assertEqual(command.call_args.kwargs['timeout'],5)
+
+    def test_release_does_not_wait_for_clock_or_touch_helpers(self):
+        with tempfile.TemporaryDirectory(dir='/run') as d:
+            run=Path(d);reservation=run/'active.json'
+            reservation.write_text(json.dumps({'vm':'one','daemon_pid':os.getpid()}))
+            with patch.object(h,'RUN',run),patch.object(h,'running_guests',return_value=set()), \
+                 patch.object(h,'command') as command:
+                h.gate(CFG,'one','release','end',XML)
+                self.assertFalse(reservation.exists())
+                command.assert_not_called()
+
+
 class FilesAndSocketsTests(unittest.TestCase):
     def test_writable_ancestor_and_symlink_are_refused(self):
         # Root-private file under a world-writable ancestor is still not an
