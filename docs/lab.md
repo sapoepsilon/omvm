@@ -2,6 +2,14 @@
 
 ## Scope and current phase — 2026-11-13
 
+Latest groundwork instruction: **do not touch kentra**. Live inspection found
+kentra running and the lab shut off. The source/skill handoff is complete; a
+new exclusive lab slot and an approved native GUI operator remain necessary.
+Do not stop kentra to obtain that slot under the current instruction. The
+private `omvm-apple-services` skill records the current acceptance ledger and
+the verified Mac-source import. Historical setup steps below are completed
+work, not a request to repeat enrollment or the former slot-switch scripts.
+
 The retained `kentra` guest is the owner's development VM. The resumed service
 goal uses a newly restored `omvm-lab` with its own factory machine identifier,
 native default serial, network address, disk/auxiliary storage and managed
@@ -48,7 +56,7 @@ must leave the new VM stopped, with no native Setup Assistant/account boot.
 Guest execution, SEP signing and FairPlay use the Linux host after transfer.
 This does not establish a Linux-only blank-disk installation pipeline.
 
-## Gates before account sign-in
+## Historical setup gates — completed, not a repeat checklist
 
 1. Check both hosts' capacity and power. Verify the new restore's ECID, serial
    and network address differ from kentra. Validate the stopped sparse transfer,
