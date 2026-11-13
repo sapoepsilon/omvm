@@ -3,8 +3,8 @@
 ## P1: Continue service testing in omvm-lab
 
 Owner resumed this goal on 2026-11-13 after retaining kentra for development.
-Create a new independent lab guest; never use kentra's account session or
-platform identity as its template. See [lab.md](lab.md) for the acceptance
+Continue the independent lab guest; preserve its own account session and
+platform identity separately from kentra. See [lab.md](lab.md) for the acceptance
 sequence and the shared-host limits.
 
 - [x] Restore a new omvm-lab identity and blank disk, transfer the stopped pair,
@@ -16,6 +16,8 @@ sequence and the shared-host limits.
   and individual service success remain separate checks.
 - [x] Verify BAA acquisition and production APNs connection before account retries:
   first Linux boot on 27.3/26C5035r obtained BAA certificates and push tokens.
+- [x] Verify visible native Terra input and local desktop login.
+- [ ] Complete stock Apple Account sign-in and a fresh authenticated request.
 - [ ] Verify Messages activation and an authorized send/receive test.
 - [ ] Test Contact Key Verification after Messages and its prerequisites work;
   distinguish its result from the separately deferred Keychain-sync diagnosis.
@@ -33,10 +35,11 @@ Key Verification. A subsequent owner-authorized guest switch completed at 21:08 
 kentra cleanly shut off and the lab booted through normal session libvirt,
 with pinned SSH verified on 27.3/26C5035r and its native Reims window mapped.
 Domains/profiles and helper PIDs remained unchanged; watchdogs remain off and
-both operation locks were released. Native input remains unverified: the
-groundwork session has no native CUA surface, and the prior remote Sol CLI
-permission prompt is historical. Arrange an approved native GUI operator
-before account input; do not repeat the completed switch or enrollment.
+both operation locks were released. Native Terra screenshots/input and local
+login are now verified, with VM and operator visible on workspace 5. The owner
+requested --yolo for the dedicated CLI, with unchanged global settings.
+A private Apple Account sign-in attempt is underway; inspect its dated result
+before another attempt. Do not repeat the completed switch or enrollment.
 
 ## P1: Start Linux Apple Account helpers automatically
 

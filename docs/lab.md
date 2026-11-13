@@ -5,8 +5,8 @@
 Latest owner clarification: **turn off kentra and turn on omvm-lab**. The clean
 guest switch completed at 21:08 UTC: kentra cleanly shut off, lab running with
 pinned SSH on 27.3/26C5035r and its native XWayland Reims window mapped.
-Kentra contents, account, configuration and helper state remain protected. The source/skill handoff is complete. An approved
-native GUI operator is still needed for account input. The private
+Kentra contents, account, configuration and helper state remain protected. The source/skill handoff is complete. A dedicated visible GPT-6.1 Terra native
+operator now works; local desktop login completed at 21:33:26 UTC. The private
 `omvm-apple-services` skill records the acceptance ledger and verified
 Mac-source import. Historical setup steps below are completed work, not a
 request to repeat enrollment or execute archived slot-switch scripts.
@@ -111,17 +111,26 @@ and existing DISPLAY changed reached pinned SSH again; the compositor now
 confirms an XWayland Reims window owned by the lab QEMU. The previous Wayland
 XML is retained for display-only rollback. Kentra configuration is unchanged.
 
-The separate Linux GPT-6.1 Sol CLI uses the installed public computer-only
-CUA launcher and actual session environment. Its native MCP discovery is
-waiting at the CLI session permission prompt; native screenshots and input
-are not yet verified. Do not reopen Moonlight or VNC for agent control unless
-the owner changes this preference.
+The dedicated Linux GPT-6.1 Terra CLI uses the installed public computer-only
+CUA launcher and actual graphical-session environment. Its first custom launch
+omitted the installed trusted-module path; matching the app-managed trusted
+path resolved discovery without changing package code or access checks.
+Screenshots, click/type/clear input, and a single local-login submission are
+verified. Independent pinned SSH confirmed the console user and Finder/Dock.
+The owner requested per-invocation --yolo and a visible terminal beside the VM
+on workspace 5. Global approval settings remain unchanged. This supersedes
+the earlier Sol permission wait and this chat's unavailable native surface.
+Do not reopen Moonlight or VNC unless the owner changes this preference.
 
 The temporary noVNC service, browser session and three SSH forwards are closed.
 VNC testing established local login, but physical and textarea input lost
 shifted characters. The built-in Accessibility Keyboard produced exact
 nonsecret A@2.Z through mouse clicks; it remains enabled in the lab. No Apple
-Account password was submitted. Account, Messages and CKV remain unverified.
+Account password was submitted during that retired VNC test. At 21:39:01 UTC,
+Terra opened the empty stock Apple Account form. The owner subsequently
+confirmed the lab account for sign-in; its password is held in the OS keyring
+and a bounded private native-input task is underway. Account authentication,
+Messages and CKV still need their separate acceptance evidence.
 
 ## VNC route tested, then retired
 
