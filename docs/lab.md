@@ -91,9 +91,19 @@ The owner explicitly requested OMVM’s native VM window instead of a VNC relay.
 The lab was cleanly stopped, its current XML backed up, and only display
 configuration restored to native Reims at 3024x1964@254. The managed helper,
 actual identity and disks were preserved. Normal native boot reached pinned
-SSH on 27.3/26C5035r. The separate Linux GPT-6.1 Sol worker still needs a
-verified direct native control integration. Do not reopen Moonlight or VNC
-for agent control unless the owner changes this preference.
+SSH on 27.3/26C5035r. Live compositor inventory confirmed that this window
+was Wayland. A separate Mesa build now supplies X11 plus Wayland WSI from
+the same hash-verified patched source, leaving existing driver installations
+unchanged. A clean lab restart with only its driver prefix, SDL3 X11 backend
+and existing DISPLAY changed reached pinned SSH again; the compositor now
+confirms an XWayland Reims window owned by the lab QEMU. The previous Wayland
+XML is retained for display-only rollback. Kentra configuration is unchanged.
+
+The separate Linux GPT-6.1 Sol CLI uses the installed public computer-only
+CUA launcher and actual session environment. Its native MCP discovery is
+waiting at the CLI session permission prompt; native screenshots and input
+are not yet verified. Do not reopen Moonlight or VNC for agent control unless
+the owner changes this preference.
 
 The temporary noVNC service, browser session and three SSH forwards are closed.
 VNC testing established local login, but physical and textarea input lost
