@@ -66,9 +66,13 @@ current synchronized clock. Deployment did not restart the helper or guest.
 
 ## Installation and migration
 
-The on-demand per-VM startup change below is prepared in source as of
-2026-11-13; deployment is pending the stopped-guest lab enrollment window.
-The running kentra helper and its earlier boot enablement are unchanged.
+The on-demand per-VM startup change was deployed on 2026-11-13 during the
+coordinated stopped-guest lab enrollment window. The UID1 provider and SEP
+signer remain enabled at host boot. Both managed FairPlay instances, kentra
+and omvm-lab, are static units started on demand by the serialized libvirt
+gate, with separate VM-bound state. Both guests retain disabled watchdogs
+and autostart. Lab cold boots have passed the gate; a full host reboot with
+authenticated account access remains unverified. See [lab.md](lab.md).
 
 Use the reviewed v23-or-later backend with durable-state support. Stage its
 binary, each VM's existing 16-byte identifier and the complete offline Apple
