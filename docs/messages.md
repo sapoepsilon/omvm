@@ -52,6 +52,24 @@ reports no new update. Preserve a complete offline rollback and the current
 helper before any test of a different OS build; do not replace working
 identity or keychain state speculatively.
 
+## Beta experiment — 2026-11-13, deferred
+
+The owner accepted the official 27.3 beta licence. The in-place installer for
+26C5035r completed preparation and reported apply success at 16:26:40 UTC.
+Messages blocked its initial restart. After the owner finished using the VM,
+a normal guest restart at 16:43:27 UTC returned to 27.2.1/26B131. The updater
+recorded a target/current boot-manifest mismatch and "Failed Backward - in
+original OS after update was attempted", then cleaned staged assets. The beta
+was not successfully installed and its APNs result has not been tested.
+
+The exact missed update-boot cause is unproven. The NVRAM no-op in the log belongs
+to the SFR firmware-only substage, so it is not sufficient to blame the main
+handoff. The pinned QEMU source includes bdif writes; a missing write fix or
+stale warm-reset state was not established. No firmware/NVRAM changes or further
+installer retry were made. At the owner's request, leave the existing signed-in
+VM running for development and revisit the experiment later. The paired offline
+rollback remains preserved; Linux helpers were not restarted.
+
 ## Acceptance
 
 Require a successful BAA certificate acquisition and production APNs connection,
