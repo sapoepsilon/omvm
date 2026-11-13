@@ -85,9 +85,25 @@ normal Linux reboot. The shared host/provider reboot affects kentra too. Check
 helper startup and real authenticated guest access after boot, then verify
 kentra remains usable. Do not unload/reset the pinned provider or use kexec.
 
-## Browser VNC route
+## Current native control path
 
-The lab uses QEMU's existing remote-display mode with VNC bound to
+The owner explicitly requested OMVM’s native VM window instead of a VNC relay.
+The lab was cleanly stopped, its current XML backed up, and only display
+configuration restored to native Reims at 3024x1964@254. The managed helper,
+actual identity and disks were preserved. Normal native boot reached pinned
+SSH on 27.3/26C5035r. The separate Linux GPT-6.1 Sol worker still needs a
+verified direct native control integration. Do not reopen Moonlight or VNC
+for agent control unless the owner changes this preference.
+
+The temporary noVNC service, browser session and three SSH forwards are closed.
+VNC testing established local login, but physical and textarea input lost
+shifted characters. The built-in Accessibility Keyboard produced exact
+nonsecret A@2.Z through mouse clicks; it remains enabled in the lab. No Apple
+Account password was submitted. Account, Messages and CKV remain unverified.
+
+## VNC route tested, then retired
+
+The temporary lab test used QEMU's remote-display mode with VNC bound to
 127.0.0.1:5991 and WebSocket VNC to 127.0.0.1:5992. Its own native-display XML
 was preserved first; the conversion retained its identity, disks and Linux SEP
 attachment. The later enrollment added only its own managed FairPlay socket.
@@ -98,9 +114,9 @@ build directory. The original directory was preserved, and regular maps from
 the existing QEMU source were copied with a verified SHA256 manifest into the
 existing data path. No QEMU binary or Apple firmware changed.
 
-Official noVNC v1.6.0 (a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820) is served by a
-transient user service on loopback 6088. SSH forwards the static page and guest
-ports to loopback-only endpoints on the operator machine. A separate GPT-6.1
+Official noVNC v1.6.0 (a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820) was served by a
+transient user service on loopback 6088, with SSH forwards to loopback-only
+operator endpoints. The service and forwards are now stopped. A separate GPT-6.1
 Sol task uses the existing headless agent-browser CLI; its browser launch,
 screenshot path and live lab desktop were verified. Local omvmlab login
 completed through the VNC browser. The desktop-app
