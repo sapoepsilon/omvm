@@ -13,7 +13,10 @@ storage/profile transfer passed verification. The 4 CPU/8 GiB lab then booted
 on Omarchy with the existing pinned QEMU and 27.2-era AVPBooter. Stock local
 Setup Assistant completed with Apple Account skipped. Pinned SSH verified the
 actual build, completed setup, sub-second clock agreement and a guest
-IOPlatformUUID distinct from kentra. Separate FairPlay enrollment is pending.
+IOPlatformUUID distinct from kentra. On the next coordinated maintenance slot,
+its own empty, UUID-bound FairPlay state was enrolled once. The on-demand
+per-VM startup policy was installed, and the lab cold-booted through the normal
+libvirt gate with unchanged actual UUID and sub-second clock agreement.
 
 The first Linux boot successfully acquired two BAA certificates and signed a
 nonce with the host VM identity. Production APNs reported connected, and
@@ -23,12 +26,19 @@ hurdle is cleared in this fresh 27.3 lab; Apple Account, Messages activation,
 send/receive and Contact Key Verification remain untested here. Private,
 sanitized evidence is retained under the lab's evidence/first-boot-20261113.
 
-Lab is cleanly shut off. The first kentra return boot reached SSH at 19:44 UTC
-but shut down ten seconds later for an undetermined reason. A normal restart
-was verified repeatedly over pinned SSH and returned to the owner development
-pane. kentra keeps its original 27.2.1/26B131 build, identity and account state;
-no host or helper process was changed. Obtain a new coordinated guest slot
-before helper enrollment or further lab boots.
+A new owner-authorized maintenance slot began after the development pane's
+explicit release. Both guests were cleanly stopped; matched offline guest
+backups, public SEP artifacts and a quiesced kentra helper checkpoint were
+saved before enrollment. Kentra's checkpoint remained byte-identical after
+its managed helper restarted. The original v22 rollback helper, shared SEP
+service and pinned UID1 provider were preserved. The lab is running for service
+acceptance; kentra is stopped for this coordinated slot and must be returned
+with pinned SSH verification afterward.
+
+The earlier return at 19:44 UTC reached SSH but shut down ten seconds later for
+an undetermined reason. A normal restart was verified repeatedly and handed
+back before this separately authorized slot. Do not infer a crash or attribute
+that shutdown to a user or process without additional evidence.
 
 Initial restore may use native Virtualization.framework. Restore completion
 must leave the new VM stopped, with no native Setup Assistant/account boot.
@@ -74,3 +84,33 @@ Finally, retain paired backups and notify the owner's HC omarchy pane before a
 normal Linux reboot. The shared host/provider reboot affects kentra too. Check
 helper startup and real authenticated guest access after boot, then verify
 kentra remains usable. Do not unload/reset the pinned provider or use kexec.
+
+## Browser VNC route
+
+The lab uses QEMU's existing remote-display mode with VNC bound to
+127.0.0.1:5991 and WebSocket VNC to 127.0.0.1:5992. Its own native-display XML
+was preserved first; the conversion retained its identity, disks and Linux SEP
+attachment. The later enrollment added only its own managed FairPlay socket.
+Watchdog/autostart remain off and kentra's domain/defaults remain unchanged.
+
+The custom QEMU bundle's keyboard maps were broken symlinks into an absent
+build directory. The original directory was preserved, and regular maps from
+the existing QEMU source were copied with a verified SHA256 manifest into the
+existing data path. No QEMU binary or Apple firmware changed.
+
+Official noVNC v1.6.0 (a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820) is served by a
+transient user service on loopback 6088. SSH forwards the static page and guest
+ports to loopback-only endpoints on the operator machine. A separate GPT-6.1
+Sol task uses the existing headless agent-browser CLI; its browser launch,
+screenshot path and disconnected noVNC page were verified. The desktop-app
+CUA browser host was unavailable, so its configuration and policies were left
+unchanged. A live VNC desktop check is in progress. After the helper-backed
+cold boot,
+production APNs connected again; current-boot logs recorded two BAA certificate
+successes, one host VM nonce signature and zero BAA failures. Sanitized evidence
+is retained under evidence/after-helpers-20261113.
+No Moonlight or owner desktop takeover is required for this route.
+
+QEMU's WebSocket endpoint accepts path `/`; noVNC's default `/websockify`
+returns HTTP 404 here. Set `path=%2F` in the client URL. Transport checks
+verified HTTP 101 at `/` and the RFB 3.8 banner through the SSH tunnel.

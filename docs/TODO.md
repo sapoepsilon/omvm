@@ -11,8 +11,9 @@ sequence and the shared-host limits.
   and complete local Setup Assistant on Linux without Apple Account sign-in.
 - [x] Capture its actual guest IOPlatformUUID through pinned SSH and verify it
   differs from kentra.
-- [ ] Enroll separate managed helper state. Verify Linux-only SEP/FairPlay runtime
-  and identity continuity.
+- [x] Enroll separate managed helper state and cold-boot through the Linux-only
+  SEP/FairPlay gate with unchanged actual guest identity. Account authentication
+  and individual service success remain separate checks.
 - [x] Verify BAA acquisition and production APNs connection before account retries:
   first Linux boot on 27.3/26C5035r obtained BAA certificates and push tokens.
 - [ ] Verify Messages activation and an authorized send/receive test.
@@ -24,10 +25,13 @@ sequence and the shared-host limits.
 The independent 27.3/26C5035r lab completed local setup on Linux. Its first-boot
 logs record two successful BAA certificate acquisitions, a host VM nonce
 signature, production APNs connected, and received push tokens; no BAA failure
-was recorded. Apple Account sign-in was skipped and separate FairPlay enrollment
-is pending. This clears the earlier push-certificate hurdle in this lab, but
-does not prove Messages or Contact Key Verification. Lab is now shut off and
-kentra was returned to development on its unchanged 27.2.1/26B131 build.
+was recorded. Apple Account sign-in was skipped. Separate FairPlay enrollment
+and a cold boot with unchanged identity are now complete; production APNs and
+BAA acquisition succeeded again after that boot. This clears the earlier
+push-certificate hurdle in this lab, but does not prove Messages or Contact
+Key Verification. The lab is running in a second coordinated service-test slot;
+kentra is cleanly stopped for that slot and must be returned afterward on its
+unchanged build.
 
 ## P1: Start Linux Apple Account helpers automatically
 
