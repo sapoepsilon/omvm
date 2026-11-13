@@ -5,29 +5,35 @@
 Requested 2026-11-12 after a new factory-restored VM completed Apple Account
 sign-in using the Linux SEP and FairPlay providers. The owner wants launching a
 VM to handle the helper setup automatically, including from the Omarchy GUI.
-Status: planned; the current experimental FairPlay services are manually staged.
+Status (2026-11-13): implemented and installed for macos-fresh. Managed helper
+process restart plus a cold guest boot recovered authenticated Apple access.
+Full Linux host reboot acceptance remains pending; see docs/apple-helpers.md.
 
 The integration belongs in the Linux host installation and VM lifecycle. The
 FairPlay adapter serves the guest through a Unix socket; it is not an account
 password or a service that needs to be baked into the macOS disk image.
 
-- [ ] Package the pinned, verified adapter and provider configuration through a
+- [x] Package the pinned, verified adapter and provider configuration through a
   repeatable installation command. Obtain required Apple assets only from the
   owner's Mac or Apple; do not commit them or VM identities.
-- [ ] Order host startup: validate the supported kernel and provider ownership,
+- [x] Order host startup: validate the supported kernel and provider ownership,
   perform the required self-test/initialization once, and require READY before
   starting dependent helpers. Never reload a provider pinned until platform reset.
-- [ ] Manage a persistent, isolated FairPlay service per VM, bound to that VM's
+- [x] Manage a persistent, isolated FairPlay service per VM, bound to that VM's
   actual stable identity. Reuse a healthy process across guest restarts. Retain
   root-private files, Unix-socket-only access and memory/CPU limits.
-- [ ] Make CLI, GUI, libvirt and watchdog startup paths wait for the same bounded
+- [x] Make CLI, GUI, libvirt and watchdog startup paths wait for the same bounded
   SEP/FairPlay readiness check before guest authentication can begin. Keep the
   GUI a thin wrapper and report actionable errors instead of launching with a
   missing helper or falling back silently to a Mac relay.
-- [ ] Resolve helper state lifetime across process/host restart using the actual
-  backend contract, then verify account recovery. Current in-memory state must
-  not be treated as durable; blindly enabling service auto-restart is insufficient.
-- [ ] Coordinate shared hardware access. Preserve the current one-active-guest
+- [x] Implement the supported identity-bound host ADI checkpoint contract and
+  verify a clean helper-process restart plus cold guest/account-service recovery.
+  The tested guest retains its own ADI provisioning file; its host checkpoint
+  stayed valid with an absent native file. Keep Restart=no.
+- [ ] Verify a normal Linux host reboot, automatic helper readiness and real
+  authenticated account recovery after disk unlock. Crash-interrupted native
+  mutations must continue to fail closed, without automatic state reset.
+- [x] Coordinate shared hardware access. Preserve the current one-active-guest
   constraint until provider requests can be serialized safely without EBUSY.
 - [ ] Add a concise status check distinguishing helper readiness, completed Apple
   Account sign-in and subsequent service errors. Never log credentials, MFA

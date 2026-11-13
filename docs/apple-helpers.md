@@ -6,6 +6,28 @@ these services through libvirt's `prepare/begin` hook. The GUI and CLI therefore
 use the same readiness gate, as do direct `virsh start` and the watchdog.
 This integration does not turn on guest autostart or change its display.
 
+## Observed recovery (2026-11-13)
+
+The three persistent units are installed and enabled for `macos-fresh`. A clean
+managed-helper stop/start followed by a cold guest boot preserved the guest UUID
+and its native ADI provisioning file. The new helper serviced fresh queue-0/3
+requests. After local login, the account overview remained signed in; stock akd
+completed fresh SRP at 07:44:45 UTC, and AppleIDSettings accepted an authenticated,
+uncached HTTP 200 device-list response at 07:45:40 UTC. No Apple password or MFA
+was entered for this recovery test.
+
+The host checkpoint remained a valid 64-byte envelope representing an absent
+emulated native file. The guest has its own provisioning file; host checkpoint
+growth is not a universal acceptance criterion. This test proves the observed
+clean process-restart/account-service path, not every Apple service, interrupted
+native-state recovery, or full host boot ordering. Other account-context errors,
+iMessage/APNs and Contact Key Verification remain unresolved.
+
+A matched offline VM snapshot and quiesced root-private helper checkpoint were
+retained before the restart. Original v22 helpers remain alive for rollback.
+Full Linux host reboot remains to be verified after coordinating other host work
+and the encrypted-root unlock. Guest watchdog and autostart are still disabled.
+
 ## Installation and migration
 
 Use the reviewed v23-or-later backend with durable-state support. Stage its
