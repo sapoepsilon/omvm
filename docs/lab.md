@@ -102,9 +102,10 @@ Official noVNC v1.6.0 (a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820) is served by a
 transient user service on loopback 6088. SSH forwards the static page and guest
 ports to loopback-only endpoints on the operator machine. A separate GPT-6.1
 Sol task uses the existing headless agent-browser CLI; its browser launch,
-screenshot path and disconnected noVNC page were verified. The desktop-app
+screenshot path and live lab desktop were verified. Local omvmlab login
+completed through the VNC browser. The desktop-app
 CUA browser host was unavailable, so its configuration and policies were left
-unchanged. A live VNC desktop check is in progress. After the helper-backed
+unchanged. The VNC route is verified. After the helper-backed
 cold boot,
 production APNs connected again; current-boot logs recorded two BAA certificate
 successes, one host VM nonce signature and zero BAA failures. Sanitized evidence
@@ -112,5 +113,6 @@ is retained under evidence/after-helpers-20261113.
 No Moonlight or owner desktop takeover is required for this route.
 
 QEMU's WebSocket endpoint accepts path `/`; noVNC's default `/websockify`
-returns HTTP 404 here. Set `path=%2F` in the client URL. Transport checks
-verified HTTP 101 at `/` and the RFB 3.8 banner through the SSH tunnel.
+returns HTTP 404 here. Use `path=.` in the noVNC 1.6 client URL: its UI
+prepends `./`, so entering `/` produces `//` rather than the required `/`.
+Transport checks verified HTTP 101 at `/` and the RFB 3.8 banner through SSH.
