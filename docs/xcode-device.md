@@ -1,4 +1,23 @@
-# Xcode → real iPhone from the `macos` guest
+# Xcode development in the Omarchy guests
+
+## Current fresh-VM result — 2026-11-12
+
+`macos-fresh` runs Xcode 27.2 (27B52). The installed application signatures and
+installer transfer hash were verified, `xcodebuild -version` succeeds, and the
+owner reports Xcode Apple Account sign-in completed after an initial loading
+period. Runtime SEP/FairPlay helpers are on Linux; a macOS relay is not required
+for this result. Development-certificate issuance, provisioning and a signed
+app's build/install/launch remain unverified in this fresh guest.
+
+The next test is to issue the development certificate inside the guest and use
+it for a sample app. Importing an existing private key is an optional separate
+route, not an established requirement. The earlier unsigned iPhone upload below
+does not prove signed execution. Fresh-image restore still used macOS.
+
+## Historical `macos` guest work — 2026-11-09
+
+The following records the pre-bridge state and fallback recipes. Its sign-in
+failure and mandatory-import conclusions are superseded by the result above.
 
 Goal: build an app in the macOS 27.2 guest (Xcode 27.2) and run it on the owner's
 iPhone, passed through with `omvm usb attach iphone` (docs/usb.md). State on
@@ -12,7 +31,7 @@ iPhone, passed through with `omvm usb attach iphone` (docs/usb.md). State on
 | Sign | **blocked on the owner**: no Apple Development identity in the guest |
 | Install + launch | waits on signing; scripted (`share/ios-run-on-device.sh`) |
 
-## Apple Account sign-in in Xcode: not viable
+## Historical Apple Account sign-in blocker (before the Linux bridge)
 
 Xcode's Settings → Accounts uses AuthKit (`akd`), which needs anisette data from
 `adid`. In this VM `akd` fails anisette provisioning every minute, for every client
