@@ -11,7 +11,7 @@
       "path": "patches/identity-20261110/README.md",
       "git_mode": "100644",
       "source_sha256": "d78f11ccd7d1fa10b32b0dd1488502aa3af3a84aab4eeaa7ff582c3f375814a7",
-      "published_sha256": "2959d3068ef9ff73c6ed4bb1afcdf9034bd57bb836ea5e0b5c1454c3fa4fdf2e",
+      "published_sha256": "af43f55bf0e1526af7910d39ec5da54359c550ce2107feb6cb407bb87664cc7d",
       "source_bytes_preserved": false,
       "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
     },
@@ -61,7 +61,7 @@
       "path": "patches/identity-20261110/hostcfg-contract.md",
       "git_mode": "100644",
       "source_sha256": "7de82d26b7dce0223c6946b13d89279632a94ac7e633fecb3711f81ffc0b6e07",
-      "published_sha256": "e815e7728ccd9e5a86d93cf4afb9bdf712d306d5c6f206f309e6c8dc28e440ad",
+      "published_sha256": "7562ff6042bc61c93675661efb471187c9461c3aca0a280ad1dc308d4459e3fc",
       "source_bytes_preserved": false,
       "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
     },
@@ -69,7 +69,7 @@
       "path": "patches/identity-20261110/linux-sep-export/README.md",
       "git_mode": "100644",
       "source_sha256": "49489af98265a0223e1eaada700b5bdf2411dfe180cdbf24dc83d07c07f3fd40",
-      "published_sha256": "ec76d0bb891cb5a94ffb9613409c23058aa3805cb0368924a8e1ad219212e083",
+      "published_sha256": "3c4bc8b1341421f208ac1c25604ca69219e410bfef68a89a1dacce05a9a57f86",
       "source_bytes_preserved": false,
       "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
     },
@@ -126,8 +126,9 @@
       "path": "patches/standalone-fairplay/aes-snapshot/0002-soc-apple-add-powered-aes-snapshot.patch",
       "git_mode": "100644",
       "source_sha256": "30a17bda003a05487242babf16b7d0805af68e32e632c4cb0ae6688cec155f4a",
-      "published_sha256": "30a17bda003a05487242babf16b7d0805af68e32e632c4cb0ae6688cec155f4a",
-      "source_bytes_preserved": true
+      "published_sha256": "454cef3f285d950f64e5bb7799c5b5940b74bf617c42770d2ecd4e73b0c740aa",
+      "source_bytes_preserved": false,
+      "change": "Makefile integration context rebased to the clean pinned kernel; snapshot driver code unchanged."
     },
     {
       "path": "patches/standalone-fairplay/aes-snapshot/0003-arm64-dts-apple-describe-disabled-t6000-aes.patch",
@@ -147,7 +148,7 @@
       "path": "patches/standalone-fairplay/aes-snapshot/README.md",
       "git_mode": "100644",
       "source_sha256": "24c62fdc0276025b716da35253725bde81c70e90dad181cfd6ba5497202f49f9",
-      "published_sha256": "c697e74d4a19ce29cab196fbabd1d5e374ae8c0954c849cbeabaaccfe7ad7743",
+      "published_sha256": "fd024458e2ce586d53e0cb51b08378ab78431e0a37109872e845391a721ed2e3",
       "source_bytes_preserved": false,
       "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
     },
@@ -241,10 +242,10 @@
   "dependencies": [
     {
       "name": "QEMU Reims",
-      "repository": "https://github.com/aquarat/qemu-reims-vgpu.git",
+      "repository": "https://github.com/steelbrain/qemu-reims-vgpu.git",
       "fairplay_frontend_and_qmp_revision": "760d1d0d29b07341409825eb55e760a52fd7d58f",
       "license": "GPL-2.0-or-later",
-      "limitation": "Other QEMU snapshots and cfg patch require their matching development baseline; not a complete pristine-QEMU build recipe."
+      "limitation": "Recorded revision is a local integration result; reconstruct from the public base/patch series in prerequisites/provenance.json before applying identity changes."
     },
     {
       "name": "ipatool",
@@ -259,14 +260,15 @@
       "name": "Linux SEP and AES integration",
       "base_commit": "b798f2b0c767e3d780896cff2f57e19e412bf954",
       "license": "GPL-2.0-only; binding/UAPI SPDX exceptions retained",
-      "limitation": "Requires prerequisite development changes; exact SEP input hashes are in patches/identity-20261110/linux-sep-export/baseline-sha256.json. Not reconstructable from pristine upstream alone."
+      "limitation": "SEP prerequisite delta is included; kernel platform/KVM patches remain a separate build dependency. AES snapshot Makefile context is rebased to the pinned base.",
+      "repository": "https://github.com/omacom/linux-aurora.git"
     }
   ],
   "validation": [
     {
       "check": "upstream_overlay_reconstruction",
       "passed": true,
-      "byte_identical_files": 26,
+      "byte_identical_files": 25,
       "documentation_only_variants": [
         "patches/identity-20261110/README.md",
         "patches/identity-20261110/hostcfg-contract.md",
@@ -274,6 +276,9 @@
         "patches/standalone-fairplay/aes-snapshot/README.md",
         "patches/standalone-fairplay/ipatool-linux-experiment.patch",
         "patches/standalone-fairplay/uid1-provider/README.md"
+      ],
+      "integration_context_variants": [
+        "patches/standalone-fairplay/aes-snapshot/0002-soc-apple-add-powered-aes-snapshot.patch"
       ]
     },
     {
@@ -323,6 +328,10 @@
       "Asahi Linux public maintainer mailing list",
       "Existing project copyright and license notices"
     ],
-    "note": "The generic statement about reconnecting a live guest is an integration limit, not a recorded user event. Operational documents and history were excluded."
+    "note": "Source-only review excludes captured private values. Preserved SEP prototype functions can emit sensitive runtime diagnostics, and a profile guard default is changed; see prerequisites/README.md before deployment."
+  },
+  "prerequisites": {
+    "path": "prerequisites/provenance.json",
+    "description": "Additional source deltas needed beneath the incremental QEMU and Linux SEP patches."
   }
 }

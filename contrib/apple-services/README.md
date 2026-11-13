@@ -36,7 +36,9 @@ flash while preserving the complete native file.
 The copied implementation files reconstruct the source checkpoint exactly.
 Five patch documents were generalized. The cumulative ipatool patch also has a
 generalized README paragraph; every resulting implementation and test file
-remains identical to the source checkpoint's patch output. The source overlay
+remains identical to the source checkpoint's patch output. The AES snapshot
+Makefile patch context was rebased onto the pinned clean kernel without changing
+the driver source. Additional prerequisite deltas are recorded separately. The source overlay
 does not recreate the omitted operational documents. Historical comments in
 the exact source snapshots still name research notes outside this overlay;
 those references are intentionally unavailable and are not build inputs.
@@ -45,7 +47,8 @@ those references are intentionally unavailable and are not build inputs.
 
 | Path | Purpose and integration boundary |
 | --- | --- |
-| `patches/identity-20261110/` | QEMU identity/mailbox snapshots, host-register changes, the FairPlay frontend and QMP fix. Some snapshots require an existing development baseline. |
+| `patches/identity-20261110/` | QEMU identity/mailbox snapshots, host-register changes, the FairPlay frontend and QMP fix. |
+| `prerequisites/` | Missing SEP and QEMU development deltas, public baseline reconstruction instructions and per-file provenance. |
 | `patches/identity-20261110/linux-sep-export/` | Incremental public attestation export; requires the exact input file hashes and earlier SEP work. |
 | `patches/standalone-fairplay/ipatool-linux-experiment.patch` | Complete cumulative Linux adapter through v23, device-provider client, durable-state implementation and tests. Applies to ipatool `3e84853e2e5d60540a5022b64895d496910144eb`. |
 | `patches/standalone-fairplay/qemu-ofr2-completion.patch` | Queue-0 completion semantics required by the Linux adapter; applies to the included `apple-fairplay.c` frontend. |
@@ -62,12 +65,13 @@ SEP/device-AES providers and the OFR2-capable QEMU frontend. Its Apple asset
 cache, per-VM identity and private provider inputs must be supplied separately;
 none are included in this overlay.
 
-The QEMU frontend/QMP checks use the Reims fork at
-`760d1d0d29b07341409825eb55e760a52fd7d58f`. The remaining QEMU and kernel
-development prerequisites are not completely bundled here. In particular,
-`cfg-host-identity.patch` expects earlier register changes, and the SEP patch
-requires the files described by its baseline manifest. Source preservation
-does not imply that all components build from pristine upstream repositories.
+The QEMU frontend/QMP checks use the local Reims integration revision
+`760d1d0d29b07341409825eb55e760a52fd7d58f`. The missing identity prerequisites
+are now included under [prerequisites/](prerequisites/README.md), with exact
+public-baseline and patch-order instructions. They reconstruct the earlier
+QEMU register/build wiring and Linux SEP state required by the incremental
+patches. Kernel platform/KVM support remains part of the separate omvm build
+flow; excluded unlicensed upstream patches are not redistributed here.
 
 ## State and hardware limitations
 
@@ -83,6 +87,11 @@ full platform reset, vetoes system sleep and has no supported ordinary unload
 or reset/abort path. Do not generalize it to another board or interpret source
 checks as hardware activation approval. No installation, service activation,
 VM start or hardware operation is part of applying this overlay.
+
+The SEP prerequisites preserve prototype changes to an xART guard default and
+raw diagnostic logging. Their [runtime caveats](prerequisites/README.md) matter
+before deployment: absence of private values in published source does not
+guarantee private runtime logs.
 
 The preserved macOS relay compiles with the macOS SDK and IOKit. Stock-policy
 execution may reject its restricted entitlement. Its successful framing is

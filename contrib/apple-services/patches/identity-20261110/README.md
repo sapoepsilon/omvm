@@ -15,9 +15,11 @@ research source for local integration, not an upstream QEMU submission.
 - `linux-sep-export/`: incremental kernel/public-attestation export patch.
 
 The FairPlay frontend and QMP patch were checked against the QEMU Reims fork
-at `760d1d0d29b07341409825eb55e760a52fd7d58f`. Other snapshots depend on the
-matching development baseline; this directory is not a complete QEMU build
-recipe. Do not overwrite an unrelated QEMU tree with the snapshots.
+at `760d1d0d29b07341409825eb55e760a52fd7d58f`. The earlier register changes and build wiring are preserved in
+[the prerequisite directory](../../prerequisites/README.md), together with the
+public patch series that reconstructs that local integration revision. Follow
+its destination mapping and patch order rather than copying into an unrelated
+QEMU checkout.
 
 For the Linux FairPlay adapter, apply
 `../standalone-fairplay/qemu-ofr2-completion.patch` to the frontend as well.

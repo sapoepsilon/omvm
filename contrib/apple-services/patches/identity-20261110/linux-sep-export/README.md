@@ -2,8 +2,9 @@
 
 This incremental patch requires a Linux SEP development baseline with prior
 SEP research changes. `baseline-sha256.json` records the exact required input
-files. Those earlier changes are not included here, so a pristine upstream
-kernel checkout is insufficient. Check every input hash before applying with
+files. Apply `../../../prerequisites/linux-sep-prerequisites.patch` to the
+pinned kernel base first; the prerequisite README records the exact revision.
+Check every input hash before applying with
 `git apply --check`, then `git apply`, from the matching source root.
 
 It adds two CAP_SYS_ADMIN-only, bounded ioctls:

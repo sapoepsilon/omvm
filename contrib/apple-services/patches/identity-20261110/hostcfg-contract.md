@@ -27,7 +27,7 @@ The save/restore serializer at `0x1000C96FC` names internal 0x3AC `host_build_di
 
 ## Incremental change
 
-`cfg-host-identity.patch` requires a development `hw/vmapple/cfg.c` baseline with earlier serial/MLB changes already present; it is not a standalone patch for pristine upstream QEMU. The original `mlb` member actually occupies offset 0x560; the older comments were incorrect. An anonymous union keeps its legacy CLI behavior while naming the native digest field correctly.
+`cfg-host-identity.patch` requires the earlier serial/MLB changes in `hw/vmapple/cfg.c`. Apply `../../prerequisites/qemu-identity-prerequisites.patch` first, following the prerequisite directory's QEMU baseline instructions. The original `mlb` member actually occupies offset 0x560; the older comments were incorrect. An anonymous union keeps its legacy CLI behavior while naming the native digest field correctly.
 
 Only the presence of `OMVM_IDENTITY_CERT_CHAIN` enables the new population. The host build is Linux `uname().release`, the same complete input used by the genuine identity archive's `BuildVersion`. The digest covers all release bytes; the build register contains its first 32 bytes. Physical host serial comes only from the read-only live Linux DT `serial-number` property. Trailing NUL padding is removed; empty, over-32-byte, embedded-NUL or nonprintable values fail startup. A full 32-byte serial/build requires no terminating NUL.
 

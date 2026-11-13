@@ -5,9 +5,9 @@ T6001/J314c board family. They do not implement the UID1-derived FairPlay
 AES transform.
 
 Apply in numeric order to the inspected kernel source based on
-`b798f2b0c767e3d780896cff2f57e19e412bf954` plus prerequisite SEP/AES
-development changes. Patch 2 requires that Kconfig/Makefile context;
-inspect those integration hunks when applying to another tree.
+`b798f2b0c767e3d780896cff2f57e19e412bf954`. Patch 2's Makefile context is
+rebased to that clean base, without the unrelated earlier AES draft. Inspect
+the integration hunks before applying to another tree.
 
 1. `0001-dt-bindings-apple-t6000-aes.patch`: revision-3 resource binding.
 2. `0002-soc-apple-add-powered-aes-snapshot.patch`: separately named driver,
@@ -32,7 +32,8 @@ Validate the binding and default-disabled/opt-in DTBs against the target board;
 resource addresses and interrupt routing must not be generalized to other
 boards. A patch applying cleanly does not establish safe hardware operation.
 
-The prerequisite development tree is not fully contained in this overlay.
-Check Kconfig conflicts with any other AES driver. Keep the node disabled until
+The series was checked against the pinned kernel base. The separate SEP
+prerequisite patch touches different files. Check Kconfig conflicts with any
+other AES driver. Keep the node disabled until
 a reviewed boot and rollback plan is ready. These source patches contain no
 firmware dump, compiled DTB, module binary or machine identifier.

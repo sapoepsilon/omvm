@@ -120,17 +120,15 @@ index 9001a70..1cb2586 100644
  	tristate
  	depends on ARCH_APPLE || COMPILE_TEST
 diff --git a/drivers/soc/apple/Makefile b/drivers/soc/apple/Makefile
-index 34ede63..29fe055 100644
 --- a/drivers/soc/apple/Makefile
 +++ b/drivers/soc/apple/Makefile
-@@ -1,6 +1,7 @@
+@@ -1,4 +1,6 @@
  # SPDX-License-Identifier: GPL-2.0-only
- 
- obj-$(CONFIG_APPLE_SIO_AES) += apple-sio-aes.o
++
 +obj-$(CONFIG_APPLE_SIO_AES_SNAPSHOT) += apple-sio-aes-snapshot.o
  
- obj-$(CONFIG_APPLE_DBGVIEW) += apple-dbgview.o
- apple-dbgview-y = dbgview.o
+ obj-$(CONFIG_APPLE_DOCKCHANNEL) += apple-dockchannel.o
+ apple-dockchannel-y = dockchannel.o
 diff --git a/drivers/soc/apple/apple-sio-aes-snapshot.c b/drivers/soc/apple/apple-sio-aes-snapshot.c
 new file mode 100644
 index 0000000..4103e75
