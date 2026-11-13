@@ -7,12 +7,18 @@ goal uses a newly restored `omvm-lab` with its own factory machine identifier,
 native default serial, network address, disk/auxiliary storage and managed
 FairPlay checkpoint. Do not copy kentra's signed-in disk, account or identifier.
 
-The official macOS 27.3 beta (26C5035r) IPSW download is in progress. No lab
-domain or guest boot is yet established. The prior 27.3 in-place attempt in
-what is now kentra returned to 27.2.1; it did not test APNs on the beta.
-A direct fresh restore avoids that handoff, but compatibility with the current
-Linux QEMU/27-era AVPBooter remains unverified. Preserve separate failed lab
-artifacts if boot fails; do not change kentra's firmware or disks to compensate.
+The official macOS 27.3 beta (26C5035r) fresh restore completed on the native
+Mac and stopped without a Setup Assistant boot. Its sparse disk/full auxiliary
+storage/profile transfer passed verification. The distinct omvm-lab domain is
+defined, shut off, with 4 CPUs and 8 GiB RAM. Local setup, actual guest UUID
+capture and separate managed-helper enrollment remain pending. kentra and its
+launcher defaults were unchanged during staging.
+
+The prior 27.3 in-place attempt in what is now kentra returned to 27.2.1; it did
+not test APNs on the beta. Direct restore avoids that handoff, but the current
+Linux QEMU/27.2-era AVPBooter has not yet booted this lab. Preserve separate
+failed lab artifacts if boot fails; do not change kentra's firmware or disks
+to compensate.
 
 Initial restore may use native Virtualization.framework. Restore completion
 must leave the new VM stopped, with no native Setup Assistant/account boot.

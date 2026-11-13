@@ -18,9 +18,10 @@ sequence and the shared-host limits.
 - [ ] Verify normal host reboot recovery with matched backups, HC coordination,
   actual authenticated guest access, and usable kentra afterward.
 
-The official 27.3/26C5035r restore image is being downloaded for a fresh-restore
-experiment. This avoids the previous in-place update handoff; successful Linux
-boot and any APNs fix remain unverified. kentra remains on its current OS.
+The official 27.3/26C5035r fresh restore and stopped paired transfer completed;
+omvm-lab is defined shut off with a distinct factory identity. Local setup,
+Linux boot, separate helper enrollment and any APNs fix remain unverified.
+kentra remains on its current OS with its original account/development state.
 
 ## P1: Start Linux Apple Account helpers automatically
 
