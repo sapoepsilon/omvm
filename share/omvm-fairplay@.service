@@ -20,5 +20,4 @@ MemoryMax=3G
 CPUQuota=200%
 LimitCORE=0
 
-[Install]
-WantedBy=multi-user.target
+# Started on demand by the serialized libvirt guest gate.

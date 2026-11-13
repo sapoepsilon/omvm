@@ -66,6 +66,10 @@ current synchronized clock. Deployment did not restart the helper or guest.
 
 ## Installation and migration
 
+The on-demand per-VM startup change below is prepared in source as of
+2026-11-13; deployment is pending the stopped-guest lab enrollment window.
+The running kentra helper and its earlier boot enablement are unchanged.
+
 Use the reviewed v23-or-later backend with durable-state support. Stage its
 binary, each VM's existing 16-byte identifier and the complete offline Apple
 asset cache in root-owned directories under `/var/lib/omvm`. All ancestors must
@@ -107,8 +111,12 @@ omvm helpers install-hook
 ```
 
 The installer verifies the manifest, installs root-owned code/units and a narrow
-sudo rule for the owning UID, and **enables without starting** the services.
-Changed installed files are retained in a root-private backup directory.
+sudo rule for the owning UID. It enables the shared SEP/UID1 host prerequisites
+and removes per-VM helper boot links **without stopping running helpers**.
+The existing libvirt gate automatically starts the selected VM helper under its
+one-guest lock. Helpers remain running afterward for state continuity; eager
+parallel initialization of every enrolled helper is avoided. Changed installed
+files are retained in a root-private backup directory.
 `install-hook` updates only the recognized existing omvm hook, preserving its
 environment; it forwards the phase and original domain XML. It does not regenerate
 a domain. Preserve any custom hook if this operation reports an unfamiliar shape.
@@ -135,6 +143,13 @@ the expected root socket peers, initialized UID1 provider and live service; it
 does not prove Apple Account sign-in, APNs, iMessage or Contact Key Verification.
 
 ## Startup and failure behavior
+
+Per-VM helpers are static, on-demand units. Normal host boot starts SEP/UID1;
+the next guest launch starts and checks its helper before admitting QEMU.
+Do not enable per-VM helpers for `multi-user.target` or manually start a new
+helper against another running guest. The explicit enrollment/recovery commands
+above require all guests stopped. A helper being inactive before any guest has
+launched is expected, not a reason to reset its checkpoint or provider.
 
 - `omvm-uid1-provider.service` validates artifacts and cold-boot ownership. It
   loads the reviewed driver once, checks its public AES self-test, initializes

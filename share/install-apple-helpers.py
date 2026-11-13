@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install reviewed helper files and enable boot units without starting them."""
+"""Install reviewed helpers; enable host prerequisites and launch VM helpers on demand."""
 import argparse
 import importlib.util
 import json
@@ -40,11 +40,14 @@ def main():
     cfg=helpers.validate(json.loads(data))
     helpers.require(Path('/etc/systemd/system/omvm-sep-identity.service').is_file(),
                     'install the reviewed SEP identity service first')
-    if helpers.CONFIG.exists() and helpers.secure_file(helpers.CONFIG)!=data:
+    managed_names=set(cfg['vms'])
+    if helpers.CONFIG.exists():
         old=helpers.config()
-        for name in set(old['vms'])|set(cfg['vms']):
-            r=subprocess.run(['/usr/bin/systemctl','is-active','--quiet',helpers.unit(name)])
-            helpers.require(r.returncode!=0,'stop persistent FairPlay services before changing their manifest')
+        managed_names.update(old['vms'])
+        if helpers.secure_file(helpers.CONFIG)!=data:
+            for name in managed_names:
+                r=subprocess.run(['/usr/bin/systemctl','is-active','--quiet',helpers.unit(name)])
+                helpers.require(r.returncode!=0,'stop persistent FairPlay services before changing their manifest')
     content=f"#{cfg['allow_uid']} ALL=(root) NOPASSWD: /usr/local/libexec/omvm-apple-helpers gate *, /usr/local/libexec/omvm-apple-helpers status *\n"
     with tempfile.NamedTemporaryFile(mode='w',prefix='omvm-sudoers-',delete=True) as f:
         f.write(content); f.flush()
@@ -70,9 +73,13 @@ def main():
     for name in cfg['vms']:
         helpers.private_dir(helpers.paths(name)[1].parent)
     helpers.command(['/usr/bin/systemctl','daemon-reload'])
-    helpers.command(['/usr/bin/systemctl','enable','omvm-uid1-provider.service','omvm-sep-identity.service']+
-                    [helpers.unit(n) for n in cfg['vms']])
-    print('Installed and enabled helpers. No service was started or restarted.')
+    helpers.command(['/usr/bin/systemctl','enable','omvm-uid1-provider.service','omvm-sep-identity.service'])
+    # Eager sibling startup bypasses the one-guest gate and may overlap hardware
+    # access. The existing libvirt gate starts and checks the selected helper.
+    # Remove old boot links without --now: running helper state stays intact.
+    helpers.command(['/usr/bin/systemctl','disable']+[helpers.unit(n) for n in sorted(managed_names)])
+    print('Installed helpers. Host prerequisites enabled; VM helpers start at guest launch.')
+    print('No service was started, stopped or restarted.')
     print('As the VM owner, run: omvm helpers install-hook')
     print('For each new helper state, explicitly enroll the stopped VM before starting its service.')
 
