@@ -51,3 +51,34 @@ documented. Native macOS factory restore remains a separate image-creation step.
   followed by dismissal and an already-signed-in account overview. This does not
   establish that the incorrect code was accepted. The exact cause of the repeated
   prompt remains unverified; avoid credential retries based only on stale UI.
+
+## P2: Create and install a new VM entirely from Linux
+
+Requested for feasibility assessment 2026-11-12. Status: unproven; no Linux-only
+blank-disk install has been attempted. The successful fresh test used native
+Virtualization.framework to restore a new VM before copying it to Linux. Local
+account setup and Apple Account sign-in then occurred on Linux. The SEP/FairPlay
+work proves the tested authentication path, not a replacement restore pipeline.
+
+- [ ] Map the native restore inputs and outputs: factory hardware model, new
+  machine identifier, auxiliary/NVRAM storage, disk layout, recovery boot and
+  Apple personalization. Determine which steps actually require the SEP bridge.
+- [ ] Download and verify the official IPSW on Linux. Establish a reproducible
+  way to obtain all required Apple boot/provider assets from official downloads,
+  rather than relying on a preinstalled Mac or another VM's restored disk.
+- [ ] Evaluate booting Apple's recovery/restore environment with the existing
+  virtual hardware and the restore protocol needed to install an empty disk.
+  Physical-device DFU tools are not evidence of VM restore support.
+- [ ] Validate a distinct new VM identity, full install, first boot, stock Apple
+  Account sign-in and guest restart with no native macOS host step. Preserve the
+  existing signed-in guests and do not mount or modify their live disks.
+
+Acceptance: starting with Linux and official Apple downloads, create a new
+personalized VM and complete installation/sign-in without a pre-restored image,
+borrowed identity, or live native Mac service. Continue distinguishing this from
+automatic helper startup for an already installed guest.
+
+Sources checked: [Apple's VM installation API](https://developer.apple.com/documentation/virtualization/installing-macos-on-a-virtual-machine)
+and the [current upstream KVM experiment](https://github.com/steelbrain/experiment-macOS-arm64-on-asahi-linux-arm64).
+The latter uses Ambrosia boot firmware but explicitly requires an already
+installed/restored guest; its boot success does not establish this install path.
