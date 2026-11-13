@@ -112,6 +112,7 @@ env = {
 env.setdefault("ID_SELFDESC", "1")
 env.setdefault("ID_S3", "1")
 env.setdefault("ID_BLEN64", "1")
+env.setdefault("ID_BO4", "1")
 for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
     if os.environ.get(_k):
         env[_k] = os.environ[_k]

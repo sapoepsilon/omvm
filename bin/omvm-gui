@@ -59,7 +59,6 @@ APP_RE = APP_ID.replace(".", "\\\\.")  # Lua string for the regex ^dev\.omvm\.Gu
 HYPR_RULE = (f'o.window("^{APP_RE}$", {{ tag = "+floating-window" }})'
              "  -- omvm-gui: float + center like other Omarchy tools")
 THEME_DIRS = [HOME / ".local/state/omarchy/current", XDG_CONFIG / "omarchy/current"]
-TAILSCALE_FALLBACK = "100.72.93.99"
 # libvirt domstate -> (label, css class)
 STATES = {
     "running": ("Running", "success"),
@@ -844,11 +843,11 @@ def main_gui():
 
         def refresh_moonlight(self, log):
             def got_ip(rc, out, err):
-                ip = out.split()[0] if rc == 0 and out.strip() else TAILSCALE_FALLBACK
+                ip = out.split()[0] if rc == 0 and out.strip() else None
                 for r, name, conf, port, unit, kids in self.host_rows:
                     self.run(["systemctl", "--user", "is-active", unit], log=log, label=f"{name} host", ok=(0, 3),
                              quiet=True, done=lambda rc, out, err, r=r, ip=ip, port=port: r.set_subtitle(
-                                 f"{ip}:{port} · sunshine {out.strip() or '?'}"))
+                                 (f"{ip}:{port}" if ip else f"address unavailable (port {port})") + f" · sunshine {out.strip() or '?'}"))
                     for k in kids:
                         r.remove(k)
                     kids.clear()
