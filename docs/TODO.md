@@ -7,21 +7,27 @@ Create a new independent lab guest; never use kentra's account session or
 platform identity as its template. See [lab.md](lab.md) for the acceptance
 sequence and the shared-host limits.
 
-- [ ] Restore a new omvm-lab identity and blank disk, transfer the stopped pair,
+- [x] Restore a new omvm-lab identity and blank disk, transfer the stopped pair,
   and complete local Setup Assistant on Linux without Apple Account sign-in.
-- [ ] Capture its actual guest IOPlatformUUID and enroll separate managed helper
-  state. Verify Linux-only SEP/FairPlay runtime and identity continuity.
-- [ ] Test BAA acquisition and production APNs connection before account retries,
-  then verify Messages activation and an authorized send/receive test.
+- [x] Capture its actual guest IOPlatformUUID through pinned SSH and verify it
+  differs from kentra.
+- [ ] Enroll separate managed helper state. Verify Linux-only SEP/FairPlay runtime
+  and identity continuity.
+- [x] Verify BAA acquisition and production APNs connection before account retries:
+  first Linux boot on 27.3/26C5035r obtained BAA certificates and push tokens.
+- [ ] Verify Messages activation and an authorized send/receive test.
 - [ ] Test Contact Key Verification after Messages and its prerequisites work;
   distinguish its result from the separately deferred Keychain-sync diagnosis.
 - [ ] Verify normal host reboot recovery with matched backups, HC coordination,
   actual authenticated guest access, and usable kentra afterward.
 
-The official 27.3/26C5035r fresh restore and stopped paired transfer completed;
-omvm-lab is defined shut off with a distinct factory identity. Local setup,
-Linux boot, separate helper enrollment and any APNs fix remain unverified.
-kentra remains on its current OS with its original account/development state.
+The independent 27.3/26C5035r lab completed local setup on Linux. Its first-boot
+logs record two successful BAA certificate acquisitions, a host VM nonce
+signature, production APNs connected, and received push tokens; no BAA failure
+was recorded. Apple Account sign-in was skipped and separate FairPlay enrollment
+is pending. This clears the earlier push-certificate hurdle in this lab, but
+does not prove Messages or Contact Key Verification. Lab is now shut off and
+kentra was returned to development on its unchanged 27.2.1/26B131 build.
 
 ## P1: Start Linux Apple Account helpers automatically
 

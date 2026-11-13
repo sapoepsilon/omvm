@@ -9,16 +9,26 @@ FairPlay checkpoint. Do not copy kentra's signed-in disk, account or identifier.
 
 The official macOS 27.3 beta (26C5035r) fresh restore completed on the native
 Mac and stopped without a Setup Assistant boot. Its sparse disk/full auxiliary
-storage/profile transfer passed verification. The distinct omvm-lab domain is
-defined, shut off, with 4 CPUs and 8 GiB RAM. Local setup, actual guest UUID
-capture and separate managed-helper enrollment remain pending. kentra and its
-launcher defaults were unchanged during staging.
+storage/profile transfer passed verification. The 4 CPU/8 GiB lab then booted
+on Omarchy with the existing pinned QEMU and 27.2-era AVPBooter. Stock local
+Setup Assistant completed with Apple Account skipped. Pinned SSH verified the
+actual build, completed setup, sub-second clock agreement and a guest
+IOPlatformUUID distinct from kentra. Separate FairPlay enrollment is pending.
 
-The prior 27.3 in-place attempt in what is now kentra returned to 27.2.1; it did
-not test APNs on the beta. Direct restore avoids that handoff, but the current
-Linux QEMU/27.2-era AVPBooter has not yet booted this lab. Preserve separate
-failed lab artifacts if boot fails; do not change kentra's firmware or disks
-to compensate.
+The first Linux boot successfully acquired two BAA certificates and signed a
+nonce with the host VM identity. Production APNs reported connected, and
+identityservicesd logged received push tokens. The bounded first-boot report
+recorded no BAA failure. This is evidence that the earlier push-certificate
+hurdle is cleared in this fresh 27.3 lab; Apple Account, Messages activation,
+send/receive and Contact Key Verification remain untested here. Private,
+sanitized evidence is retained under the lab's evidence/first-boot-20261113.
+
+Lab is cleanly shut off. The first kentra return boot reached SSH at 19:44 UTC
+but shut down ten seconds later for an undetermined reason. A normal restart
+was verified repeatedly over pinned SSH and returned to the owner development
+pane. kentra keeps its original 27.2.1/26B131 build, identity and account state;
+no host or helper process was changed. Obtain a new coordinated guest slot
+before helper enrollment or further lab boots.
 
 Initial restore may use native Virtualization.framework. Restore completion
 must leave the new VM stopped, with no native Setup Assistant/account boot.
