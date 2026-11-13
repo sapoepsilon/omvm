@@ -29,11 +29,14 @@ was recorded. Apple Account sign-in was skipped. Separate FairPlay enrollment
 and a cold boot with unchanged identity are now complete; production APNs and
 BAA acquisition succeeded again after that boot. This clears the earlier
 push-certificate hurdle in this lab, but does not prove Messages or Contact
-Key Verification. The second coordinated service-test slot has ended. The lab
-is cleanly stopped with its verified native X11 setup retained; kentra is
-running again on its unchanged build with pinned SSH and both locks released.
-Native Sol control is waiting at the remote CLI MCP permission prompt.
-Coordinate a new lab slot before any further GUI/account test.
+Key Verification. A subsequent owner-authorized guest switch completed at 21:08 UTC:
+kentra cleanly shut off and the lab booted through normal session libvirt,
+with pinned SSH verified on 27.3/26C5035r and its native Reims window mapped.
+Domains/profiles and helper PIDs remained unchanged; watchdogs remain off and
+both operation locks were released. Native input remains unverified: the
+groundwork session has no native CUA surface, and the prior remote Sol CLI
+permission prompt is historical. Arrange an approved native GUI operator
+before account input; do not repeat the completed switch or enrollment.
 
 ## P1: Start Linux Apple Account helpers automatically
 

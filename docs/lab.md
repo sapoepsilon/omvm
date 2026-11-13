@@ -2,13 +2,14 @@
 
 ## Scope and current phase — 2026-11-13
 
-Latest groundwork instruction: **do not touch kentra**. Live inspection found
-kentra running and the lab shut off. The source/skill handoff is complete; a
-new exclusive lab slot and an approved native GUI operator remain necessary.
-Do not stop kentra to obtain that slot under the current instruction. The
-private `omvm-apple-services` skill records the current acceptance ledger and
-the verified Mac-source import. Historical setup steps below are completed
-work, not a request to repeat enrollment or the former slot-switch scripts.
+Latest owner clarification: **turn off kentra and turn on omvm-lab**. The clean
+guest switch completed at 21:08 UTC: kentra cleanly shut off, lab running with
+pinned SSH on 27.3/26C5035r and its native XWayland Reims window mapped.
+Kentra contents, account, configuration and helper state remain protected. The source/skill handoff is complete. An approved
+native GUI operator is still needed for account input. The private
+`omvm-apple-services` skill records the acceptance ledger and verified
+Mac-source import. Historical setup steps below are completed work, not a
+request to repeat enrollment or execute archived slot-switch scripts.
 
 The retained `kentra` guest is the owner's development VM. The resumed service
 goal uses a newly restored `omvm-lab` with its own factory machine identifier,
