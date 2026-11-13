@@ -1,6 +1,8 @@
 // latprobe: full-screen window that turns white when the pointer is on the right half and
 // black on the left, the moment the mouse-moved event arrives; prints "m <wall> <x> <side>"
 // per event, and answers "p" on stdin with "t <wall>" (for host/guest clock offset).
+// "a <seconds> [hz]" on stdin flips the colour on a timer (120 Hz unless given) for that long:
+// guest frames with no pointer motion on the host (prints "a done").
 import AppKit
 import QuartzCore
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -38,6 +40,21 @@ Thread.detachNewThread {
     while let l = readLine() {
         if l == "p" { print(String(format: "t %.6f", now())) }
         if l == "q" { exit(0) }
+        let f = l.split(separator: " ")
+        if f.count >= 2, f[0] == "a", let secs = Double(f[1]) {
+            let hz = f.count > 2 ? (Double(f[2]) ?? 120) : 120
+            DispatchQueue.main.async {
+                let end = now() + secs
+                var on = false
+                Timer.scheduledTimer(withTimeInterval: 1.0 / hz, repeats: true) { t in
+                    on.toggle()
+                    CATransaction.begin(); CATransaction.setDisableActions(true)
+                    v.layer!.backgroundColor = (on ? NSColor.darkGray : NSColor.black).cgColor
+                    CATransaction.commit()
+                    if now() > end { t.invalidate(); print("a done") }
+                }
+            }
+        }
     }
     exit(0)
 }

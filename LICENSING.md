@@ -92,3 +92,13 @@ Apple's terms still apply to what you run:
 
 "macOS", "Xcode" and "Apple" are trademarks of Apple Inc. omvm is not
 affiliated with or endorsed by Apple.
+
+## Experimental Apple-services source overlay
+
+`contrib/apple-services/` preserves source changes under their existing licenses.
+QEMU derivatives remain GPL-2.0-or-later; Linux source retains per-file SPDX
+terms. The ipatool adapter patch is MIT, with its notice in
+[contrib/apple-services/licenses/ipatool-MIT.txt](contrib/apple-services/licenses/ipatool-MIT.txt).
+The overlay includes only a change patch for the unlicensed upstream provisioning
+script, not that entire implementation. See its [source guide](contrib/apple-services/README.md)
+for exact dependency revisions, attribution and excluded material.

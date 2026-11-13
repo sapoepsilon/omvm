@@ -1,0 +1,129 @@
+--- a/hw/vmapple/cfg.c
++++ b/hw/vmapple/cfg.c
+@@ -16,6 +16,7 @@
+ #include "qemu/module.h"
+ #include "qapi/error.h"
+ #include "net/net.h"
++#include <sys/utsname.h>
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleCfgState, VMAPPLE_CFG)
+ 
+@@ -46,14 +47,29 @@
+     uint8_t pad4[2];
+     uint8_t reserved[0xa0];   /* 0x060 */
+     uint32_t cpu_ids[0x80];   /* 0x100 */
+-    uint8_t scratch[0x200];   /* 0x180 */
+-    char serial[32];          /* 0x380 */
+-    char unk8[32];            /* 0x3a0 */
+-    char model[32];           /* 0x3c0 */
+-    char mlb[32];             /* 0x3e0, main logic board serial */
+-    uint32_t unk10;           /* 0x400 */
+-    char soc_name[32];        /* 0x404 */
++    uint8_t scratch[0x200];   /* 0x300 */
++    char serial[32];          /* 0x500 */
++    char unk8[32];            /* 0x520 */
++    char model[32];           /* 0x540 */
++    union {
++        char mlb[32];         /* Legacy CLI bytes; native offset0x560 is a digest. */
++        uint8_t host_build_digest[32]; /* 0x560, SHA256(full host build bytes). */
++    };
++    uint32_t unk10;           /* 0x580 */
++    char soc_name[32];        /* 0x584, first32 of native64-byte CPU name. */
++    uint8_t reserved_host[0x650 - 0x5a4];
++    char host_serial[32];     /* 0x650, physical host serial, padded if shorter. */
++    char host_build[32];      /* 0x670, first32 host build bytes, no required NUL. */
+ } VMAppleCfg;
++
++G_STATIC_ASSERT(offsetof(VMAppleCfg, serial) == 0x500);
++G_STATIC_ASSERT(offsetof(VMAppleCfg, model) == 0x540);
++G_STATIC_ASSERT(offsetof(VMAppleCfg, host_build_digest) == 0x560);
++G_STATIC_ASSERT(offsetof(VMAppleCfg, soc_name) == 0x584);
++G_STATIC_ASSERT(offsetof(VMAppleCfg, host_serial) == 0x650);
++G_STATIC_ASSERT(offsetof(VMAppleCfg, host_build) == 0x670);
++G_STATIC_ASSERT(sizeof(VMAppleCfg) == 0x690);
++G_STATIC_ASSERT(sizeof(VMAppleCfg) <= VMAPPLE_CFG_SIZE);
+ 
+ struct VMAppleCfgState {
+     SysBusDevice parent_obj;
+@@ -103,6 +119,70 @@
+             return; \
+         } \
+     } while (0)
++
++/* Native AVP offsets 0x560 and 0x670 contain a SHA-256 build digest and
++ * the first32 build bytes. The hash covers the FULL unpadded build string. */
++static bool vmapple_cfg_apply_host_identity(VMAppleCfg *cfg,
++                                            const char *build, size_t build_len,
++                                            const uint8_t *serial, size_t serial_len,
++                                            Error **errp)
++{
++    uint8_t digest[32];
++    gsize digest_len = sizeof(digest);
++    g_autoptr(GChecksum) hash = NULL;
++
++    if (!cfg || !build || !build_len || memchr(build, 0, build_len) || !serial) {
++        error_setg(errp, "vmapple cfg: invalid physical host identity input");
++        return false;
++    }
++    while (serial_len && !serial[serial_len - 1]) {
++        serial_len--;
++    }
++    if (!serial_len || serial_len > sizeof(cfg->host_serial)) {
++        error_setg(errp, "vmapple cfg: physical host serial must contain 1..32 bytes");
++        return false;
++    }
++    for (size_t i = 0; i < serial_len; i++) {
++        if (serial[i] < 0x21 || serial[i] > 0x7e) {
++            error_setg(errp, "vmapple cfg: physical host serial is not printable ASCII");
++            return false;
++        }
++    }
++    hash = g_checksum_new(G_CHECKSUM_SHA256);
++    g_checksum_update(hash, (const uint8_t *)build, build_len);
++    g_checksum_get_digest(hash, digest, &digest_len);
++    memcpy(cfg->host_build_digest, digest, sizeof(digest));
++    memset(cfg->host_serial, 0, sizeof(cfg->host_serial));
++    memcpy(cfg->host_serial, serial, serial_len);
++    memset(cfg->host_build, 0, sizeof(cfg->host_build));
++    memcpy(cfg->host_build, build, MIN(build_len, sizeof(cfg->host_build)));
++    return true;
++}
++
++static bool vmapple_cfg_load_host_identity(VMAppleCfg *cfg, Error **errp)
++{
++    struct utsname host;
++    g_autofree char *serial = NULL;
++    gsize serial_len;
++
++    /* Match the strict external identity loader's explicit opt-in. Legacy
++     * configurations retain their existing bytes and command-line behavior. */
++    if (!getenv("OMVM_IDENTITY_CERT_CHAIN")) {
++        return true;
++    }
++    if (uname(&host) < 0) {
++        error_setg(errp, "vmapple cfg: cannot read Linux host build");
++        return false;
++    }
++    if (!g_file_get_contents("/sys/firmware/devicetree/base/serial-number",
++                             &serial, &serial_len, NULL)) {
++        error_setg(errp, "vmapple cfg: cannot read physical Linux DT serial");
++        return false;
++    }
++    return vmapple_cfg_apply_host_identity(cfg, host.release,
++                                           strnlen(host.release, sizeof(host.release)),
++                                           (const uint8_t *)serial, serial_len, errp);
++}
+ 
+ static void vmapple_cfg_realize(DeviceState *dev, Error **errp)
+ {
+@@ -136,6 +216,10 @@
+     s->cfg.unk6 = 1;
+     s->cfg.unk7 = 0;
+     s->cfg.unk10 = 1;
++
++    if (!vmapple_cfg_load_host_identity(&s->cfg, errp)) {
++        return;
++    }
+ 
+     if (s->cfg.nr_cpus > ARRAY_SIZE(s->cfg.cpu_ids)) {
+         error_setg(errp,

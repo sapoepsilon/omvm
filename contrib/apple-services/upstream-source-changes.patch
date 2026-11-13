@@ -1,0 +1,105 @@
+diff --git a/images/host/macos-restore.sh b/images/host/macos-restore.sh
+index 94928b7..8dc20d2 100755
+--- a/images/host/macos-restore.sh
++++ b/images/host/macos-restore.sh
+@@ -10,7 +10,7 @@
+ # 2. downloads the pinned UniversalMac IPSW from Apple's CDN (resumable) and
+ #    checks its SHA-1;
+ # 3. runs scripts/provision-on-macos.sh (macosvm --restore) into
+-#    WORKDIR/<bundle>/guest, forcing the version-1 hardware model for Tahoe;
++#    WORKDIR/<bundle>/guest, using the restore image's factory hardware model;
+ # 4. copies this Mac's AVPBooter into WORKDIR/<bundle>/extras and records the
+ #    host macOS version and the macosvm commit there.
+ #
+@@ -26,12 +26,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ MACOSVM_REPO="${MACOSVM_REPO:-https://github.com/s-u/macosvm.git}"
+ MACOSVM_COMMIT="${MACOSVM_COMMIT:-c21fd7414bab38b0a2474b351b90378bdef98325}"
+ 
+-# Ventura's VZMacHardwareModel descriptor, which Tahoe must be restored with:
+-# binary plist {DataRepresentationVersion 1, PlatformVersion 2,
+-# MinimumSupportedOS [13,0,0]}. Generic (identical in every VZ macOS VM of
+-# this platform), not a machine identity. Tahoe's own default descriptor
+-# (DataRepresentationVersion 2) fails with
+-# "VZErrorDomain -9 … Failed to get current host key".
++# Historical compatibility descriptor: DataRepresentationVersion 1,
++# PlatformVersion 2, MinimumSupportedOS [13,0,0]. It disables native strong
++# identity. Use only with MACOSVM_COMPAT_HWMODEL_V1=1, not for iCloud sign-in.
+ HWMODEL_V1_B64="YnBsaXN0MDDTAQIDBAUGXxAZRGF0YVJlcHJlc2VudGF0aW9uVmVyc2lvbl8QD1BsYXRmb3JtVmVyc2lvbl8QEk1pbmltdW1TdXBwb3J0ZWRPUxABEAKjBwgIEA0QAAgPKz1SVFZaXAAAAAAAAAEBAAAAAAAAAAkAAAAAAAAAAAAAAAAAAABe"
+ 
+ case "$target" in
+@@ -41,7 +38,6 @@ tahoe)
+     IPSW_SHA1=177baf85518c6e9cebf83990e11e59259b5c97dd
+     BUNDLE=tahoe-26.4-25E246-restore
+     DISK_SIZE=160g CPUS=8 RAM=16g GUEST_MAC=52:54:00:76:61:71
+-    hwmodel="$HWMODEL_V1_B64"
+     ;;
+ ventura)
+     IPSW_NAME=UniversalMac_13.6_22G120_Restore.ipsw
+@@ -49,12 +45,32 @@ ventura)
+     IPSW_SHA1=a1675f2c8412122a5e796981571b0269a966708e
+     BUNDLE=ventura-13.6-22G120-restore
+     DISK_SIZE=64g CPUS=4 RAM=8g GUEST_MAC=52:54:00:76:61:70
+-    hwmodel=""          # Ventura's default descriptor is already version 1
+     ;;
+ *) echo "usage: $0 tahoe|ventura [WORKDIR]" >&2; exit 2 ;;
+ esac
+ 
+ die() { echo "error: $*" >&2; exit 1; }
++# Never fall back to legacy identity silently, including after a restore error.
++restore_env=(env -u MACOSVM_HWMODEL_B64)
++hwmodel_provenance="restore-image factory default (no override)"
++case "${MACOSVM_COMPAT_HWMODEL_V1:-0}" in
++0) ;;
++1)
++    test "$target" = tahoe || die "legacy v1 compatibility mode is only for tahoe"
++    test -z "${MACOSVM_HWMODEL_B64:-}" || die "choose a caller hardware-model override OR legacy v1 compatibility mode"
++    restore_env+=("MACOSVM_HWMODEL_B64=$HWMODEL_V1_B64")
++    hwmodel_provenance="legacy v1 compatibility override (explicit opt-in; not iCloud eligible)"
++    echo "WARNING: legacy v1 compatibility mode is not iCloud eligible; it disables native strong identity." >&2
++    ;;
++*) die "MACOSVM_COMPAT_HWMODEL_V1 must be 0 or 1" ;;
++esac
++if test -n "${MACOSVM_HWMODEL_B64:-}"; then
++    restore_env+=("MACOSVM_HWMODEL_B64=$MACOSVM_HWMODEL_B64")
++    hwmodel_provenance="caller-supplied MACOSVM_HWMODEL_B64 override (Apple Account compatibility unverified)"
++    echo "WARNING: using an explicit caller hardware-model override; Apple Account compatibility is unverified." >&2
++fi
++echo "hardware model: $hwmodel_provenance"
++
+ test "$(uname -s)" = Darwin || die "run this on native macOS"
+ test "$(uname -m)" = arm64 || die "needs Apple Silicon"
+ mkdir -p "$work/src" "$work/ipsw"
+@@ -82,7 +98,7 @@ fi
+ # 3. Restore (provision-on-macos.sh asks for confirmation; answer it).
+ bundle="$work/$BUNDLE"
+ test ! -e "$bundle/guest/disk.img" || die "$bundle/guest/disk.img exists"
+-echo y | PATH="$(dirname "$mv_bin"):$PATH" MACOSVM_HWMODEL_B64="$hwmodel" \
++echo y | "${restore_env[@]}" PATH="$(dirname "$mv_bin"):$PATH" \
+     GUEST_DIR="$bundle/guest" DISK_SIZE="$DISK_SIZE" CPUS="$CPUS" RAM="$RAM" GUEST_MAC="$GUEST_MAC" \
+     "$repo_root/scripts/provision-on-macos.sh" "$ipsw"
+ 
+@@ -94,7 +110,7 @@ cp "$booter" "$bundle/extras/AVPBooter.vmapple2.$ver.bin"
+ sw_vers > "$bundle/extras/host-sw_vers.txt"
+ git -C "$mv_src" rev-parse HEAD > "$bundle/extras/macosvm-commit.txt"
+ (cd "$bundle" && shasum -a 256 guest/* extras/* > MANIFEST.sha256)
+-echo "$(date -u +%F) restored $IPSW_NAME (SHA-1 $IPSW_SHA1) with macosvm ${MACOSVM_COMMIT:0:7}${hwmodel:+, hardware model v1 forced}, disk $DISK_SIZE" \
++echo "$(date -u +%F) restored $IPSW_NAME (SHA-1 $IPSW_SHA1) with macosvm ${MACOSVM_COMMIT:0:7}, hardware model: $hwmodel_provenance, disk $DISK_SIZE" \
+     > "$bundle/README.txt"
+ echo "pristine bundle: $bundle (AVPBooter $ver)"
+ cat "$bundle/MANIFEST.sha256"
+diff --git a/scripts/provision-on-macos.sh b/scripts/provision-on-macos.sh
+index a9d82a9..7219a0c 100755
+--- a/scripts/provision-on-macos.sh
++++ b/scripts/provision-on-macos.sh
+@@ -51,8 +51,9 @@ macosvm \
+     "$guest_dir/vm.json"
+ 
+ test -f "$guest_dir/vm.json" || die "macosvm did not produce vm.json"
+-dd if="$guest_dir/aux.img" of="$guest_dir/aux.img.trimmed" \
+-    bs=$((0x4000)) skip=1 status=none
++# macosvm has exited: extract only flash, preserving the complete native file.
++python3 -I "$repo_root/scripts/extract-aux.py" \
++    "$guest_dir/aux.img" "$guest_dir/aux.img.trimmed"
+ 
+ echo "provisioned VMApple bundle: $guest_dir"
+ echo "copy this artifacts/guest directory back to the Asahi checkout"

@@ -1,0 +1,504 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# omac: "Wine for macOS apps" on Omarchy. Runs arm64 macOS apps in one shared omvm
+# guest (default macapps) and shows its whole desktop in one window, or each app
+# window as its own host window (seamless). See docs/omac.md for what works and what not.
+#
+#   omac init [--from VM] [--remote]  clone the shut-off VM (default macos27) into the
+#                               app VM: reflinked disk.img, aux.img.trimmed, vm.json
+#                               plus guest_major, guest_user and a fresh ssh_port,
+#                               then `omvm virt`; local window mode unless --remote
+#   omac up                     start the app VM (no watchdog) and wait for SSH (5 min)
+#   omac run [--seamless] APP [ARGS...]
+#                               APP = a host App.app, a host App.dmg, or the name of an
+#                               app already in the guest: copy it in, clear quarantine,
+#                               open it, bring the desktop to the front (--seamless: start
+#                               seamless mode in the background instead, unless it runs)
+#   omac seamless [OPTIONS] [APP...]
+#                               every guest app window as its own Wayland window (remote
+#                               mode only): open the APPs, then run share/omac/seamless.py
+#                               in the foreground; --stop ends a running one
+#   omac list                   apps in the guest's /Applications, /System/Applications
+#                               (and their Utilities) and ~/Applications
+#   omac desktop [--seamless] APP
+#                               add "APP" to the Omarchy launcher (omac run [--seamless] APP)
+#   omac show                   bring the guest's desktop window to the front (omvm show)
+#   omac windows [--all] [--watch [--hz N]]
+#                               JSON geometry of the guest's app windows (or --all
+#                               windows); --watch prints a line per change
+#   omac stop                   shut the app VM down (omvm stop)
+#   omac status                 domain state, running guests, SSH reachability
+#   omac shell [CMD...]         SSH into the app VM (omvm ssh)
+#
+# OMAC_VM / OMAC_SOURCE override gui.env; fallbacks are macapps / macos27.
+set -euo pipefail
+
+cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1 || true; }
+OMVM_UPSTREAM="${OMVM_UPSTREAM:-$(cfg_env OMVM_UPSTREAM)}"; OMVM_UPSTREAM="${OMVM_UPSTREAM:-$HOME/Work/macos-vm/apple-macos-arm64-vm-guest}"
+OMVM_IMAGES="${OMVM_IMAGES:-$(cfg_env OMVM_IMAGES)}"; OMVM_IMAGES="${OMVM_IMAGES:-$HOME/vm-artifacts}"
+OMVM_KEY="${OMVM_KEY:-$(cfg_env OMVM_KEY)}"; OMVM_KEY="${OMVM_KEY:-$HOME/.ssh/vmapple_runner}"
+OMVM_UPSTREAM="${OMVM_UPSTREAM/#\~/$HOME}"; OMVM_IMAGES="${OMVM_IMAGES/#\~/$HOME}"; OMVM_KEY="${OMVM_KEY/#\~/$HOME}"
+export OMVM_UPSTREAM OMVM_IMAGES OMVM_KEY
+
+VM="${OMAC_VM:-$(cfg_env OMAC_VM)}"; VM="${VM:-macapps}"
+SOURCE="${OMAC_SOURCE:-$(cfg_env OMAC_SOURCE)}"; SOURCE="${SOURCE:-macos27}"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+OMVM="${OMVM_BIN:-$(dirname "$SELF")/omvm}"
+[ -x "$OMVM" ] || OMVM="$(command -v omvm || echo omvm)"
+SHARE="$(dirname "$SELF")/../share"
+VIRSH=(virsh -q -c qemu:///session)
+MIN_FREE_GIB=20
+MIN_BATTERY=20
+BOOT_WAIT=300
+
+c_b=$'\e[1m'; c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_b=; c_g=; c_r=; c_y=; c_0=; }
+say()  { printf '%s==>%s %s\n' "$c_b" "$c_0" "$*"; }
+ok()   { printf '  %s✓%s %s\n' "$c_g" "$c_0" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$c_r" "$c_0" "$*"; }
+warn() { printf '  %s!%s %s\n' "$c_y" "$c_0" "$*"; }
+die()  { printf '%serror:%s %s\n' "$c_r" "$c_0" "$*" >&2; exit 1; }
+
+case "$VM" in ""|*/*|.*|macos) die "OMAC_VM='$VM' is not allowed (never the 'macos' VM)" ;; esac
+DIR="$OMVM_IMAGES/vms/$VM"
+
+# The guest account of the app VM (its guest_user file), for omvm and our own ssh.
+guest_user() { cat "$DIR/guest_user" 2>/dev/null || die "$VM has no guest_user (omac init)"; }
+guest_port() { cat "$DIR/ssh_port" 2>/dev/null || die "$VM has no ssh_port (omac init)"; }
+omvm_vm() { OMVM_GUEST_USER="$(guest_user)" "$OMVM" "$@"; }
+
+ssh_opts() { # for scp/rsync: the same options omvm uses
+    printf '%s\n' -i "$OMVM_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10
+}
+# Run a command in the guest. Arguments are quoted for the guest's shell, so
+# paths with spaces arrive intact.
+guest() { omvm_vm ssh "$VM" "$(printf '%q ' "$@")"; }
+
+# ---------------------------------------------------------------- notes + lock
+note() { # ACTION WHY RESULT
+    [ -d "$DIR" ] || return 0
+    printf '%s omac %s %s %s\n' "$(date -Is)" "$1" "$2" "$3" >> "$DIR/agent-notes.log"
+}
+lock() { # take vms/VM/.agent.lock (fd 9) or stop: another agent is working on the VM
+    exec 9>"$DIR/.agent.lock"
+    flock -n 9 || die "$VM is locked by another agent ($DIR/.agent.lock); see $DIR/agent-notes.log"
+}
+unlock() { exec 9>&-; }
+
+# ---------------------------------------------------------------- state
+domstate() { "${VIRSH[@]}" domstate "$1" 2>/dev/null || echo "not defined"; }
+defined() { "${VIRSH[@]}" dominfo "$1" >/dev/null 2>&1; }
+running_guests() { # QEMU processes (libvirt domains and omvm run/gui guests alike)
+    pgrep -c -f '^[^ ]*qemu-system-aarch64 ' || true
+}
+reachable() { timeout 10 env OMVM_GUEST_USER="$(guest_user)" "$OMVM" ssh "$VM" true </dev/null >/dev/null 2>&1; }
+free_gib() { awk '/^MemAvailable:/ { printf "%d", $2 / 1048576 }' /proc/meminfo; }
+power_ok() { # AC online, or a battery at MIN_BATTERY % or more (no supplies at all: desktop, fine)
+    local d seen=0 cap
+    for d in /sys/class/power_supply/*; do
+        case "$(cat "$d/type" 2>/dev/null)" in
+        Mains) seen=1; [ "$(cat "$d/online" 2>/dev/null)" = 1 ] && return 0 ;;
+        Battery) seen=1; cap="$(cat "$d/capacity" 2>/dev/null || echo 0)"
+                 [ "$cap" -ge "$MIN_BATTERY" ] 2>/dev/null && return 0 ;;
+        esac
+    done
+    [ "$seen" = 0 ]
+}
+free_port() { # a free local port that no other VM has claimed
+    local p used
+    used="$(cat "$OMVM_IMAGES"/vms/*/ssh_port 2>/dev/null || true)"
+    for _ in $(seq 1 50); do
+        p="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
+        grep -qx "$p" <<<"$used" || { echo "$p"; return; }
+    done
+    die "no free SSH port found"
+}
+
+# ---------------------------------------------------------------- init
+# The clone is built by hand with exactly the three files `omvm virt` itself copies
+# from an image (disk.img, aux.img.trimmed, vm.json), reflinked, then guest_major,
+# guest_user and ssh_port. `omvm virt` sees disk.img and only (re)defines the domain.
+# Nothing else from the source (identity files, certificates, backups) is copied.
+local_mode() { # put the shut-off domain into local (window) mode, like omvm's define_mode
+    local wl="${WAYLAND_DISPLAY:-wayland-1}" xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    local icd="${OMVM_LOCAL_ICD:-$HOME/opt/mesa-honeykrisp-sb-wl/share/vulkan/icd.d/asahi_icd.aarch64.json}"
+    local scr="3024x1964@254 120" j xml new
+    [ -S "$xdg/$wl" ] || { warn "no Wayland session: $VM stays in remote (VNC) mode; later: omvm mode local $VM"; return 0; }
+    [ -f "$icd" ] || { warn "no Mesa with Wayland WSI ($icd): $VM stays in remote (VNC) mode"; return 0; }
+    j="$(hyprctl monitors -j 2>/dev/null | jq -c '[.[] | select(.name | test("^eDP"))][0] // .[0]' 2>/dev/null || true)"
+    if [ -n "$j" ] && [ "$j" != null ]; then
+        scr="$(jq -r '"\(.width)x\(.height)@\((.width * 25.4 / .physicalWidth) | floor) \(.refreshRate | round)"' <<<"$j")"
+    fi
+    xml="$(mktemp)"; new="$(mktemp)"
+    "${VIRSH[@]}" dumpxml --inactive "$VM" > "$xml"
+    python3 "$SHARE/libvirt-mode.py" local "${OMVM_LOCAL_RESOLUTION:-${scr% *}}" "${OMVM_LOCAL_REFRESH:-${scr#* }}" \
+        "$wl" "$xdg" "$icd" "${OMVM_STATS:-0}" < "$xml" > "$new"
+    "${VIRSH[@]}" define "$new" >/dev/null
+    rm -f "$xml" "$new"
+    ok "$VM: local mode (one borderless window, ${scr% *})"
+}
+
+cmd_init() {
+    local from="$SOURCE" remote=0 src f major user port st
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --from) from="${2:?usage: omac init [--from VM] [--remote]}"; shift 2 ;;
+        --remote) remote=1; shift ;;
+        *) die "usage: omac init [--from VM] [--remote]" ;;
+        esac
+    done
+    case "$from" in ""|*/*|.*) die "bad source '$from'" ;; macos) die "never clone from 'macos': use the shut-off macos27" ;; esac
+    [ "$from" != "$VM" ] || die "source and target are both '$VM'"
+    src="$OMVM_IMAGES/vms/$from"
+    [ ! -e "$DIR" ] || die "$DIR already exists (omac init only builds a new VM)"
+    ! defined "$VM" || die "libvirt already has a domain '$VM'"
+    for f in disk.img aux.img.trimmed vm.json guest_major guest_user; do
+        [ -f "$src/$f" ] || die "$from has no $f: not a valid clone source"
+    done
+    st="$(domstate "$from")"
+    [ "$st" = "shut off" ] || die "$from is '$st': it must be shut off to be cloned"
+    major="$(cat "$src/guest_major")"; user="$(cat "$src/guest_user")"
+
+    mkdir -p "$DIR"
+    lock
+    note init "clone $from for macOS apps" "started"
+    say "cloning $from into $VM (reflink)"
+    for f in disk.img aux.img.trimmed vm.json; do
+        cp --reflink=auto "$src/$f" "$DIR/$f"; chmod u+w "$DIR/$f"
+    done
+    printf '%s\n' "$major" > "$DIR/guest_major"
+    printf '%s\n' "$user" > "$DIR/guest_user"
+    port="$(free_port)"; printf '%s\n' "$port" > "$DIR/ssh_port"
+    ok "$VM: disk.img, aux.img.trimmed, vm.json; guest_major $major, user $user, SSH port $port"
+    # IMAGE: omvm virt needs a valid one, but copies nothing from it while disk.img
+    # exists; with none given it resolves the newest image itself.
+    if ! "$OMVM" virt "$VM"; then
+        note init "omvm virt $VM" "failed"
+        die "omvm virt $VM failed; the files are in $DIR (remove it to retry)"
+    fi
+    "${VIRSH[@]}" autostart --disable "$VM" >/dev/null 2>&1 || true
+    [ "$remote" = 1 ] || local_mode
+    note init "clone $from for macOS apps" "ok port=$port major=$major"
+    unlock
+    ok "$VM ready: omac up, then omac run /path/App.app"
+}
+
+# ---------------------------------------------------------------- up
+blockstats() { "${VIRSH[@]}" qemu-monitor-command "$VM" --hmp 'info blockstats' 2>&1 | tr -d '\r' || true; }
+cmd_up() {
+    local st n i
+    defined "$VM" || die "no VM '$VM' (omac init)"
+    st="$(domstate "$VM")"
+    if [ "$st" = running ] && reachable; then ok "$VM is up"; return 0; fi
+    lock
+    if [ "$st" = paused ]; then
+        "${VIRSH[@]}" resume "$VM" >/dev/null
+    elif [ "$st" != running ]; then
+        n="$(running_guests)"
+        [ "$n" -lt 2 ] || die "$n macOS guests already run (limit 2): stop one first"
+        [ "$(domstate "$SOURCE")" != running ] ||
+            die "$SOURCE is running and shares $VM's identity (vm.json): stop it first (omvm stop $SOURCE)"
+        power_ok || die "battery below $MIN_BATTERY % and not on AC: plug in first"
+        [ "$(free_gib)" -ge "$MIN_FREE_GIB" ] || die "only $(free_gib) GiB RAM available, need $MIN_FREE_GIB GiB"
+        note up "start for macOS apps" "starting"
+        # Plain virsh start: `omvm start` would enable the omvm-vm@ watchdog, which
+        # restarts the VM a minute after the user shuts it down.
+        "${VIRSH[@]}" start "$VM" >/dev/null
+        say "$VM starting; waiting for SSH (up to $((BOOT_WAIT / 60)) min)"
+    fi
+    # Wall-clock deadline: each failed reachable() can itself take up to 10 s.
+    local t0=$SECONDS
+    while ((SECONDS - t0 < BOOT_WAIT)); do
+        i=$((SECONDS - t0))
+        if reachable; then i=$((SECONDS - t0)); note up "start for macOS apps" "ssh ok after ${i}s"; unlock; ok "$VM is up (${i}s)"; return 0; fi
+        [ "$(domstate "$VM")" = running ] || { note up "start" "domain $(domstate "$VM")"; die "$VM is $(domstate "$VM")"; }
+        sleep 5
+    done
+    bad "$VM: no SSH banner after $((BOOT_WAIT / 60)) min"
+    echo "--- info blockstats"; blockstats
+    sleep 30
+    echo "--- info blockstats (30 s later)"; blockstats
+    echo "--- domstate: $(domstate "$VM")"
+    note up "start for macOS apps" "no ssh after ${BOOT_WAIT}s"
+    die "$VM did not answer SSH (see docs/graphics.md \"macOS 27 updates\")"
+}
+
+# ---------------------------------------------------------------- run
+# Copy a host .app, or the apps of a .dmg, into ~/Applications in the guest.
+# Progress goes to stderr; stdout carries only the names of the installed apps.
+copy_app() { # HOST-.app
+    local app="${1%/}" user port opts=()
+    user="$(guest_user)"; port="$(guest_port)"
+    mapfile -t opts < <(ssh_opts)
+    guest mkdir -p Applications >&2
+    say "copying $(basename "$app") to the guest" >&2
+    rsync -a -e "$(printf '%q ' ssh "${opts[@]}" -p "$port")" "$app" "$user@127.0.0.1:Applications/" >&2
+    guest xattr -dr com.apple.quarantine "Applications/$(basename "$app")" >&2 2>/dev/null || true
+    basename "$app" .app
+}
+copy_dmg() { # HOST-.dmg
+    local dmg="$1" user port opts=() tmp
+    user="$(guest_user)"; port="$(guest_port)"
+    mapfile -t opts < <(ssh_opts)
+    tmp="/tmp/omac-$(date +%s)-$$.dmg"
+    say "copying $(basename "$dmg") to the guest" >&2
+    scp -q "${opts[@]}" -P "$port" "$dmg" "$user@127.0.0.1:$tmp" >&2
+    # In the guest: attach read-only (yes accepts a licence prompt), copy every
+    # .app found, detach and delete the image whatever happens.
+    omvm_vm ssh "$VM" "/bin/bash -s -- $(printf '%q' "$tmp")" <<'GUEST'
+set -eu
+dmg="$1"; mp="$(mktemp -d /tmp/omac-mnt.XXXXXX)"
+cleanup() {
+    hdiutil detach -quiet "$mp" 2>/dev/null || hdiutil detach -force -quiet "$mp" 2>/dev/null || true
+    rmdir "$mp" 2>/dev/null || true; rm -f "$dmg"
+}
+trap cleanup EXIT
+yes | hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mp" "$dmg" >/dev/null
+mkdir -p "$HOME/Applications"
+n=0
+while IFS= read -r -d '' a; do
+    b="$(basename "$a")"
+    [ -n "$b" ] || continue
+    rm -rf "$HOME/Applications/$b"
+    ditto "$a" "$HOME/Applications/$b"
+    xattr -dr com.apple.quarantine "$HOME/Applications/$b" 2>/dev/null || true
+    printf '%s\n' "${b%.app}"; n=$((n + 1))
+done < <(find "$mp" -maxdepth 2 -name '*.app' -type d -prune -print0)
+[ "$n" -gt 0 ] || { echo "no .app in this disk image" >&2; exit 3; }
+GUEST
+}
+
+cmd_run() {
+    local seamless=0
+    [ "${1:-}" != --seamless ] || { seamless=1; shift; }
+    install_open "$@"
+    if [ "$seamless" = 1 ]; then
+        seamless_background
+        return
+    fi
+    # From a terminal on the desktop (or the launcher) bring the guest to the front;
+    # over SSH or headless there is no session of ours to show it in. Either way the
+    # app is already open, so a failed show is only a warning.
+    if [ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+        ok "$OPENED is open in $VM (no display here: omac show from the desktop)"
+    elif ! omvm_vm show "$VM"; then
+        warn "$OPENED is open in $VM, but its desktop could not be shown (omac show)"
+    fi
+}
+
+OPENED=""
+install_open() { # TARGET [ARGS...]: boot, copy in if needed, open in the guest; sets OPENED
+    local target="${1:?usage: omac run [--seamless] App.app|App.dmg|APP-NAME [ARGS...]}" out name names=() cmd
+    shift
+    case "$target" in
+    *.pkg|*.mpkg) die "installer packages (.pkg) are not supported: use the .app or .dmg, or install it by hand in the guest (omac show)" ;;
+    esac
+    # Check the host side before booting anything.
+    if [ -e "$target" ] && ! { [ -d "$target" ] && [[ "${target%/}" == *.app ]]; } &&
+        ! { [ -f "$target" ] && [[ "$target" == *.dmg ]]; }; then
+        die "$target is neither an App.app directory nor a .dmg"
+    elif [ ! -e "$target" ] && [[ "$target" == */* || "$target" == *.dmg ]]; then
+        die "no such file on the host: $target"   # a path, not an app name in the guest
+    fi
+    cmd_up
+    if [ -d "$target" ]; then
+        out="$(copy_app "$target")"
+    elif [ -f "$target" ]; then
+        out="$(copy_dmg "$target")" || die "nothing installed from $(basename "$target")"
+    else
+        out=""
+    fi
+    if [ -n "$out" ]; then
+        mapfile -t names <<<"$out"
+        [ "${#names[@]}" = 1 ] || warn "installed ${names[*]}; opening ${names[0]}"
+        name="${names[0]}"; ok "$name is in the guest's ~/Applications"
+        # a copied app opens from where we put it
+        cmd="open -a \"\$HOME/Applications/\"$(printf '%q' "$name.app")"
+    else
+        name="${target%.app}"   # already installed: LaunchServices finds it by name
+        cmd="open -a $(printf '%q' "$name")"
+    fi
+    [ $# = 0 ] || cmd="$cmd --args $(printf '%q ' "$@")"
+    say "opening $name"
+    omvm_vm ssh "$VM" "$cmd" || die "the guest could not open '$name' (omac list shows what is installed)"
+    OPENED="$name"
+}
+
+# ---------------------------------------------------------------- seamless
+# share/omac/seamless.py: one VNC connection for the pixels and input, one
+# `omac windows --watch` for the window list, one GTK 4 window per guest app window.
+# Needs the VM in remote (VNC) mode; one instance per VM (pid in $XDG_RUNTIME_DIR).
+seamless_pidfile() { echo "${XDG_RUNTIME_DIR:-/tmp}/omac-seamless-$VM.pid"; }
+seamless_pid() { # the pid of a running instance for this VM, or fail
+    local p
+    p="$(cat "$(seamless_pidfile)" 2>/dev/null)" || return 1
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'omac/seamless\.py' &&
+        echo "$p"
+}
+vnc_port() { # the QEMU VNC port of the running VM (remote mode), or fail
+    local d
+    d="$("${VIRSH[@]}" vncdisplay "$VM" 2>/dev/null | head -1)"
+    [[ $d == *:* ]] || return 1
+    echo $((5900 + ${d##*:}))
+}
+seamless_check() {
+    [ -n "${WAYLAND_DISPLAY:-}" ] || die "seamless mode needs a Wayland session (WAYLAND_DISPLAY is not set)"
+    python3 -c 'import gi; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk' 2>/dev/null ||
+        die "seamless mode needs python-gobject and gtk4"
+    [ -f "$SHARE/omac/seamless.py" ] || die "missing $SHARE/omac/seamless.py"
+}
+seamless_background() { # start seamless mode detached, unless it already runs
+    local p log
+    if p="$(seamless_pid)"; then ok "$OPENED: seamless mode already runs (pid $p), its windows appear there"; return 0; fi
+    if [ -z "${WAYLAND_DISPLAY:-}" ]; then ok "$OPENED is open in $VM (no Wayland session here: omac seamless from the desktop)"; return 0; fi
+    seamless_check
+    log="${XDG_STATE_HOME:-$HOME/.local/state}/omac/seamless-$VM.log"
+    mkdir -p "$(dirname "$log")"
+    setsid -f "$SELF" seamless >"$log" 2>&1 </dev/null
+    ok "$OPENED: seamless mode started (log: $log)"
+}
+cmd_seamless() {
+    local apps=() opts=() p port app
+    local usage="usage: omac seamless [--no-menubar] [--no-trim] [--no-round] [--hz N] [--stats N] [--control SOCKET] [--selftest [--selftest-text T]] [APP...] | --stop"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --stop)
+            p="$(seamless_pid)" || { ok "no seamless mode runs for $VM"; return 0; }
+            kill -TERM "$p"
+            for _ in $(seq 1 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+            ! kill -0 "$p" 2>/dev/null || die "seamless mode (pid $p) did not exit"
+            ok "seamless mode stopped (pid $p)"; return 0 ;;
+        --hz|--stats|--control|--selftest-text) [ $# -ge 2 ] || die "$usage"; opts+=("$1" "$2"); shift 2 ;;
+        --no-menubar|--no-trim|--no-round|--selftest) opts+=("$1"); shift ;;
+        --) shift; apps+=("$@"); break ;;
+        -*) die "$usage" ;;
+        *) apps+=("$1"); shift ;;
+        esac
+    done
+    seamless_check
+    cmd_up
+    port="$(vnc_port)" || die "$VM has no VNC display: seamless mode needs remote mode (omvm mode remote $VM)"
+    for app in "${apps[@]}"; do install_open "$app"; ok "$OPENED is open"; done
+    if p="$(seamless_pid)"; then ok "seamless mode already runs for $VM (pid $p)"; return 0; fi
+    echo $$ > "$(seamless_pidfile)"   # exec keeps the pid
+    say "seamless mode: $VM via VNC 127.0.0.1:$port (Ctrl+C or omac seamless --stop ends it)"
+    exec python3 "$SHARE/omac/seamless.py" --port "$port" --omac "$SELF" --vm "$VM" "${opts[@]}"
+}
+
+# ---------------------------------------------------------------- the rest
+cmd_list() {
+    [ "$(domstate "$VM")" = running ] || die "$VM is not running (omac up)"
+    # shellcheck disable=SC2016  # expanded in the guest
+    omvm_vm ssh "$VM" 'for d in /Applications /Applications/Utilities /System/Applications /System/Applications/Utilities "$HOME/Applications"; do [ -d "$d" ] && find "$d" -maxdepth 1 -name "*.app" -print; done | sed "s|.*/||; s|\.app\$||" | sort -fu'
+}
+
+desktop_quote() { # one quoted Exec argument, per the Desktop Entry spec (string escapes, then quoting)
+    printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\\\\\/g' -e 's/["`$]/\\\\&/g' -e 's/%/%%/g')"
+}
+cmd_desktop() {
+    local seamless=0
+    [ "${1:-}" != --seamless ] || { seamless=1; shift; }
+    local app="${1:?usage: omac desktop [--seamless] APP}" name slug dir file bin run=run comment=", whole desktop in one window"
+    [ "$seamless" = 0 ] || { run="run --seamless"; comment=", seamless: each window its own"; }
+    [ -e "$app" ] && app="$(readlink -f "$app")"
+    name="$(basename "${app%/}")"; name="${name%.app}"; name="${name%.dmg}"
+    slug="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+    [ -n "$slug" ] || die "cannot make a file name from '$name'"
+    bin="$HOME/.local/bin/omac"; [ -x "$bin" ] || bin="$SELF"
+    dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"; file="$dir/omac-$slug.desktop"
+    [ "$seamless" = 0 ] || file="$dir/omac-$slug-seamless.desktop"
+    mkdir -p "$dir"
+    {
+        echo '[Desktop Entry]'
+        echo 'Type=Application'
+        if [ "$seamless" = 1 ]; then echo "Name=$name (macOS)"; else echo "Name=$name"; fi
+        echo "Comment=$name in the macOS app VM ($VM$comment)"
+        echo "Exec=$(desktop_quote "$bin") $run $(desktop_quote "$app")"
+        echo 'Icon=computer'
+        echo 'Terminal=false'
+        echo 'Categories=Utility;'
+        echo "Keywords=macOS;omac;$name;"
+    } > "$file"
+    ok "launcher entry: $file"
+}
+
+# ---------------------------------------------------------------- windows
+# share/omac/winlist.swift is compiled once in the guest (it has Xcode) into
+# ~/Library/Application Support/omac/winlist and rebuilt whenever the host copy
+# changes (its sha256 is kept next to the binary). A plain SSH session sees the
+# logged-in user's WindowServer windows, so it runs straight over SSH.
+WINLIST_DIR="Library/Application Support/omac"
+winlist_install() { # SHA256: copy the source over SSH and compile it in the guest
+    say "building winlist in $VM (swiftc -O)" >&2
+    omvm_vm ssh "$VM" "mkdir -p \"\$HOME/$WINLIST_DIR\" && cat > \"\$HOME/$WINLIST_DIR/winlist.swift\"" \
+        < "$SHARE/omac/winlist.swift"
+    omvm_vm ssh "$VM" "cd \"\$HOME/$WINLIST_DIR\" && swiftc -O winlist.swift -o winlist.new && mv winlist.new winlist && echo $1 > winlist.sha256" </dev/null >&2 ||
+        die "winlist did not compile in $VM"
+}
+cmd_windows() {
+    local args=() all=0 sum rc=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --all) all=1; shift ;;
+        --watch) args+=(--watch); shift ;;
+        --hz) args+=(--hz "${2:?usage: omac windows [--all] [--watch [--hz N]]}"); shift 2 ;;
+        *) die "usage: omac windows [--all] [--watch [--hz N]]" ;;
+        esac
+    done
+    [ "$all" = 1 ] || args+=(--apps)
+    [ "$(domstate "$VM")" = running ] || die "$VM is $(domstate "$VM") (omac up)"
+    [ -f "$SHARE/omac/winlist.swift" ] || die "missing $SHARE/omac/winlist.swift"
+    sum="$(sha256sum "$SHARE/omac/winlist.swift" | cut -d" " -f1)"
+    local run="d=\"\$HOME/$WINLIST_DIR\"; [ -x \"\$d/winlist\" ] && [ \"\$(cat \"\$d/winlist.sha256\" 2>/dev/null)\" = $sum ] || exit 99; exec \"\$d/winlist\" ${args[*]}"
+    # In the background with the signal passed on, so that killing omac (a host
+    # reading --watch) also ends ssh and, through its closed stdout, winlist.
+    # Not omvm_vm: a function would run in a subshell and $! would not be ssh.
+    OMVM_GUEST_USER="$(guest_user)" "$OMVM" ssh "$VM" "$run" </dev/null &
+    local pid=$!
+    trap 'kill -TERM "$pid" 2>/dev/null; exit 143' TERM INT HUP
+    wait "$pid" || rc=$?
+    trap - TERM INT HUP
+    [ "$rc" = 99 ] || return "$rc"
+    winlist_install "$sum"
+    OMVM_GUEST_USER="$(guest_user)" exec "$OMVM" ssh "$VM" "$run" </dev/null
+}
+
+cmd_stop() {
+    defined "$VM" || die "no VM '$VM'"
+    lock; note stop "user asked" "stopping"
+    omvm_vm stop "$VM"
+    note stop "user asked" "$(domstate "$VM")"; unlock
+}
+
+cmd_status() {
+    local st
+    st="$(domstate "$VM")"
+    echo "vm:      $VM ($DIR)"
+    echo "state:   $st"
+    echo "guests:  $(running_guests) running (limit 2)"
+    echo "source:  $SOURCE ($(domstate "$SOURCE"))"
+    if [ "$st" = running ]; then
+        if reachable; then echo "ssh:     up (port $(guest_port), user $(guest_user))"; else echo "ssh:     no answer"; fi
+    else
+        echo "ssh:     -"
+    fi
+}
+
+cmd_shell() { defined "$VM" || die "no VM '$VM' (omac init)"; OMVM_GUEST_USER="$(guest_user)" exec "$OMVM" ssh "$VM" "$@"; }
+
+case "${1:-help}" in
+init) shift; cmd_init "$@" ;;
+up) shift; cmd_up ;;
+run) shift; cmd_run "$@" ;;
+list) cmd_list ;;
+desktop) shift; cmd_desktop "$@" ;;
+seamless) shift; cmd_seamless "$@" ;;
+show) cmd_up; omvm_vm show "$VM" ;;
+windows) shift; cmd_windows "$@" ;;
+stop) cmd_stop ;;
+status) cmd_status ;;
+shell) shift; cmd_shell "$@" ;;
+help|-h|--help) sed -n '3,/^set -euo/{/^#/p}' "$SELF" | sed 's/^# \{0,1\}//' ;;
+*) die "unknown command '$1' (omac help)" ;;
+esac

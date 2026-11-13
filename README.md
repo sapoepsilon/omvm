@@ -82,8 +82,12 @@ Xcode 27.2
 - **Sound:** the guest has a virtio-snd card ("Apple Virtual Sound Device") on the host's
   PipeWire: macOS output plays through the laptop's speakers (a stream named after the VM),
   and its input records from the host's default microphone.
-- **Apple Account sign-in** is not expected to work: the guest has no Secure Enclave
-  identity. See docs for what Xcode can do without it.
+- **Apple Account:** experimental Linux SEP/FairPlay source and lifecycle tooling
+  are available in [the helper guide](docs/apple-helpers.md). This is a development
+  integration, not a complete installer. Full encrypted-data sync, Contact Key
+  Verification and authenticated host-reboot recovery remain under test.
+- **macOS apps:** `omac run Foo.app` runs an arm64 application in a dedicated guest;
+  see [the application guide](docs/omac.md).
 
 ## Requirements
 

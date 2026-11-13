@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/aquarat/apple-macos-arm64-vm-guest.git",
+    "base_commit": "2ec3cb8745e81c368276852b0a2a8688875e5325"
+  },
+  "source_commit": "10df598139348b3441e7748b78b13ae28cfaf4e7",
+  "scope": "Source overlay only; operational documents, original repository history and machine artifacts omitted.",
+  "added_files": [
+    {
+      "path": "patches/identity-20261110/README.md",
+      "git_mode": "100644",
+      "source_sha256": "d78f11ccd7d1fa10b32b0dd1488502aa3af3a84aab4eeaa7ff582c3f375814a7",
+      "published_sha256": "2959d3068ef9ff73c6ed4bb1afcdf9034bd57bb836ea5e0b5c1454c3fa4fdf2e",
+      "source_bytes_preserved": false,
+      "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
+    },
+    {
+      "path": "patches/identity-20261110/apple-fairplay.c",
+      "git_mode": "100644",
+      "source_sha256": "3dcf3a37336a81cc0e8d46abe54ae6b0b8099ba54f90881db176a0061e596658",
+      "published_sha256": "3dcf3a37336a81cc0e8d46abe54ae6b0b8099ba54f90881db176a0061e596658",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/apple-identity.c",
+      "git_mode": "100644",
+      "source_sha256": "5766d77bfb26078d728770200cf033ba984ae8dd4bfb50a26241d832a41c4376",
+      "published_sha256": "5766d77bfb26078d728770200cf033ba984ae8dd4bfb50a26241d832a41c4376",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/apple-identity.h",
+      "git_mode": "100644",
+      "source_sha256": "429d7b2cbe4127d9ba23f6356cf67cbb5c11f798c8b5a1df52ba2c448f38c895",
+      "published_sha256": "429d7b2cbe4127d9ba23f6356cf67cbb5c11f798c8b5a1df52ba2c448f38c895",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/cfg-host-identity.patch",
+      "git_mode": "100644",
+      "source_sha256": "c82424119c608c6b85efed40f054706a6d718189ae16320ea5ce28f599af2a81",
+      "published_sha256": "c82424119c608c6b85efed40f054706a6d718189ae16320ea5ce28f599af2a81",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/dma-mailbox.c",
+      "git_mode": "100644",
+      "source_sha256": "c3084ef362d3d8dea3efe12e68a9ba37055ec5a4926f70320d1a56bce115d206",
+      "published_sha256": "c3084ef362d3d8dea3efe12e68a9ba37055ec5a4926f70320d1a56bce115d206",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/dma-mailbox.h",
+      "git_mode": "100644",
+      "source_sha256": "05505a9de2245a6856c90fa4874690cb58bac5e75d04ceee258c1eca82fd8688",
+      "published_sha256": "05505a9de2245a6856c90fa4874690cb58bac5e75d04ceee258c1eca82fd8688",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/hostcfg-contract.md",
+      "git_mode": "100644",
+      "source_sha256": "7de82d26b7dce0223c6946b13d89279632a94ac7e633fecb3711f81ffc0b6e07",
+      "published_sha256": "e815e7728ccd9e5a86d93cf4afb9bdf712d306d5c6f206f309e6c8dc28e440ad",
+      "source_bytes_preserved": false,
+      "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
+    },
+    {
+      "path": "patches/identity-20261110/linux-sep-export/README.md",
+      "git_mode": "100644",
+      "source_sha256": "49489af98265a0223e1eaada700b5bdf2411dfe180cdbf24dc83d07c07f3fd40",
+      "published_sha256": "ec76d0bb891cb5a94ffb9613409c23058aa3805cb0368924a8e1ad219212e083",
+      "source_bytes_preserved": false,
+      "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
+    },
+    {
+      "path": "patches/identity-20261110/linux-sep-export/baseline-sha256.json",
+      "git_mode": "100644",
+      "source_sha256": "b3e3aa3ade23411a9c2b00e4e3cc73ce2445c22e0dc7912bb6f120e42cb4d41a",
+      "published_sha256": "b3e3aa3ade23411a9c2b00e4e3cc73ce2445c22e0dc7912bb6f120e42cb4d41a",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/linux-sep-export/export-attestation.patch",
+      "git_mode": "100644",
+      "source_sha256": "2b333102f09e9c6cd1be611b9f7f88c0351ee4163d44df033d20b97e9c1d129a",
+      "published_sha256": "2b333102f09e9c6cd1be611b9f7f88c0351ee4163d44df033d20b97e9c1d129a",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/qemu-aes-command-context.patch",
+      "git_mode": "100644",
+      "source_sha256": "d0bef60629bce9f390b2c8037c7466a1aad8b5e3bc65a75afafdd93d34893532",
+      "published_sha256": "d0bef60629bce9f390b2c8037c7466a1aad8b5e3bc65a75afafdd93d34893532",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/virtio-qmp-backend-features.patch",
+      "git_mode": "100644",
+      "source_sha256": "e965535429b1a607bf069c98f3596550d5af1a3f696da23a76af7a67d6501ec6",
+      "published_sha256": "e965535429b1a607bf069c98f3596550d5af1a3f696da23a76af7a67d6501ec6",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/identity-20261110/vmapple.c",
+      "git_mode": "100644",
+      "source_sha256": "43e5e2607c5c3e664593af9abc4216311ea55b28203ca4a440b0014b2ec7b91c",
+      "published_sha256": "43e5e2607c5c3e664593af9abc4216311ea55b28203ca4a440b0014b2ec7b91c",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/.gitattributes",
+      "git_mode": "100644",
+      "source_sha256": "a88a124917fd8013f6c5faccff73c685a77428cb7bd7a2710321c98e4514e671",
+      "published_sha256": "a88a124917fd8013f6c5faccff73c685a77428cb7bd7a2710321c98e4514e671",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/aes-snapshot/0001-dt-bindings-apple-t6000-aes.patch",
+      "git_mode": "100644",
+      "source_sha256": "937354c759f3a00f001f4007a00417ad82ebb05517cbc1cc1ab3d4a40cf4048c",
+      "published_sha256": "937354c759f3a00f001f4007a00417ad82ebb05517cbc1cc1ab3d4a40cf4048c",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/aes-snapshot/0002-soc-apple-add-powered-aes-snapshot.patch",
+      "git_mode": "100644",
+      "source_sha256": "30a17bda003a05487242babf16b7d0805af68e32e632c4cb0ae6688cec155f4a",
+      "published_sha256": "30a17bda003a05487242babf16b7d0805af68e32e632c4cb0ae6688cec155f4a",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/aes-snapshot/0003-arm64-dts-apple-describe-disabled-t6000-aes.patch",
+      "git_mode": "100644",
+      "source_sha256": "0367b9d6a5da681a4af10c653be60caaf1a742244b5fe563e03b5906e2739010",
+      "published_sha256": "0367b9d6a5da681a4af10c653be60caaf1a742244b5fe563e03b5906e2739010",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/aes-snapshot/0004-OPTIONAL-enable-j314c-powered-snapshot.patch",
+      "git_mode": "100644",
+      "source_sha256": "55be3d6c12f6a415cbe8fa7674ace21daf8913e9ce58d1e8225e7d84cdcd3107",
+      "published_sha256": "55be3d6c12f6a415cbe8fa7674ace21daf8913e9ce58d1e8225e7d84cdcd3107",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/aes-snapshot/README.md",
+      "git_mode": "100644",
+      "source_sha256": "24c62fdc0276025b716da35253725bde81c70e90dad181cfd6ba5497202f49f9",
+      "published_sha256": "c697e74d4a19ce29cab196fbabd1d5e374ae8c0954c849cbeabaaccfe7ad7743",
+      "source_bytes_preserved": false,
+      "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
+    },
+    {
+      "path": "patches/standalone-fairplay/ipatool-linux-experiment.patch",
+      "git_mode": "100644",
+      "source_sha256": "1a43f786af3e78792bcbba7794cee5af1023e9e324a25854ae6ae05c1306ea0f",
+      "published_sha256": "07d17b5eb6f91362e5700a1596fae5325a14ccac34e574c6812e5fda224f46e9",
+      "source_bytes_preserved": false,
+      "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
+    },
+    {
+      "path": "patches/standalone-fairplay/qemu-ofr2-completion.patch",
+      "git_mode": "100644",
+      "source_sha256": "6058e353b947d115d968a98b9b536588b4e622b0b40f97bf3d187393e9b3b416",
+      "published_sha256": "6058e353b947d115d968a98b9b536588b4e622b0b40f97bf3d187393e9b3b416",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/uid1-provider/0001-arm64-dts-apple-j314c-add-aes-irq.patch",
+      "git_mode": "100644",
+      "source_sha256": "9da1d00bbf6dc5ba43f81697b2bac72b22aa771a33676c2e77e4cbaba8109891",
+      "published_sha256": "9da1d00bbf6dc5ba43f81697b2bac72b22aa771a33676c2e77e4cbaba8109891",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/uid1-provider/Makefile",
+      "git_mode": "100644",
+      "source_sha256": "5a9b14001513548a4efc83aa847edef113fc786bd445bee1f34e7b70d6e853c3",
+      "published_sha256": "5a9b14001513548a4efc83aa847edef113fc786bd445bee1f34e7b70d6e853c3",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/uid1-provider/README.md",
+      "git_mode": "100644",
+      "source_sha256": "41d253ae7b222820155bb55ca48c40e14eb340050a828f9a69763d3ab0f10f77",
+      "published_sha256": "03cae5cfb2ae3b224caf810c86aa14d445a5d807789e9acf0b15f609948719e5",
+      "source_bytes_preserved": false,
+      "change": "Documentation generalized to omit personal operational history; implementation and tests preserved."
+    },
+    {
+      "path": "patches/standalone-fairplay/uid1-provider/omvm-uid1-provider.c",
+      "git_mode": "100644",
+      "source_sha256": "af0eeb017c990056a84f6dfc6b6fd0fb9fde8e712c70ad029356b2cbe00e479a",
+      "published_sha256": "af0eeb017c990056a84f6dfc6b6fd0fb9fde8e712c70ad029356b2cbe00e479a",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "patches/standalone-fairplay/uid1-provider/omvm_uid1_uapi.h",
+      "git_mode": "100644",
+      "source_sha256": "d9a9e0e691f901fd828dda2431c91729d4acce38f67c8a0ab725ab5195bc4c5f",
+      "published_sha256": "d9a9e0e691f901fd828dda2431c91729d4acce38f67c8a0ab725ab5195bc4c5f",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "scripts/debug/fairplay-relay-socket.py",
+      "git_mode": "100644",
+      "source_sha256": "34312faaa033822e0e3d7faf8609c3ce135c073217befb2fd75e569fac6ffa7e",
+      "published_sha256": "34312faaa033822e0e3d7faf8609c3ce135c073217befb2fd75e569fac6ffa7e",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "scripts/debug/fairplay-relay.c",
+      "git_mode": "100644",
+      "source_sha256": "93fe627f65b4a7cc735fc1c7f49acc95fd4ea57130ad600e9e249412c05b8561",
+      "published_sha256": "93fe627f65b4a7cc735fc1c7f49acc95fd4ea57130ad600e9e249412c05b8561",
+      "source_bytes_preserved": true
+    },
+    {
+      "path": "scripts/extract-aux.py",
+      "git_mode": "100755",
+      "source_sha256": "ebd2702920e5b2a242f8b1b9588d6f41f3322f3dda4d0aaf5614ca1bb3b4dfa9",
+      "published_sha256": "ebd2702920e5b2a242f8b1b9588d6f41f3322f3dda4d0aaf5614ca1bb3b4dfa9",
+      "source_bytes_preserved": true
+    }
+  ],
+  "modified_source_patch": {
+    "path": "upstream-source-changes.patch",
+    "sha256": "3b8e2ee42e1ba756c3f9bc04a9bb75506bd47ff9c2a1c5146582b0faf77d571c",
+    "files": [
+      {
+        "path": "images/host/macos-restore.sh",
+        "reconstructed_sha256": "ae07c7e7d01bb232339da5424c6b7bfaf1949f71db131289568230fc6e735be2"
+      },
+      {
+        "path": "scripts/provision-on-macos.sh",
+        "reconstructed_sha256": "65648856a28379872c76f56251072c3ab54434eab258228aaf437ce61c2a9005"
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "name": "QEMU Reims",
+      "repository": "https://github.com/aquarat/qemu-reims-vgpu.git",
+      "fairplay_frontend_and_qmp_revision": "760d1d0d29b07341409825eb55e760a52fd7d58f",
+      "license": "GPL-2.0-or-later",
+      "limitation": "Other QEMU snapshots and cfg patch require their matching development baseline; not a complete pristine-QEMU build recipe."
+    },
+    {
+      "name": "ipatool",
+      "repository": "https://github.com/majd/ipatool.git",
+      "base_commit": "3e84853e2e5d60540a5022b64895d496910144eb",
+      "license": "MIT",
+      "notice": "licenses/ipatool-MIT.txt",
+      "adapter_revision": "v23",
+      "patch": "patches/standalone-fairplay/ipatool-linux-experiment.patch"
+    },
+    {
+      "name": "Linux SEP and AES integration",
+      "base_commit": "b798f2b0c767e3d780896cff2f57e19e412bf954",
+      "license": "GPL-2.0-only; binding/UAPI SPDX exceptions retained",
+      "limitation": "Requires prerequisite development changes; exact SEP input hashes are in patches/identity-20261110/linux-sep-export/baseline-sha256.json. Not reconstructable from pristine upstream alone."
+    }
+  ],
+  "validation": [
+    {
+      "check": "upstream_overlay_reconstruction",
+      "passed": true,
+      "byte_identical_files": 26,
+      "documentation_only_variants": [
+        "patches/identity-20261110/README.md",
+        "patches/identity-20261110/hostcfg-contract.md",
+        "patches/identity-20261110/linux-sep-export/README.md",
+        "patches/standalone-fairplay/aes-snapshot/README.md",
+        "patches/standalone-fairplay/ipatool-linux-experiment.patch",
+        "patches/standalone-fairplay/uid1-provider/README.md"
+      ]
+    },
+    {
+      "check": "restored_shell_syntax_and_python_ast",
+      "passed": true
+    },
+    {
+      "check": "ipatool_patch_application_and_code_equivalence",
+      "passed": true,
+      "upstream_commit": "3e84853e2e5d60540a5022b64895d496910144eb",
+      "documentation_only_variants": [
+        "tools/omvm-fairplay-linux/README.md"
+      ],
+      "durable_state_files": [
+        {
+          "path": "tools/omvm-fairplay-linux/state.go",
+          "sha256": "ed2be992cb92f3d5a78e7313d380ee4aca2fa264d66d3f174709b2571a29bf28"
+        },
+        {
+          "path": "tools/omvm-fairplay-linux/state_test.go",
+          "sha256": "1d970b29beaad5f089f1c1c20a86850f88724a781cc9604c847dd56089e60aaf"
+        }
+      ]
+    },
+    {
+      "check": "qemu_ofr2_patch_application_and_compiler_syntax",
+      "passed": true,
+      "qemu_revision": "760d1d0d29b07341409825eb55e760a52fd7d58f"
+    }
+  ],
+  "limits": [
+    "No relay, guest, hardware provider, service, kernel install or host reboot was run for packaging.",
+    "Kernel patch compilation/application and Darwin relay compilation were not repeated.",
+    "End-to-end account/helper/host restart recovery is not established by source reconstruction."
+  ],
+  "privacy_review": {
+    "scope": "All publication overlay files, including documentation embedded in patches.",
+    "checks": [
+      "Personal home-directory paths and known owner/project labels",
+      "Private network addresses and UUID literals",
+      "Private-key PEM markers",
+      "Emails and operational-history prose",
+      "Source-only file types; no binary payload files"
+    ],
+    "personal_findings": 0,
+    "retained_public_attribution": [
+      "Asahi Linux public maintainer mailing list",
+      "Existing project copyright and license notices"
+    ],
+    "note": "The generic statement about reconnecting a live guest is an integration limit, not a recorded user event. Operational documents and history were excluded."
+  }
+}

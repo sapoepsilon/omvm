@@ -1,0 +1,23 @@
+--- a/arch/arm64/boot/dts/apple/t6001-j314c.dts
++++ b/arch/arm64/boot/dts/apple/t6001-j314c.dts
+@@ -57,6 +57,7 @@
+ 
+ /* Opt-in powered snapshot; keep separate from the default-disabled node. */
+ &aes {
++	interrupts-extended = <&aic AIC_IRQ 0 1117 IRQ_TYPE_LEVEL_HIGH>;
+ 	status = "okay";
+ };
+ 
+--- a/Documentation/devicetree/bindings/crypto/apple,t6000-aes.yaml
++++ b/Documentation/devicetree/bindings/crypto/apple,t6000-aes.yaml
+@@ -38,6 +38,10 @@
+   power-domains:
+     maxItems: 1
+ 
++  interrupts-extended:
++    maxItems: 1
++    description: Engine completion and FIFO status interrupt
++
+ required:
+   - compatible
+   - reg

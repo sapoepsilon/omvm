@@ -10,7 +10,7 @@ guest_major (e.g. 27; docs/graphics.md "macOS 27 updates") and apple_vendor_cap.
 The vmapple machine and its devices are not modelled by libvirt, so they are
 passed as QEMU arguments; libvirt owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
 """
-import os, sys, uuid
+import json, os, sys, uuid
 from xml.sax.saxutils import quoteattr
 
 name, vmdir, qemu, fw, ecid, ssh_port = sys.argv[1:7]
@@ -40,8 +40,19 @@ mac = "52:54:00:%02x:%02x:%02x" % tuple(dom_uuid.bytes[:3])
 xdg = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 AUDIODEV = f"pipewire,id=snd0,out.stream-name={name},in.stream-name={name}"
 
+# The SysCfg serial and MLB Apple personalised this VM with, if known. Both are
+# plain files beside the image so the values stay out of this script; without
+# them QEMU falls back to its placeholders (serial 1234, no MLB).
+identity_args = ""
+for prop, fname in (("serial", "serial"), ("mlb", "mlb")):
+    path = os.path.join(vmdir, fname)
+    if os.path.isfile(path):
+        value = open(path).read().strip()
+        if value:
+            identity_args += f",{prop}={value}"
+
 args = [
-    "-machine", f"uuid={ecid},aux-ram-share=on",
+    "-machine", f"uuid={ecid},aux-ram-share=on,identity=on{identity_args}",
     "-L", f"{qdir}/qemu-bundle/usr/local/share/qemu",
     "-drive", f"if=pflash,format=raw,file.filename={aux},file.locking=off",
     "-drive", f"if=pflash,format=raw,file.filename={disk},file.locking=off",
@@ -69,6 +80,17 @@ args = [
 # so nothing binds it there (docs/graphics.md, "The M2 scaler").
 if os.environ.get("OMVM_M2SCALER", "0") == "1":
     args += ["-device", "apple-m2scaler-pci"]
+# Second NIC on a UDP socket, for kdp. A userspace terminator
+# bridges it to a TUN peer: kdp's LLDB transport is
+# guest-initiated and the user-mode net0 cannot carry it. Opt-in (OMVM_KDP=1).
+# The guest UART (0x20010000) is wired to serial_hd(0). Capturing it gives the
+# AVPBooter and XNU panic text, which is otherwise only on a console we do not
+# have. Opt-in (OMVM_SERIAL=/path/to/log).
+if os.environ.get("OMVM_SERIAL"):
+    args += ["-serial", f"file:{os.environ['OMVM_SERIAL']}"]
+if os.environ.get("OMVM_KDP", "0") == "1":
+    args += ["-netdev", "socket,id=net1,udp=127.0.0.1:42001,localaddr=127.0.0.1:42002",
+             "-device", f"virtio-net-pci,netdev=net1,mac=52:54:00:c4:07:47{virtio_asc}"]
 env = {
     "VK_DRIVER_FILES": icd,
     "REIMS_VGPU_WINDOW": "0",
@@ -79,7 +101,46 @@ env = {
     "REIMS_VGPU_LOG": "error",
     "TMPDIR": f"{home}/.cache/reims-vgpu",
     "XDG_RUNTIME_DIR": xdg,   # the user's PipeWire socket, for sound
+    # Maps the AVP config DMA mailbox at 0x4ffff8. The identity device is
+    # useless without it: the platform expert fetches the host key (the UDID)
+    # through that mailbox, and IdentityService asserts on it and never queues.
+    "OMVM_MAILBOX": "1",
 }
+# Identity-payload options for the experimental QEMU identity device.
+# Source and transport notes are preserved under contrib/apple-services/.
+# ID_SELFDESC serves the 4/4 and 4/6 payload as a serialised message; the 4/3
+# shape and 32-byte body are what the guest accepts.
+env.setdefault("ID_SELFDESC", "1")
+env.setdefault("ID_S3", "1")
+env.setdefault("ID_BLEN64", "1")
+env.setdefault("ID_BO4", "1")
+for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
+    if os.environ.get(_k):
+        env[_k] = os.environ[_k]
+# Experimental real-SEP identity bridge, explicitly enabled per VM. Keep this
+# beside the VM artifacts so `omvm virt` preserves the operator's provider.
+provider_file = os.path.join(vmdir, "identity-provider.json")
+if os.path.exists(provider_file):
+    with open(provider_file) as provider_stream:
+        provider = json.load(provider_stream)
+    expected = {"certificate_chain", "public_key", "trust_root", "socket"}
+    if not isinstance(provider, dict) or set(provider) != expected:
+        raise SystemExit("identity-provider.json must contain exactly four provider paths")
+    for key, variable in (("certificate_chain", "OMVM_IDENTITY_CERT_CHAIN"),
+                          ("public_key", "OMVM_IDENTITY_PUBLIC_KEY"),
+                          ("trust_root", "OMVM_IDENTITY_TRUST_ROOT")):
+        value = provider[key]
+        if not isinstance(value, str) or not value:
+            raise SystemExit("identity provider file paths must be nonempty strings")
+        path = os.path.abspath(os.path.join(vmdir, value))
+        if not os.path.isfile(path):
+            raise SystemExit("identity provider file is missing: " + key)
+        env[variable] = path
+    endpoint = provider["socket"]
+    if not isinstance(endpoint, str) or not endpoint.startswith("/") or len(endpoint.encode()) >= 108:
+        raise SystemExit("identity provider socket must be a valid absolute Unix path")
+    env["OMVM_IDENTITY_SIGNER"] = endpoint
+
 x = lambda s: quoteattr(str(s))
 print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{name}</name>
