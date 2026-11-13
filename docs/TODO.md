@@ -29,9 +29,11 @@ was recorded. Apple Account sign-in was skipped. Separate FairPlay enrollment
 and a cold boot with unchanged identity are now complete; production APNs and
 BAA acquisition succeeded again after that boot. This clears the earlier
 push-certificate hurdle in this lab, but does not prove Messages or Contact
-Key Verification. The lab is running in a second coordinated service-test slot;
-kentra is cleanly stopped for that slot and must be returned afterward on its
-unchanged build.
+Key Verification. The second coordinated service-test slot has ended. The lab
+is cleanly stopped with its verified native X11 setup retained; kentra is
+running again on its unchanged build with pinned SSH and both locks released.
+Native Sol control is waiting at the remote CLI MCP permission prompt.
+Coordinate a new lab slot before any further GUI/account test.
 
 ## P1: Start Linux Apple Account helpers automatically
 

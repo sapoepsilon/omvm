@@ -31,9 +31,12 @@ explicit release. Both guests were cleanly stopped; matched offline guest
 backups, public SEP artifacts and a quiesced kentra helper checkpoint were
 saved before enrollment. Kentra's checkpoint remained byte-identical after
 its managed helper restarted. The original v22 rollback helper, shared SEP
-service and pinned UID1 provider were preserved. The lab is running for service
-acceptance; kentra is stopped for this coordinated slot and must be returned
-with pinned SSH verification afterward.
+service and pinned UID1 provider were preserved. This maintenance slot has
+ended: the lab is cleanly stopped with its native X11 configuration retained,
+and kentra restarted normally on unchanged27.2.1/26B131 with pinned SSH
+verified again after the return worker exited. Both VM locks were released
+and the development pane was notified. Native Sol control awaits the remote
+CLI MCP session permission. A later lab slot must be coordinated anew.
 
 The earlier return at 19:44 UTC reached SSH but shut down ten seconds later for
 an undetermined reason. A normal restart was verified repeatedly and handed
