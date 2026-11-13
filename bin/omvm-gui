@@ -8,7 +8,8 @@
 # It follows the current Omarchy theme (colors.toml, monospace font) and floats
 # centered like other Omarchy tools. Esc closes, Ctrl+R refreshes.
 #
-#   omvm-gui                 open the window (VM name: $OMVM_VM or "macos")
+#   omvm-gui                 open the window (VM: $OMVM_VM, else the one running domain, else
+#                            "macos"); the header menu switches between libvirt domains
 #   omvm-gui --install       add "macOS VM" to the app launcher, link ~/.local/bin/omvm-gui,
 #                            float it in Hyprland, remember this shell's OMVM_* variables
 #   omvm-gui --uninstall     remove the launcher entry, the link and the window rule
@@ -27,8 +28,28 @@ from pathlib import Path
 
 SELF = Path(os.path.realpath(__file__))
 HOME = Path.home()
-VM = os.environ.get("OMVM_VM", "macos")
 VIRSH = ["virsh", "-q", "-c", "qemu:///session"]
+
+
+def domains(*flags):
+    """libvirt session domain names (all, or e.g. --state-running); [] when virsh fails."""
+    try:
+        out = subprocess.run(VIRSH + ["list", "--name", *(flags or ["--all"])], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted(l.strip() for l in out.splitlines() if l.strip())
+
+
+def pick_vm():
+    """$OMVM_VM wins; otherwise the only running domain; otherwise "macos"."""
+    if os.environ.get("OMVM_VM"):
+        return os.environ["OMVM_VM"]
+    running = domains("--state-running", "--state-paused")
+    return running[0] if len(running) == 1 else "macos"
+
+
+VM = pick_vm()
 XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 ENV_FILE = XDG_CONFIG / "omvm" / "gui.env"
 DESKTOP = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications" / "omvm-gui.desktop"
@@ -423,6 +444,15 @@ def main_gui():
             header.set_title_widget(self.wtitle)
             self.spinner = Adw.Spinner(visible=False)
             header.pack_start(self.spinner)
+            names = domains()
+            if VM not in names:
+                names.insert(0, VM)
+            if len(names) > 1:  # switch VM: the window is built around one name, so start over with it
+                self.vm_pick = Gtk.DropDown.new_from_strings(names)
+                self.vm_pick.set_selected(names.index(VM))
+                self.vm_pick.set_tooltip_text("Which VM this window controls")
+                self.vm_pick.connect("notify::selected", lambda dd, _p: self.switch_vm(names[dd.get_selected()]))
+                header.pack_start(self.vm_pick)
             refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh (Ctrl+R)")
             refresh.connect("clicked", lambda *_: self.refresh_all(log=True))
             header.pack_end(refresh)
@@ -503,6 +533,11 @@ def main_gui():
                 btn.set_label(label)
                 btn.set_sensitive(True)
                 self.busy_btn = None
+
+        def switch_vm(self, name):
+            if name != VM:
+                os.environ["OMVM_VM"] = name
+                os.execv(sys.executable, [sys.executable, str(SELF)])
 
         # ---------------------------------------------------------- 1. VM
         def build_vm(self):
