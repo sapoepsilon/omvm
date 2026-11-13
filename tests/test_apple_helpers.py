@@ -85,6 +85,19 @@ class FilesAndSocketsTests(unittest.TestCase):
                 with self.assertRaisesRegex(h.Failure,'peer'):h.peer(p,os.getpid()+1)
             finally:s.close()
 
+    @unittest.skipUnless(os.geteuid()==0 and sys.platform=='linux','Linux root/client socket-owner contract')
+    def test_sep_client_owned_socket_still_requires_root_service_peer(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'sep.sock';s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.bind(str(p));s.listen(4)
+            os.chown(p,1000,-1);os.chmod(p,0o600)
+            try:
+                with self.assertRaisesRegex(h.Failure,'owner'):h.peer(p,os.getpid())
+                h.peer(p,os.getpid(),owner_uid=1000)
+                with self.assertRaisesRegex(h.Failure,'peer'):h.peer(p,os.getpid()+1,owner_uid=1000)
+                with patch.object(h,'SEP',p),patch.object(h,'service_pid',return_value=os.getpid()):
+                    h.sep_peer(CFG)
+            finally:s.close()
+
     @unittest.skipUnless(os.geteuid()==0 and sys.platform=='linux','Linux root lock ownership contract')
     def test_lock_acquisition_is_bounded(self):
         with tempfile.TemporaryDirectory(dir='/run') as d:

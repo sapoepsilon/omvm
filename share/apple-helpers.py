@@ -198,17 +198,32 @@ def paths(name):
     return Path('/run/omvm-fairplay-managed-'+name)/'relay.sock', STATE/'vms'/name/'state.bin'
 
 
-def peer(path, expected_pid=None):
+def peer(path, expected_pid, owner_uid=0):
     st=path.lstat()
-    require(stat.S_ISSOCK(st.st_mode) and st.st_uid==0, 'helper socket owner/type mismatch')
+    require(stat.S_ISSOCK(st.st_mode) and st.st_uid==owner_uid, 'helper socket owner/type mismatch')
     s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
     s.settimeout(2)
     try:
         s.connect(str(path))
         pid,uid,_=struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
-        require(uid==0 and (expected_pid is None or pid==expected_pid), 'unexpected helper socket peer')
+        require(uid==0 and expected_pid>0 and pid==expected_pid, 'unexpected helper socket peer')
     finally:
         s.close()
+
+
+def service_pid(name):
+    values=command(['/usr/bin/systemctl','show',name,'-p','MainPID','-p','ActiveState']).decode().splitlines()
+    properties=dict(x.split('=',1) for x in values if '=' in x)
+    require(properties.get('ActiveState') in ('active','activating'), 'helper service is not running: '+name)
+    pid=int(properties.get('MainPID','0'))
+    require(pid>0,'helper service has no main process: '+name)
+    return pid
+
+
+def sep_peer(cfg):
+    # The SEP signer intentionally gives the client UID ownership of its 0600
+    # socket. SO_PEERCRED must still identify the root systemd service process.
+    peer(SEP,service_pid('omvm-sep-identity.service'),owner_uid=cfg['allow_uid'])
 
 
 def ready(cfg, name, acl=False, wait=30):
@@ -220,12 +235,9 @@ def ready(cfg, name, acl=False, wait=30):
         try:
             status=provider_status(cfg)
             require(status['state']==2, 'UID1 is not READY')
-            values=command(['/usr/bin/systemctl','show',unit(name),'-p','MainPID','-p','ActiveState']).decode().splitlines()
-            properties=dict(x.split('=',1) for x in values if '=' in x)
-            require(properties.get('ActiveState') in ('active','activating'), 'FairPlay service is not running')
-            require(int(properties.get('MainPID','0'))>0, 'FairPlay service has no main process')
-            peer(SEP)
-            peer(sock,int(properties['MainPID']))
+            pid=service_pid(unit(name))
+            sep_peer(cfg)
+            peer(sock,pid)
             if acl:
                 command(['/usr/bin/setfacl','-m',f"u:{cfg['allow_uid']}:--x",str(sock.parent)])
                 command(['/usr/bin/setfacl','-m',f"u:{cfg['allow_uid']}:rw-",str(sock)])
@@ -244,7 +256,7 @@ def serve(cfg,name):
     require(state.exists(), 'helper state is missing; explicit enrollment is required')
     secure_file(state, 16*1024*1024)
     require(provider_status(cfg)['state']==2, 'UID1 is not READY')
-    peer(SEP)
+    sep_peer(cfg)
     os.environ['XDG_CACHE_HOME']=cfg['cache']['path']
     argv=[cfg['backend']['path'],'-socket',str(sock),'-identifier-file',vm['identifier']['path'],
           '-device-aes',str(DEVICE),'-device-aes-dsb','-state-file',str(state)]
