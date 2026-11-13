@@ -85,10 +85,11 @@ Xcode 27.2
   PipeWire: macOS output plays through the laptop's speakers (a stream named after the VM),
   and its input records from the host's default microphone.
 - **Apple Account sign-in:** an experimental Linux SEP/FairPlay bridge completed
-  sign-in in the existing test VM, and the account survived a guest restart.
-  It is not part of the normal installer. Fresh-image reproducibility, recovery
-  after a Linux host restart, and complete encrypted iCloud syncing remain
-  unverified. See the [work log](docs/log.md) for the tested scope.
+  sign-in in the existing test VM and a newly restored VM with a new identity.
+  The existing VM's account also survived a guest restart. The bridge is not yet
+  part of the normal installer; [automatic helper startup is planned](docs/TODO.md).
+  Recovery after a Linux host/helper restart and complete encrypted iCloud
+  syncing remain unverified. See the [work log](docs/log.md) for the tested scope.
 
 ## Requirements
 
