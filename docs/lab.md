@@ -132,7 +132,14 @@ confirmed the lab account for sign-in; its password is held in the OS keyring
 and a single private native-input attempt reached the trusted-device code
 prompt at 21:44:28 UTC. Guest akd recorded successful SRP at 21:43:59 UTC.
 The owner was asked to enter MFA directly; no code or retry has been submitted.
-Account completion, Messages and CKV need their separate acceptance evidence.
+The first secondary-auth exchange completed before the later incorrect-code
+alert. Correlated logs subsequently show account authenticated=true with
+HTTP200, primary account addition at21:54:01UTC, and native signed-in overview
+at22:03:09UTC. CDP encrypted-data recovery failed separately after finding no
+escrow records; iCloud settings remain Loading. Actual Messages/CKV and
+post-reboot service acceptance are still unverified. The owner added reliable
+first-attempt sign-in as a requirement; explain/fix the extra prompts and prove
+a clean flow rather than accepting a resend workaround.
 
 ## VNC route tested, then retired
 

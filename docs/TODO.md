@@ -18,6 +18,9 @@ sequence and the shared-host limits.
   first Linux boot on 27.3/26C5035r obtained BAA certificates and push tokens.
 - [x] Verify visible native Terra input and local desktop login.
 - [ ] Complete stock Apple Account sign-in and a fresh authenticated request.
+- [ ] Diagnose/fix repeated MFA and final-local-password behavior; prove a clean
+  first attempt with one fresh code and one submission per required password
+  prompt. Owner added this acceptance requirement on 2026-11-13.
 - [ ] Verify Messages activation and an authorized send/receive test.
 - [ ] Test Contact Key Verification after Messages and its prerequisites work;
   distinguish its result from the separately deferred Keychain-sync diagnosis.
@@ -108,7 +111,11 @@ This is not established as the same failure as APNs key generation -25308.
 - [ ] Confirm sync remains enabled and an owner-approved test item syncs. Do not
   count Apple Account sign-in or a beta upgrade alone as Keychain sync success.
 
-## P2: Explain the stale or repeated verification prompt
+## P1: Fix first-attempt sign-in reliability
+
+Owner promoted this to the active lab goal on 2026-11-13. A resend workaround
+does not satisfy the requested reliable first attempt. Preserve the original
+iMessage, CKV and host-reboot acceptance requirements.
 
 - [ ] Correlate UI completion, first MFA success and follow-up service requests
   without collecting secrets. In the fresh test, secondary authentication,
