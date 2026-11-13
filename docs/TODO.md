@@ -48,6 +48,23 @@ normally and enters credentials/MFA in stock macOS. Helper startup requires no
 manual terminal work or native Mac service, and tested restart behavior is
 documented. Native macOS factory restore remains a separate image-creation step.
 
+## P2: Investigate iCloud Passwords & Keychain sync recovery
+
+Deferred by the owner on 2026-11-13; record the failure and revisit later.
+During the 16:40–16:43 UTC attempt on macos-fresh (27.2.1/26B131), account
+authentication succeeded but Cloud Data Protection repair/recovery did not
+establish encrypted-sync trust-circle membership. cdpd explicitly returned
+Keychain sync disabled. Observed errors were CDPStateError -5700, then -5305
+and -5308; their precise symbolic meanings and underlying cause remain open.
+This is not established as the same failure as APNs key generation -25308.
+
+- [ ] Revisit the normal encrypted-sync recovery flow after the OS/APNs work;
+  correlate the actual prompt and bounded, sanitized cdpd/TrustedPeersHelper logs.
+- [ ] Identify why trust membership/recovery fails; distinguish push availability,
+  account authentication and local/remote-secret recovery without assuming a cause.
+- [ ] Confirm sync remains enabled and an owner-approved test item syncs. Do not
+  count Apple Account sign-in or a beta upgrade alone as Keychain sync success.
+
 ## P2: Explain the stale or repeated verification prompt
 
 - [ ] Correlate UI completion, first MFA success and follow-up service requests
