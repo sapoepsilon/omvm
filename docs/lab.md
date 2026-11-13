@@ -136,10 +136,34 @@ The first secondary-auth exchange completed before the later incorrect-code
 alert. Correlated logs subsequently show account authenticated=true with
 HTTP200, primary account addition at21:54:01UTC, and native signed-in overview
 at22:03:09UTC. CDP encrypted-data recovery failed separately after finding no
-escrow records; iCloud settings remain Loading. Actual Messages/CKV and
-post-reboot service acceptance are still unverified. The owner added reliable
+escrow records; iCloud settings remained Loading at that observation. The owner added reliable
 first-attempt sign-in as a requirement; explain/fix the extra prompts and prove
 a clean flow rather than accepting a resend workaround.
+
+Later2026-11-13 evidence: IDS com.apple.madrid registration and callback
+succeeded at22:14:57UTC. The owner subsequently confirmed an outgoing send
+worked and a fresh reply arrived inside the lab. This is an owner-observed
+end-to-end messaging result; native screenshots have not independently shown
+both delivery bubbles. Keychain trust, Contact Key Verification, reliable
+first-attempt sign-in and post-host-reboot service recovery remain incomplete.
+
+Native supervision now reviews actual screenshots/actions every3–5minutes.
+Intermittent black/stale captures remain unresolved. A bounded diagnostic
+recorded left-button down/up at QEMU; all input traces were restored disabled.
+One local unlock succeeded at22:52UTC after correcting a private handoff schema
+and allowing verified focus restoration within the same task. Two earlier
+handoffs submitted no password. Read-only console state and a fresh desktop
+image corroborate unlock; private input was deleted. No Apple reauthentication
+or account reset was performed. A temporary display-awake assertion expires
+automatically; persistent lock preferences are unchanged.
+
+The trust failure predates the final local-password prompt: secure-channel
+initialization fell back at21:49:39UTC, no viable recovery records appeared
+at21:50:18UTC, then local-password approval began at21:50:55UTC. Later
+noPreparedIdentity appears during device-name lookup and is not proof of a
+failed identity-generation operation. A CloudKit cache sandbox denial is
+confirmed, but later fetches succeed; do not repair Unix permissions or reset
+encrypted data speculatively. Inspect normal trusted-device approval next.
 
 ## VNC route tested, then retired
 

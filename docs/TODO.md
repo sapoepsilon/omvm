@@ -17,13 +17,18 @@ sequence and the shared-host limits.
 - [x] Verify BAA acquisition and production APNs connection before account retries:
   first Linux boot on 27.3/26C5035r obtained BAA certificates and push tokens.
 - [x] Verify visible native Terra input and local desktop login.
-- [ ] Complete stock Apple Account sign-in and a fresh authenticated request.
+- [x] Complete stock Apple Account sign-in and a fresh authenticated request:
+  authenticated HTTP200, primary account addition and native overview verified.
 - [ ] Diagnose/fix repeated MFA and final-local-password behavior; prove a clean
   first attempt with one fresh code and one submission per required password
   prompt. Owner added this acceptance requirement on 2026-11-13.
-- [ ] Verify Messages activation and an authorized send/receive test.
+- [x] Verify Messages registration and an authorized send/receive test:
+  IDS com.apple.madrid registered at22:14:57UTC; owner confirmed a successful
+  outgoing send and a new incoming reply in the lab on2026-11-13. Delivery
+  evidence is the owner's live observation; native capture remains unreliable.
 - [ ] Test Contact Key Verification after Messages and its prerequisites work;
-  distinguish its result from the separately deferred Keychain-sync diagnosis.
+  establish the lab's iCloud Keychain trust first. Preserve kentra's separately
+  deferred Keychain diagnosis.
 - [ ] Verify normal host reboot recovery with matched backups, HC coordination,
   actual authenticated guest access, and usable kentra afterward.
 
@@ -43,7 +48,9 @@ login are now verified, with VM and operator visible on workspace 5. The owner
 requested --yolo for the dedicated CLI, with unchanged global settings.
 A single private Apple Account sign-in attempt reached trusted-device MFA
 after successful SRP; the owner was asked to enter the code in the visible VM.
-Inspect the UI and dated result before any further submission. Do not repeat the completed switch or enrollment.
+Later authentication and owner-observed messaging results complete the checks
+above. Inspect the UI and dated result before any further submission. Do not
+repeat the completed switch, enrollment or Apple Account sign-in.
 
 ## P1: Start Linux Apple Account helpers automatically
 
