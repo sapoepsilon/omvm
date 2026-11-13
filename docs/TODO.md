@@ -1,5 +1,27 @@
 # TODO
 
+## P1: Continue service testing in omvm-lab
+
+Owner resumed this goal on 2026-11-13 after retaining kentra for development.
+Create a new independent lab guest; never use kentra's account session or
+platform identity as its template. See [lab.md](lab.md) for the acceptance
+sequence and the shared-host limits.
+
+- [ ] Restore a new omvm-lab identity and blank disk, transfer the stopped pair,
+  and complete local Setup Assistant on Linux without Apple Account sign-in.
+- [ ] Capture its actual guest IOPlatformUUID and enroll separate managed helper
+  state. Verify Linux-only SEP/FairPlay runtime and identity continuity.
+- [ ] Test BAA acquisition and production APNs connection before account retries,
+  then verify Messages activation and an authorized send/receive test.
+- [ ] Test Contact Key Verification after Messages and its prerequisites work;
+  distinguish its result from the separately deferred Keychain-sync diagnosis.
+- [ ] Verify normal host reboot recovery with matched backups, HC coordination,
+  actual authenticated guest access, and usable kentra afterward.
+
+The official 27.3/26C5035r restore image is being downloaded for a fresh-restore
+experiment. This avoids the previous in-place update handoff; successful Linux
+boot and any APNs fix remain unverified. kentra remains on its current OS.
+
 ## P1: Start Linux Apple Account helpers automatically
 
 Requested 2026-11-12 after a new factory-restored VM completed Apple Account
