@@ -38,8 +38,9 @@ Domains/profiles and helper PIDs remained unchanged; watchdogs remain off and
 both operation locks were released. Native Terra screenshots/input and local
 login are now verified, with VM and operator visible on workspace 5. The owner
 requested --yolo for the dedicated CLI, with unchanged global settings.
-A private Apple Account sign-in attempt is underway; inspect its dated result
-before another attempt. Do not repeat the completed switch or enrollment.
+A single private Apple Account sign-in attempt reached trusted-device MFA
+after successful SRP; the owner was asked to enter the code in the visible VM.
+Inspect the UI and dated result before any further submission. Do not repeat the completed switch or enrollment.
 
 ## P1: Start Linux Apple Account helpers automatically
 

@@ -129,8 +129,10 @@ nonsecret A@2.Z through mouse clicks; it remains enabled in the lab. No Apple
 Account password was submitted during that retired VNC test. At 21:39:01 UTC,
 Terra opened the empty stock Apple Account form. The owner subsequently
 confirmed the lab account for sign-in; its password is held in the OS keyring
-and a bounded private native-input task is underway. Account authentication,
-Messages and CKV still need their separate acceptance evidence.
+and a single private native-input attempt reached the trusted-device code
+prompt at 21:44:28 UTC. Guest akd recorded successful SRP at 21:43:59 UTC.
+The owner was asked to enter MFA directly; no code or retry has been submitted.
+Account completion, Messages and CKV need their separate acceptance evidence.
 
 ## VNC route tested, then retired
 
