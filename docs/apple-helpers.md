@@ -28,6 +28,10 @@ retained before the restart. Original v22 helpers remain alive for rollback.
 Full Linux host reboot remains to be verified after coordinating other host work
 and the encrypted-root unlock. Guest watchdog and autostart are still disabled.
 
+The bounded synchronized-clock launch check is also installed. All 18 Linux-root
+lifecycle tests pass; the installed script matches source and recognizes the
+current synchronized clock. Deployment did not restart the helper or guest.
+
 ## Installation and migration
 
 Use the reviewed v23-or-later backend with durable-state support. Stage its
