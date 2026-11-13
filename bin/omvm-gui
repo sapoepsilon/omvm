@@ -8,8 +8,8 @@
 # It follows the current Omarchy theme (colors.toml, monospace font) and floats
 # centered like other Omarchy tools. Esc closes, Ctrl+R refreshes.
 #
-#   omvm-gui                 open the window (VM: $OMVM_VM, else the one running domain, else
-#                            "macos"); the header menu switches between libvirt domains
+#   omvm-gui                 open the window (VM: $OMVM_VM, saved default, the one running
+#                            domain, then "macos"); the header menu switches between domains
 #   omvm-gui --install       add "macOS VM" to the app launcher, link ~/.local/bin/omvm-gui,
 #                            float it in Hyprland, remember this shell's OMVM_* variables
 #   omvm-gui --uninstall     remove the launcher entry, the link and the window rule
@@ -42,14 +42,13 @@ def domains(*flags):
 
 
 def pick_vm():
-    """$OMVM_VM wins; otherwise the only running domain; otherwise "macos"."""
-    if os.environ.get("OMVM_VM"):
-        return os.environ["OMVM_VM"]
+    """The loaded environment/saved default wins, then the only running domain, then "macos"."""
+    if ENV.get("OMVM_VM"):
+        return ENV["OMVM_VM"]
     running = domains("--state-running", "--state-paused")
     return running[0] if len(running) == 1 else "macos"
 
 
-VM = pick_vm()
 XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 ENV_FILE = XDG_CONFIG / "omvm" / "gui.env"
 DESKTOP = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications" / "omvm-gui.desktop"
@@ -61,11 +60,6 @@ HYPR_RULE = (f'o.window("^{APP_RE}$", {{ tag = "+floating-window" }})'
              "  -- omvm-gui: float + center like other Omarchy tools")
 THEME_DIRS = [HOME / ".local/state/omarchy/current", XDG_CONFIG / "omarchy/current"]
 TAILSCALE_FALLBACK = "100.72.93.99"
-HOSTS = [  # (Moonlight host, Sunshine config dir, base port, user unit)
-    ("omarchy", XDG_CONFIG / "sunshine", 47989, "omvm-sunshine"),
-    (VM, XDG_CONFIG / f"sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
-]
-WATCHDOG = f"omvm-vm@{VM}.timer"
 # libvirt domstate -> (label, css class)
 STATES = {
     "running": ("Running", "success"),
@@ -123,6 +117,12 @@ def load_env():
 
 
 ENV = load_env()
+VM = pick_vm()
+HOSTS = [  # (Moonlight host, Sunshine config dir, base port, user unit)
+    ("omarchy", XDG_CONFIG / "sunshine", 47989, "omvm-sunshine"),
+    (VM, XDG_CONFIG / f"sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
+]
+WATCHDOG = f"omvm-vm@{VM}.timer"
 
 
 # ---------------------------------------------------------------- install
@@ -133,11 +133,11 @@ def install():
     try:
         for line in ENV_FILE.read_text().splitlines():
             k, _, v = line.partition("=")
-            if k.startswith("OMVM_"):
+            if k.startswith(("OMVM_", "OMAC_")):
                 saved[k] = v
     except OSError:
         pass
-    saved.update({k: v for k, v in os.environ.items() if k.startswith("OMVM_")})
+    saved.update({k: v for k, v in os.environ.items() if k.startswith(("OMVM_", "OMAC_"))})
     ENV_FILE.write_text("".join(f"{k}={v}\n" for k, v in sorted(saved.items())))
     DESKTOP.parent.mkdir(parents=True, exist_ok=True)
     DESKTOP.write_text(

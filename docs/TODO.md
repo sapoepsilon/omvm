@@ -5,7 +5,8 @@
 Requested 2026-11-12 after a new factory-restored VM completed Apple Account
 sign-in using the Linux SEP and FairPlay providers. The owner wants launching a
 VM to handle the helper setup automatically, including from the Omarchy GUI.
-Status (2026-11-13): implemented and installed for macos-fresh. Managed helper
+Status (2026-11-13): implemented and installed for kentra (renamed from
+macos-fresh). Managed helper
 process restart plus a cold guest boot recovered authenticated Apple access.
 Full Linux host reboot acceptance remains pending; see docs/apple-helpers.md.
 

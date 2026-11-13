@@ -41,8 +41,9 @@ KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
 # The guest account omvm logs in as. Upstream's create-account.sh names it aquarat
 # unless told otherwise; set OMVM_GUEST_USER before `omvm setup` (or after renaming
 # the account) and keep it in ~/.config/omvm/gui.env, which services also read.
-cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1; }
+cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1 || true; }
 GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"; GUEST_USER="${GUEST_USER:-aquarat}"
+OMVM_VM="${OMVM_VM:-$(cfg_env OMVM_VM)}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
 KPKG=linux-aurora-vmapple

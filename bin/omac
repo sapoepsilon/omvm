@@ -30,18 +30,18 @@
 #   omac status                 domain state, running guests, SSH reachability
 #   omac shell [CMD...]         SSH into the app VM (omvm ssh)
 #
-# OMAC_VM picks the VM (default macapps), OMAC_SOURCE the clone source (macos27).
+# OMAC_VM / OMAC_SOURCE override gui.env; fallbacks are macapps / macos27.
 set -euo pipefail
 
-cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1; }
+cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1 || true; }
 OMVM_UPSTREAM="${OMVM_UPSTREAM:-$(cfg_env OMVM_UPSTREAM)}"; OMVM_UPSTREAM="${OMVM_UPSTREAM:-$HOME/Work/macos-vm/apple-macos-arm64-vm-guest}"
 OMVM_IMAGES="${OMVM_IMAGES:-$(cfg_env OMVM_IMAGES)}"; OMVM_IMAGES="${OMVM_IMAGES:-$HOME/vm-artifacts}"
 OMVM_KEY="${OMVM_KEY:-$(cfg_env OMVM_KEY)}"; OMVM_KEY="${OMVM_KEY:-$HOME/.ssh/vmapple_runner}"
 OMVM_UPSTREAM="${OMVM_UPSTREAM/#\~/$HOME}"; OMVM_IMAGES="${OMVM_IMAGES/#\~/$HOME}"; OMVM_KEY="${OMVM_KEY/#\~/$HOME}"
 export OMVM_UPSTREAM OMVM_IMAGES OMVM_KEY
 
-VM="${OMAC_VM:-macapps}"
-SOURCE="${OMAC_SOURCE:-macos27}"
+VM="${OMAC_VM:-$(cfg_env OMAC_VM)}"; VM="${VM:-macapps}"
+SOURCE="${OMAC_SOURCE:-$(cfg_env OMAC_SOURCE)}"; SOURCE="${SOURCE:-macos27}"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 OMVM="${OMVM_BIN:-$(dirname "$SELF")/omvm}"
 [ -x "$OMVM" ] || OMVM="$(command -v omvm || echo omvm)"

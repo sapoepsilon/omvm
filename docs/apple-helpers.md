@@ -6,9 +6,40 @@ these services through libvirt's `prepare/begin` hook. The GUI and CLI therefore
 use the same readiness gate, as do direct `virsh start` and the watchdog.
 This integration does not turn on guest autostart or change its display.
 
+## Retained development VM (2026-11-13)
+
+The owner retained `macos-fresh` as **`kentra`** and retired the other four
+Omarchy guests. The guest directory is now `~/vm-artifacts/vms/kentra`, with
+the same disks, Apple/platform identity, libvirt UUID and SSH port 41375.
+It remains on macOS 27.2.1/26B131 with Xcode 27.2/27B52; the beta attempt
+returned to the original OS and further upgrade work is deferred.
+
+The managed instance is `omvm-fairplay@kentra.service`; its state lives under
+`/var/lib/omvm/apple-helpers/vms/kentra` and its socket is
+`/run/omvm-fairplay-managed-kentra/relay.sock`. The manifest key and staged
+identifier path were renamed together, preserving all identifier/checkpoint
+bytes. No enrollment, new identity, provider reset or host reboot occurred.
+An offline matched guest backup and private helper checkpoint precede the rename.
+The restarted VM reached SSH, Xcode reported its version, and the native desktop
+still showed the signed-in Apple Account. A new authenticated server request was
+not separately tested during this rename.
+
+Guest watchdog/autostart remain disabled. Saved `OMVM_VM=kentra` in
+`~/.config/omvm/gui.env` selects it for the CLI and GUI even when stopped;
+`OMAC_VM=kentra` and `OMAC_SOURCE=kentra` point application commands at the
+retained guest. Explicit environment variables override these saved defaults.
+The separate UTM VM named kentra on another Mac is unrelated.
+
+Keep `/var/lib/omvm/identity/macos/`: despite its old basename, the active
+shared SEP signer still uses its public key. Keep the shared QEMU data,
+firmware, provider/cache assets and fresh restore provenance. The original
+fresh-v22 rollback helper retains its historical `macos-fresh` instance name;
+the old macos27-v22 helper has been retired.
+
 ## Observed recovery (2026-11-13)
 
-The three persistent units are installed and enabled for `macos-fresh`. A clean
+The three persistent units were installed and enabled for `macos-fresh`
+(now `kentra`). A clean
 managed-helper stop/start followed by a cold guest boot preserved the guest UUID
 and its native ADI provisioning file. The new helper serviced fresh queue-0/3
 requests. After local login, the account overview remained signed in; stock akd
@@ -24,7 +55,8 @@ native-state recovery, or full host boot ordering. Other account-context errors,
 iMessage/APNs and Contact Key Verification remain unresolved.
 
 A matched offline VM snapshot and quiesced root-private helper checkpoint were
-retained before the restart. Original v22 helpers remain alive for rollback.
+retained before the restart. The original fresh-v22 helper remains alive for rollback; the retired
+macos27 control no longer runs.
 Full Linux host reboot remains to be verified after coordinating other host work
 and the encrypted-root unlock. Guest watchdog and autostart are still disabled.
 
