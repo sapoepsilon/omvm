@@ -7,8 +7,9 @@ Shared UID1/SEP started automatically; starting only lab through the normal
 libvirt gate automatically started its FairPlay helper. Host/guest audits pass
 with unchanged identity/checkpoint/provenance and kentra off. A fresh signed
 Apple device-list server fetch completed HTTP200 at01:05:37, proving authenticated
-recovery. Initial preboot iMessage send/reply passed; the distinct postboot
-exchange is in progress. Keychain remains Untrusted and CKV is unfinished.
+recovery. Both initial and postboot iMessage send/reply now pass: delivery/read receipts
+and a fresh incoming test reply were independently verified. Keychain remains
+Untrusted and CKV is unfinished. First-attempt login reliability is unproven.
 The last completed recovery attempt found zero escrow records after successful
 authentication/local approval; do not repeat it without a changed prerequisite.
 Matched offline backup and private reports are in the20261114 reboot handoff.
