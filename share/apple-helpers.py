@@ -453,7 +453,10 @@ def guest_process(proc):
         identities = qemu_options(args, ('-uuid',))
         if len(identities) == 1:
             guest['uuid_sha256'] = uuid_digest(identities[0])
-        guest['machine_verified'] = machine_types(args) == [['vmapple']]
+        # libvirt supplies the type; omvm adds a separate -machine clause
+        # containing only identity/storage properties. Those do not select
+        # another type. Duplicate or conflicting explicit types still fail.
+        guest['machine_verified'] = [types for types in machine_types(args) if types] == [['vmapple']]
     except Failure:
         guest = {'pid': pid, 'name': None}
     try:
