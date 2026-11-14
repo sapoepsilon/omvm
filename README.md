@@ -18,6 +18,11 @@ m1n1, and wraps the guest lifecycle in a few commands.
 
 ## What you get
 
+**Apple-services development:** start with the
+[status and source map](docs/apple-services.md), then the
+[manual test checklist](docs/apple-services-testing.md) and
+[Omarchy/Aurora upstream plan](docs/apple-services-upstream.md).
+
 ```console
 $ omvm run -- 'sw_vers; xcodebuild -version'
 ProductName:    macOS

@@ -1,5 +1,10 @@
 # Linux Apple Account helper lifecycle
 
+For current scope and results, start with the [review hub](apple-services.md).
+Use the [manual checklist](apple-services-testing.md) for owner testing before
+upstream submission. This guide describes implementation and installation;
+it is not a command sequence to rerun on an already authenticated guest.
+
 The host needs its existing SEP identity signer, the pinned UID1 provider and
 one persistent FairPlay service for each enrolled VM. A guest launch waits for
 these services through libvirt's `prepare/begin` hook. The GUI and CLI therefore
