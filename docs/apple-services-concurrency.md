@@ -1,29 +1,23 @@
 # Experimental two-VM Apple services
 
-The revised launch-binding implementation passes 104 root offline Python tests,
-including the reparented-QEMU regression, PID-file validation, process reuse,
-hook migration and bound/unbound release behavior. Shell syntax and whitespace
-checks also pass. These checks do not replace the pending live retry below.
+Source `63cb7cd` has passed a live two-guest cold-boot test. Both guests run
+concurrently with healthy Linux helpers, two exact process-bound reservations
+and no pending slots. A synthetic third-slot request to the installed gate was
+rejected without creating a guest or issuing hardware work. One guest and its
+helper also completed a clean stop/cold boot while the other guest stayed up.
 
-The two-VM implementation remains experimental. Source checkpoint `df38783`
-was installed for a controlled first-guest test: cold boot, helper readiness
-and SSH passed, and the provider stayed healthy without a reset. QEMU was
-reparented to the user's systemd, so the ancestry-only gate counted that live
-guest and its pending reservation twice. A second guest was not launched. The
-first guest and its helper were cleanly stopped, leaving no reservations.
+**Fresh authenticated service use in both guests is still pending.** One local
+desktop unlock remains incomplete. The earlier
+[one-VM Apple Account, iMessage and normal-reboot results](apple-services.md)
+remain the service baseline. Contact Key Verification remains deferred. Helper
+readiness, guest SSH and capability probes alone are not service acceptance.
 
-The revised gate below binds reservations to verified QEMU process identities
-so reparenting does not consume another slot. **The second live attempt and
-concurrent authenticated-service proof are pending.**
-The [one-VM Apple Account, iMessage and normal-reboot results](apple-services.md)
-remain the historical tested baseline. Contact Key Verification remains deferred.
-Successful capability probes and helper readiness are not service acceptance.
-
-At `df38783`, offline validation on Linux ARM64 passed 84 Python tests as root
-with fake hardware/services, all eight Go SAP/library and tool packages, and
-the focused device/client race checks. Both binaries built with Go1.26.5; a
-fresh public-base reconstruction matched all 12 changed files. These results
-predate the revised process binding and do not establish live acceptance.
+Validation passes 105 root offline Python tests, all eight Go SAP/library and
+tool packages, focused device/client race checks, shell syntax and whitespace
+checks. Both Linux ARM64 binaries built with Go1.26.5; a fresh public-base
+reconstruction matched all 12 changed adapter files. The process-binding tests
+cover reparenting, real Omvm machine-option layout, PID-file validation, process
+reuse, hook migration and bound/unbound release behavior.
 
 This mode keeps one shared Linux SEP signer and UID1 provider, with a separate
 FairPlay process, identifier and durable checkpoint for each VM. It does not

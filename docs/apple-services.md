@@ -11,11 +11,10 @@ That is evidence for one installed configuration, not a clean build/install of
 this branch or support for every Apple Silicon machine.
 
 An opt-in [two-VM implementation](apple-services-concurrency.md) adds
-transaction arbitration and separate launch reservations. The first installed
-guest booted with healthy helpers; that trial exposed QEMU reparenting and
-blocked the second start. The corrected launch binding and concurrent
-authenticated services are still awaiting live verification. The existing
-one-VM results remain the service baseline.
+transaction arbitration and separate launch reservations. Live two-guest cold
+boots, correct slot accounting, third-slot refusal and a per-guest restart with
+a running sibling passed. Fresh authenticated requests in both guests remain
+pending; the existing one-VM results remain the service baseline.
 
 ## Next steps
 
@@ -38,7 +37,7 @@ one-VM results remain the service baseline.
 | iMessage | Outbound delivery and a new inbound reply observed | Owner manual pass pending |
 | Normal host reboot | Shared Linux helpers auto-started; normal guest launch started its FairPlay helper; fresh messaging recovered | Owner manual pass and fresh-build reproduction pending |
 | No Mac helper at runtime | Local Linux SEP/FairPlay sockets used | Verify installed artifacts/endpoints in each test |
-| Two concurrent guests | First installed guest/helper boot passed; second start was blocked before launch | Corrected launch binding and concurrent authenticated service test pending |
+| Two concurrent guests | Two live guests/helpers, correct slot accounting and third-slot refusal passed | Fresh authenticated service checks in both guests pending |
 | Keychain / Contact Key Verification | Encrypted-data trust unresolved; work deferred | Not supported by current acceptance claims |
 | First-attempt sign-in | Diagnostic added; cause/remedy and clean flow unproven | Saved-log replay is not a sign-in test |
 | Desktop / suspend | Desktop regression checks still needed; provider vetoes system sleep after activation | Not ready for general desktop deployment |

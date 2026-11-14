@@ -22,9 +22,9 @@ experimental two-VM operation. Its
 incremental inputs and outputs. See the
 [concurrency guide](../../docs/apple-services-concurrency.md) for admission,
 upgrade and rollback requirements. Live concurrent authenticated-service
-validation is pending. The first installed guest/helper boot passed but exposed
-a launch-reservation association issue before the second guest could start;
-the revised lifecycle gate awaits the next live test.
+validation is pending. The revised lifecycle gate passed live two-guest cold
+boots, correct process-bound slot accounting and third-slot refusal. See the
+concurrency guide for the remaining service checks.
 
 ## Reconstruct the source
 
