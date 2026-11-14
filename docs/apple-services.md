@@ -10,6 +10,11 @@ and another exchange after a normal host reboot with automatic Linux helpers.
 That is evidence for one installed configuration, not a clean build/install of
 this branch or support for every Apple Silicon machine.
 
+An opt-in [two-VM implementation](apple-services-concurrency.md) now adds
+transaction arbitration and separate launch reservations. Source builds and
+offline tests pass; it has not been installed or verified with two live
+authenticated guests. The existing one-VM results remain the tested baseline.
+
 ## Next steps
 
 1. Run the [manual checklist](apple-services-testing.md) on the existing lab.
@@ -31,6 +36,7 @@ this branch or support for every Apple Silicon machine.
 | iMessage | Outbound delivery and a new inbound reply observed | Owner manual pass pending |
 | Normal host reboot | Shared Linux helpers auto-started; normal guest launch started its FairPlay helper; fresh messaging recovered | Owner manual pass and fresh-build reproduction pending |
 | No Mac helper at runtime | Local Linux SEP/FairPlay sockets used | Verify installed artifacts/endpoints in each test |
+| Two concurrent guests | Not installed or tested with live authenticated services | Experimental opt-in; source builds and offline contracts passed |
 | Keychain / Contact Key Verification | Encrypted-data trust unresolved; work deferred | Not supported by current acceptance claims |
 | First-attempt sign-in | Diagnostic added; cause/remedy and clean flow unproven | Saved-log replay is not a sign-in test |
 | Desktop / suspend | Desktop regression checks still needed; provider vetoes system sleep after activation | Not ready for general desktop deployment |
@@ -46,7 +52,7 @@ identity signing and FairPlay service execution on Linux.
 | Component | Source / guide | Review boundary |
 | --- | --- | --- |
 | CLI, app and domain integration | [`bin/`](../bin), [`share/libvirt-domain.py`](../share/libvirt-domain.py), [application guide](omac.md) | Keep desktop/app behavior separate from kernel changes |
-| Helper lifecycle and libvirt gate | [`share/apple-helpers.py`](../share/apple-helpers.py), [`share/install-apple-helpers.py`](../share/install-apple-helpers.py), [`share/apple-helpers-hook.py`](../share/apple-helpers-hook.py), [helper guide](apple-helpers.md) | Shared SEP/UID1 startup, one active guest, on-demand per-VM FairPlay |
+| Helper lifecycle and libvirt gate | [`share/apple-helpers.py`](../share/apple-helpers.py), [`share/install-apple-helpers.py`](../share/install-apple-helpers.py), [`share/apple-helpers-hook.py`](../share/apple-helpers-hook.py), [helper guide](apple-helpers.md), [concurrency guide](apple-services-concurrency.md) | Shared SEP/UID1 startup, one guest by default, experimental two-VM admission, on-demand per-VM FairPlay |
 | Linux SEP signer | [`share/sep-identity-provider.py`](../share/sep-identity-provider.py), [`share/omvm-sep-identity.service`](../share/omvm-sep-identity.service) | Existing private signer configuration is an installation prerequisite |
 | Kernel, QEMU and identity prerequisites | [reconstruction order](../contrib/apple-services/prerequisites/README.md) | Exact public baselines and dependent patches; separate kernel and QEMU reviews |
 | Restore preparation | [upstream source delta](../contrib/apple-services/upstream-source-changes.patch), [auxiliary parser](../contrib/apple-services/scripts/extract-aux.py) | Factory-model defaults and auxiliary storage extraction; separate from Linux runtime helpers |
@@ -63,9 +69,16 @@ identity signing and FairPlay service execution on Linux.
 - **Complete installation:** the helper installer expects an already installed
   SEP signer, its private configuration, reviewed Apple cache, per-VM identity
   and provider inputs. A clone alone does not supply a working stack.
-- **Reviewed artifact pins:** lifecycle validation deliberately accepts one
-  reviewed kernel/module/diagnostic set. A new build needs an explicit review of
-  its artifacts; editing hashes to bypass a mismatch is not a deployment test.
+- **Reviewed artifact pins:** lifecycle validation retains the reviewed
+  kernel/module/seed pins and accepts reviewed diagnostic builds. Two-VM mode
+  requires the new pinned backend and diagnostic capability probes. A new build
+  needs an explicit artifact review; editing hashes to bypass a mismatch is not
+  a deployment test.
+- **Concurrent services:** two-VM mode serializes hardware transactions and
+  refuses incompatible clients. Fake contention and SEP-client tests do not
+  establish live timing, authenticated services or two-VM restart recovery.
+  Install only through the [all-guests-off migration](apple-services-concurrency.md#upgrade-and-rollback)
+  with preserved identities and matching checkpoints; do not reenroll guests.
 - **Kernel policy and diagnostics:** review the preserved xART guard change,
   raw SEP probes and QEMU identity dump logging before general deployment.
   Published source contains no captured values, but prototype runtime logs may

@@ -4,6 +4,8 @@ For current scope and results, start with the [review hub](apple-services.md).
 Use the [manual checklist](apple-services-testing.md) for owner testing before
 upstream submission. This guide describes implementation and installation;
 it is not a command sequence to rerun on an already authenticated guest.
+The optional [two-VM mode](apple-services-concurrency.md) is experimental and
+still awaits live concurrent authenticated-service validation.
 
 The host needs its existing SEP identity signer, the pinned UID1 provider and
 one persistent FairPlay service for each enrolled VM. A guest launch waits for
@@ -32,6 +34,7 @@ with verified paths/hashes; it contains no credentials or raw state):
 {
   "version": 1,
   "allow_uid": 1000,
+  "max_active_vms": 1,
   "provider": {
     "kernel": "7.2.11-15vmapple-1-ARCH",
     "module": {"path": "/var/lib/omvm/uid1-provider-v3-20261112/omvm-uid1-provider.ko", "sha256": "<verified hash>"},
@@ -46,9 +49,16 @@ with verified paths/hashes; it contains no credentials or raw state):
 }
 ```
 
+`max_active_vms` is optional and defaults to `1`. Only integer `1` or `2` is
+accepted. Two-VM mode requires compatible pinned backend **and diagnostic**
+capability probes and distinct 16-byte identifier contents for every enrolled
+VM. Follow the [concurrency upgrade guide](apple-services-concurrency.md)
+before changing this setting; the example above describes the one-VM baseline.
+
 The current provider implementation is deliberately restricted to the reviewed
-J314c board, exact kernel and module/diagnostic/seed hashes. A new kernel/provider
-needs a new review; do not update a manifest merely to silence a mismatch.
+J314c board, exact kernel/module/seed pins and reviewed diagnostic builds. A new
+kernel/provider needs a new review; do not update a manifest merely to silence
+a mismatch. Two-VM support does not change the kernel/module/seed pins.
 
 Run from the reviewed repository checkout:
 
@@ -61,16 +71,19 @@ The installer verifies the manifest, installs root-owned code/units and a narrow
 sudo rule for the owning UID. It enables the shared SEP/UID1 host prerequisites
 and removes per-VM helper boot links **without stopping running helpers**.
 The existing libvirt gate automatically starts the selected VM helper under its
-one-guest lock. Helpers remain running afterward for state continuity; eager
-parallel initialization of every enrolled helper is avoided. Changed installed
-files are retained in a root-private backup directory.
+shared lifecycle lock and configured guest limit. Helpers remain running
+afterward for state continuity; eager parallel initialization of every enrolled
+helper is avoided. Changed installed files are retained in a root-private backup
+directory.
 `install-hook` updates only the recognized existing omvm hook, preserving its
 environment; it forwards the phase and original domain XML. It does not regenerate
 a domain. Preserve any custom hook if this operation reports an unfamiliar shape.
 
-Migration from an in-memory v22 helper needs a cleanly stopped guest and paired
-disk/auxiliary/identity backup. Keep the old helper alive for rollback. Normal
-startup refuses missing, corrupt, wrong-identity or uncertain state. Only for an
+Legacy one-VM migration from an in-memory v22 helper needs a cleanly stopped
+guest and paired disk/auxiliary/identity backup; that historical procedure kept
+the old helper alive for rollback. It does not permit an old helper alongside
+two-VM mode, which requires every old helper cleanly stopped. Normal startup
+refuses missing, corrupt, wrong-identity or uncertain state. Only for an
 explicitly approved new state generation, while all macOS guests are stopped:
 
 ```sh
@@ -94,9 +107,10 @@ does not prove Apple Account sign-in, APNs, iMessage or Contact Key Verification
 Per-VM helpers are static, on-demand units. Normal host boot starts SEP/UID1;
 the next guest launch starts and checks its helper before admitting QEMU.
 Do not enable per-VM helpers for `multi-user.target` or manually start a new
-helper against another running guest. The explicit enrollment/recovery commands
-above require all guests stopped. A helper being inactive before any guest has
-launched is expected, not a reason to reset its checkpoint or provider.
+helper against another running guest; use normal libvirt admission for either
+configured limit. The explicit enrollment/recovery commands above require all
+guests stopped. A helper being inactive before any guest has launched is
+expected, not a reason to reset its checkpoint or provider.
 
 - `omvm-uid1-provider.service` validates artifacts and cold-boot ownership. It
   loads the reviewed driver once, checks its public AES self-test, initializes
@@ -107,14 +121,17 @@ launched is expected, not a reason to reset its checkpoint or provider.
   uses only Unix sockets/private networking, limits memory to 3 GiB and CPU to
   two cores, disables core dumps and stores state in a root-private directory.
   Systemd creates a fresh private runtime directory; readiness grants only the
-  configured VM owner's socket access. Restart remains disabled until actual
-  process-restart/account recovery is established.
+  configured VM owner's socket access. Automatic restart remains disabled;
+  restarting a helper requires its guest off and a subsequent cold guest boot.
 - The libvirt gate parses the real domain configuration and checks exact helper
-  options. All vmapple starts share a bounded root lock and one-guest reservation,
-  including guests without configured helpers. It inspects `/proc`, never calls
-  libvirt recursively. `release/end` clears the reservation after QEMU exits.
-  A start interrupted while its libvirt daemon is alive fails closed rather than
-  guessing that the slot is free; inspect that failed start before recovery.
+  options. All vmapple starts share a bounded root lock, including guests without
+  configured helpers. It inspects `/proc`, never calls libvirt recursively.
+  The default keeps the one-guest reservation. Opt-in two-VM mode counts actual
+  QEMU processes plus private pending-start reservations and rejects a third
+  slot. It verifies the pinned running backends and refuses legacy or unmanaged
+  hardware clients. Uncertain orphan/PID-reused reservations remain occupied;
+  only the owning daemon's `release/end` clears one after QEMU exits. See the
+  [recovery rules](apple-services-concurrency.md#opt-in-and-admission).
 - Before admitting a vmapple launch, the gate waits up to 30 seconds for
   `timedatectl` to report `NTPSynchronized=yes`. An unavailable or unsynchronized
   host clock rejects the launch before starting helpers or reserving the VM slot;
@@ -134,13 +151,17 @@ units alone does not establish reboot survival.
 ## Offline validation
 
 `tests/test_apple_helpers.py` covers foreign callers, bad/misleading domain
-options, unmanaged-guest exclusion, existing reservations, bounded contention,
-root socket peers, hook XML/phase forwarding, poisoned-state refusal and READY
-reuse. It makes no SEP/AES request and starts no VM or system service. Linux root
-is needed for all filesystem/socket-owner checks; otherwise those cases skip.
+options, one/two-VM limits, capability probes, identifier isolation, unmanaged
+clients, pending/orphan reservations, bounded contention, root socket peers,
+hook XML/phase forwarding, poisoned-state refusal and READY reuse.
+`tests/test_sep_concurrency.py` checks two Unix-socket clients against a fake
+sequential SEP worker. These tests make no SEP/AES request and start no VM or
+system service. Linux root is needed for all filesystem/socket-owner checks;
+otherwise those cases skip.
 
 ```sh
 sudo python3 -m unittest discover -s tests -p test_apple_helpers.py -v
+sudo python3 -m unittest discover -s tests -p test_sep_concurrency.py -v
 bash -n bin/omvm
 python3 -m py_compile share/apple-helpers.py share/install-apple-helpers.py share/apple-helpers-hook.py
 systemd-analyze verify share/omvm-uid1-provider.service share/omvm-fairplay@.service
