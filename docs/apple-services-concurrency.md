@@ -6,11 +6,24 @@ and no pending slots. A synthetic third-slot request to the installed gate was
 rejected without creating a guest or issuing hardware work. One guest and its
 helper also completed a clean stop/cold boot while the other guest stayed up.
 
-**Fresh authenticated service use in both guests is still pending.** One local
-desktop unlock remains incomplete. The earlier
+**Fresh authenticated Apple Account requests passed in both running guests.**
+On 2026-11-14, overlapping trusted-device-list requests returned valid JSON and
+exit status zero. Each guest's AuthKit log recorded HTTP 200, `cache_hit=false`
+and successful device-list completion within its request window. Both desktops
+were unlocked, with two healthy Linux FairPlay helpers and stable admission
+accounting before and after the requests.
+
+This establishes concurrent use of two existing signed-in guests on the tested
+installation. It does not establish simultaneous first-time sign-in, live AES
+contention, messaging in both guests or two-VM host-reboot recovery. The earlier
 [one-VM Apple Account, iMessage and normal-reboot results](apple-services.md)
-remain the service baseline. Contact Key Verification remains deferred. Helper
-readiness, guest SSH and capability probes alone are not service acceptance.
+remain separate evidence. Contact Key Verification remains deferred.
+
+The requests started together at 22:43:17 UTC and completed in approximately
+4.3 and 34.5 seconds. The UID1 completed-operation counter did not change during
+this request pair; these existing-account requests therefore provide no new
+evidence of hardware transaction contention or its latency. Raw responses,
+account/device identifiers, screenshots and logs remain private.
 
 Validation passes 105 root offline Python tests, all eight Go SAP/library and
 tool packages, focused device/client race checks, shell syntax and whitespace
@@ -147,8 +160,9 @@ and does not perform the reservation migration for you.
 5. Verify real authenticated service activity in each guest and record the
    installed revisions, failures and timing privately. Two-helper readiness,
    guest SSH or a cached signed-in screen alone does not prove concurrent
-   service use. Live two-VM authentication, messaging and restart recovery
-   remain pending acceptance work.
+   service use. The recorded existing-account request pair passed on this
+   installation; repeat that check for a new installation. Messaging in both
+   guests and full two-VM host-reboot recovery remain separate acceptance work.
 
 Rollback also requires all guests and pending launches off and helpers cleanly
 stopped. Restore a reviewed matching manifest/code/binary set and reconcile

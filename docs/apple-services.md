@@ -13,8 +13,9 @@ this branch or support for every Apple Silicon machine.
 An opt-in [two-VM implementation](apple-services-concurrency.md) adds
 transaction arbitration and separate launch reservations. Live two-guest cold
 boots, correct slot accounting, third-slot refusal and a per-guest restart with
-a running sibling passed. Fresh authenticated requests in both guests remain
-pending; the existing one-VM results remain the service baseline.
+a running sibling passed. Overlapping fresh Apple Account requests also passed
+in both guests, each with HTTP 200 and `cache_hit=false`. Messaging in both
+guests and two-VM host-reboot recovery remain untested.
 
 ## Next steps
 
@@ -37,7 +38,7 @@ pending; the existing one-VM results remain the service baseline.
 | iMessage | Outbound delivery and a new inbound reply observed | Owner manual pass pending |
 | Normal host reboot | Shared Linux helpers auto-started; normal guest launch started its FairPlay helper; fresh messaging recovered | Owner manual pass and fresh-build reproduction pending |
 | No Mac helper at runtime | Local Linux SEP/FairPlay sockets used | Verify installed artifacts/endpoints in each test |
-| Two concurrent guests | Two live guests/helpers, correct slot accounting and third-slot refusal passed | Fresh authenticated service checks in both guests pending |
+| Two concurrent guests | Two live guests/helpers, third-slot refusal and overlapping uncached Apple Account requests passed | New helper binaries built and installed; simultaneous first-time sign-in, live AES contention, messaging in both guests and two-VM host reboot untested |
 | Keychain / Contact Key Verification | Encrypted-data trust unresolved; work deferred | Not supported by current acceptance claims |
 | First-attempt sign-in | Diagnostic added; cause/remedy and clean flow unproven | Saved-log replay is not a sign-in test |
 | Desktop / suspend | Desktop regression checks still needed; provider vetoes system sleep after activation | Not ready for general desktop deployment |
@@ -76,8 +77,9 @@ identity signing and FairPlay service execution on Linux.
   needs an explicit artifact review; editing hashes to bypass a mismatch is not
   a deployment test.
 - **Concurrent services:** two-VM mode serializes hardware transactions and
-  refuses incompatible clients. Fake contention and SEP-client tests do not
-  establish live timing, authenticated services or two-VM restart recovery.
+  refuses incompatible clients. Fresh existing-account requests passed in both
+  running guests. Their UID1 operation counter stayed unchanged, so live AES
+  contention and latency remain untested, as does full two-VM reboot recovery.
   Install only through the [all-guests-off migration](apple-services-concurrency.md#upgrade-and-rollback)
   with preserved identities and matching checkpoints; do not reenroll guests.
 - **Kernel policy and diagnostics:** review the preserved xART guard change,
