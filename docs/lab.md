@@ -1,6 +1,18 @@
 # Independent service-test VM
 
-## Scope and current phase — 2026-11-13
+## Scope and current phase — 2026-11-14
+
+Post-reboot update at01:11 UTC: the host is running the pinned vmapple kernel.
+Shared UID1/SEP started automatically; starting only lab through the normal
+libvirt gate automatically started its FairPlay helper. Host/guest audits pass
+with unchanged identity/checkpoint/provenance and kentra off. A fresh signed
+Apple device-list server fetch completed HTTP200 at01:05:37, proving authenticated
+recovery. Initial preboot iMessage send/reply passed; the distinct postboot
+exchange is in progress. Keychain remains Untrusted and CKV is unfinished.
+The last completed recovery attempt found zero escrow records after successful
+authentication/local approval; do not repeat it without a changed prerequisite.
+Matched offline backup and private reports are in the20261114 reboot handoff.
+Original v22 in-memory rollback state was lost in the normal reboot.
 
 Latest owner clarification: **turn off kentra and turn on omvm-lab**. The clean
 guest switch completed at 21:08 UTC: kentra cleanly shut off, lab running with
