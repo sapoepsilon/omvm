@@ -14,15 +14,18 @@ text=path.read_text()
 old=r'''(?m)^exec (.+) virt-hook "\$1" "\$2" >/dev/null 2>&1 </dev/null$'''
 new,count=re.subn(old,r'exec \1 virt-hook "$1" "$2" "$3"',text)
 if count==0:
-    if re.search(r'(?m)^exec .+ virt-hook "\$1" "\$2" "\$3"$',text):
-        print('omvm hook already forwards phase and domain XML')
-        raise SystemExit(0)
-    raise SystemExit('unrecognized hook; preserve it and merge the readiness call manually')
-if count!=1:raise SystemExit('ambiguous hook; not modified')
+    if len(re.findall(r'(?m)^exec .+ virt-hook "\$1" "\$2" "\$3"$',text))!=1:
+        raise SystemExit('unrecognized hook; preserve it and merge the readiness call manually')
+elif count!=1:raise SystemExit('ambiguous hook; not modified')
 # All vmapple guests share the hardware owner, including a VM outside IMAGES.
 # The root gate parses XML and ignores non-vmapple guests.
 guard=r'(?m)^(\[ -f .+/vms/\$1/ssh_port" \] \|\| exit 0)$'
-new=re.sub(guard,r'case "$2/$3" in prepare/begin|release/end) ;; *) \1 ;; esac',new)
+new=re.sub(guard,r'case "$2/$3" in prepare/begin|started/begin|release/end) ;; *) \1 ;; esac',new)
+new=new.replace('case "$2/$3" in prepare/begin|release/end) ;; *) ',
+                'case "$2/$3" in prepare/begin|started/begin|release/end) ;; *) ')
+if new==text:
+    print('omvm hook already forwards prepare, started, and release with domain XML')
+    raise SystemExit(0)
 backup=path.with_name('qemu.before-apple-helpers')
 if not backup.exists():
     fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
