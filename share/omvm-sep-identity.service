@@ -1,0 +1,27 @@
+[Unit]
+Description=omvm Secure Enclave host identity signer
+After=local-fs.target systemd-modules-load.service
+StartLimitIntervalSec=300
+StartLimitBurst=12
+
+[Service]
+Type=exec
+User=root
+Group=root
+EnvironmentFile=/etc/omvm/sep-identity.conf
+ExecStartPre=/usr/bin/modprobe apple_sep provision_keybag=0
+ExecStart=/usr/bin/python3 /usr/local/libexec/omvm-sep-identity-provider.py --socket /run/omvm-identity/sep.sock --allow-uid ${SEP_IDENTITY_ALLOW_UID} --public-key ${SEP_IDENTITY_PUBLIC_KEY} --device /dev/sep-bio
+RuntimeDirectory=omvm-identity
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/omvm-identity
+RestrictAddressFamilies=AF_UNIX
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

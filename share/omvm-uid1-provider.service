@@ -1,0 +1,17 @@
+[Unit]
+Description=omvm pinned UID1 provider initialization
+After=local-fs.target systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/omvm-apple-helpers provider
+TimeoutStartSec=90
+UMask=0077
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+LimitCORE=0
+# No ExecStop, unloading, auto-restart, or retry after an uncertain operation.
+
+[Install]
+WantedBy=multi-user.target

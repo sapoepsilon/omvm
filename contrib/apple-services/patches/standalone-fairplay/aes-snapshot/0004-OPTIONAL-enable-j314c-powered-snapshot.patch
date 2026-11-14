@@ -1,0 +1,16 @@
+diff --git a/arch/arm64/boot/dts/apple/t6001-j314c.dts b/arch/arm64/boot/dts/apple/t6001-j314c.dts
+index 23be760..6c143ff 100644
+--- a/arch/arm64/boot/dts/apple/t6001-j314c.dts
++++ b/arch/arm64/boot/dts/apple/t6001-j314c.dts
+@@ -55,6 +55,11 @@
+ 	firmware-name = "apple/mesacal-j314c.bin";
+ };
+ 
++/* Opt-in powered snapshot; keep separate from the default-disabled node. */
++&aes {
++	status = "okay";
++};
++
+ &wifi0 {
+ 	brcm,board-type = "apple,maldives";
+ };

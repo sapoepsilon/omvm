@@ -1,0 +1,22 @@
+diff --git a/arch/arm64/boot/dts/apple/t600x-dieX.dtsi b/arch/arm64/boot/dts/apple/t600x-dieX.dtsi
+index 0b0da1a..e82eec6 100644
+--- a/arch/arm64/boot/dts/apple/t600x-dieX.dtsi
++++ b/arch/arm64/boot/dts/apple/t600x-dieX.dtsi
+@@ -306,6 +306,17 @@
+ 		};
+ 	};
+ 
++	/* Revision-3 AES resources; enable only for a reviewed diagnostic boot. */
++	DIE_NODE(aes): crypto@39b060000 {
++		compatible = "apple,t6000-aes";
++		reg = <0x3 0x9b060000 0x0 0x4000>,
++			<0x2 0x922d0000 0x0 0x8000>;
++		reg-names = "engine", "key-disable";
++		iommus = <&DIE_NODE(sio_dart_0) 1>, <&DIE_NODE(sio_dart_1) 1>;
++		power-domains = <&DIE_NODE(ps_aes)>;
++		status = "disabled";
++	};
++
+ 	DIE_NODE(sio_dart_0): iommu@39b004000 {
+ 		compatible = "apple,t6000-dart";
+ 		reg = <0x3 0x9b004000 0x0 0x4000>;

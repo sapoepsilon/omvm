@@ -1,0 +1,7 @@
+{
+  "drivers/soc/apple/bio.rs": "923dfec25069d16538cc8fc476b995f334d9c0362de9367fd2cee1684004d70c",
+  "drivers/soc/apple/sbio.rs": "545d74363f9eb81135d8672eb2e19f7b15349c2415350da69067a5bb2b8fc2c7",
+  "drivers/soc/apple/refkey.rs": "b9f61ea6ef444a12f1b31059a2e8968adc9755880edfbc9bf940deb36ddda76a",
+  "include/uapi/linux/apple-sep.h": "00cb09430461e0b0772619bc2054c8f9794484fbc3d807268955c0fb2de45c10",
+  "tools/aurora-sep/README.md": "dbcf59cecd62c0245cf39c3c8ee41e3088e2890da89288e91d1c53ee3f02cba4"
+}

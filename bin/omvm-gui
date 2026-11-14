@@ -8,7 +8,8 @@
 # It follows the current Omarchy theme (colors.toml, monospace font) and floats
 # centered like other Omarchy tools. Esc closes, Ctrl+R refreshes.
 #
-#   omvm-gui                 open the window (VM name: $OMVM_VM or "macos")
+#   omvm-gui                 open the window (VM: $OMVM_VM, saved default, the one running
+#                            domain, then "macos"); the header menu switches between domains
 #   omvm-gui --install       add "macOS VM" to the app launcher, link ~/.local/bin/omvm-gui,
 #                            float it in Hyprland, remember this shell's OMVM_* variables
 #   omvm-gui --uninstall     remove the launcher entry, the link and the window rule
@@ -27,8 +28,27 @@ from pathlib import Path
 
 SELF = Path(os.path.realpath(__file__))
 HOME = Path.home()
-VM = os.environ.get("OMVM_VM", "macos")
 VIRSH = ["virsh", "-q", "-c", "qemu:///session"]
+
+
+def domains(*flags):
+    """libvirt session domain names (all, or e.g. --state-running); [] when virsh fails."""
+    try:
+        out = subprocess.run(VIRSH + ["list", "--name", *(flags or ["--all"])], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted(l.strip() for l in out.splitlines() if l.strip())
+
+
+def pick_vm():
+    """The loaded environment/saved default wins, then the only running domain, then "macos"."""
+    if ENV.get("OMVM_VM"):
+        return ENV["OMVM_VM"]
+    running = domains("--state-running", "--state-paused")
+    return running[0] if len(running) == 1 else "macos"
+
+
 XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 ENV_FILE = XDG_CONFIG / "omvm" / "gui.env"
 DESKTOP = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications" / "omvm-gui.desktop"
@@ -39,12 +59,6 @@ APP_RE = APP_ID.replace(".", "\\\\.")  # Lua string for the regex ^dev\.omvm\.Gu
 HYPR_RULE = (f'o.window("^{APP_RE}$", {{ tag = "+floating-window" }})'
              "  -- omvm-gui: float + center like other Omarchy tools")
 THEME_DIRS = [HOME / ".local/state/omarchy/current", XDG_CONFIG / "omarchy/current"]
-TAILSCALE_FALLBACK = "100.72.93.99"
-HOSTS = [  # (Moonlight host, Sunshine config dir, base port, user unit)
-    ("omarchy", XDG_CONFIG / "sunshine", 47989, "omvm-sunshine"),
-    (VM, XDG_CONFIG / f"sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
-]
-WATCHDOG = f"omvm-vm@{VM}.timer"
 # libvirt domstate -> (label, css class)
 STATES = {
     "running": ("Running", "success"),
@@ -102,6 +116,12 @@ def load_env():
 
 
 ENV = load_env()
+VM = pick_vm()
+HOSTS = [  # (Moonlight host, Sunshine config dir, base port, user unit)
+    ("omarchy", XDG_CONFIG / "sunshine", 47989, "omvm-sunshine"),
+    (VM, XDG_CONFIG / f"sunshine-{VM}", 48989, f"omvm-sunshine-{VM}"),
+]
+WATCHDOG = f"omvm-vm@{VM}.timer"
 
 
 # ---------------------------------------------------------------- install
@@ -112,11 +132,11 @@ def install():
     try:
         for line in ENV_FILE.read_text().splitlines():
             k, _, v = line.partition("=")
-            if k.startswith("OMVM_"):
+            if k.startswith(("OMVM_", "OMAC_")):
                 saved[k] = v
     except OSError:
         pass
-    saved.update({k: v for k, v in os.environ.items() if k.startswith("OMVM_")})
+    saved.update({k: v for k, v in os.environ.items() if k.startswith(("OMVM_", "OMAC_"))})
     ENV_FILE.write_text("".join(f"{k}={v}\n" for k, v in sorted(saved.items())))
     DESKTOP.parent.mkdir(parents=True, exist_ok=True)
     DESKTOP.write_text(
@@ -423,6 +443,15 @@ def main_gui():
             header.set_title_widget(self.wtitle)
             self.spinner = Adw.Spinner(visible=False)
             header.pack_start(self.spinner)
+            names = domains()
+            if VM not in names:
+                names.insert(0, VM)
+            if len(names) > 1:  # switch VM: the window is built around one name, so start over with it
+                self.vm_pick = Gtk.DropDown.new_from_strings(names)
+                self.vm_pick.set_selected(names.index(VM))
+                self.vm_pick.set_tooltip_text("Which VM this window controls")
+                self.vm_pick.connect("notify::selected", lambda dd, _p: self.switch_vm(names[dd.get_selected()]))
+                header.pack_start(self.vm_pick)
             refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh (Ctrl+R)")
             refresh.connect("clicked", lambda *_: self.refresh_all(log=True))
             header.pack_end(refresh)
@@ -503,6 +532,11 @@ def main_gui():
                 btn.set_label(label)
                 btn.set_sensitive(True)
                 self.busy_btn = None
+
+        def switch_vm(self, name):
+            if name != VM:
+                os.environ["OMVM_VM"] = name
+                os.execv(sys.executable, [sys.executable, str(SELF)])
 
         # ---------------------------------------------------------- 1. VM
         def build_vm(self):
@@ -809,11 +843,11 @@ def main_gui():
 
         def refresh_moonlight(self, log):
             def got_ip(rc, out, err):
-                ip = out.split()[0] if rc == 0 and out.strip() else TAILSCALE_FALLBACK
+                ip = out.split()[0] if rc == 0 and out.strip() else None
                 for r, name, conf, port, unit, kids in self.host_rows:
                     self.run(["systemctl", "--user", "is-active", unit], log=log, label=f"{name} host", ok=(0, 3),
                              quiet=True, done=lambda rc, out, err, r=r, ip=ip, port=port: r.set_subtitle(
-                                 f"{ip}:{port} · sunshine {out.strip() or '?'}"))
+                                 (f"{ip}:{port}" if ip else f"address unavailable (port {port})") + f" · sunshine {out.strip() or '?'}"))
                     for k in kids:
                         r.remove(k)
                     kids.clear()

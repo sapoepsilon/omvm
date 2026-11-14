@@ -1,0 +1,40 @@
+--- a/hw/vmapple/apple-fairplay.c
++++ b/hw/vmapple/apple-fairplay.c
+@@ -85,6 +85,24 @@
+     fp_fail(opaque, "relay deadline exceeded");
+ }
+ 
++/* OFR2 explicitly distinguishes a completed queue-0 operation from a
++ * transport/emulator failure. Native queue 0 returns its modified buffer even
++ * when the backend's raw status is nonzero. OFR1 retains its legacy contract.
++ */
++static bool fp_valid_reply_header(const unsigned char *header, bool queue0,
++                                  uint32_t input_length, uint32_t capacity)
++{
++    uint32_t length = ldl_le_p(header + 12);
++
++    if (ldl_le_p(header + 4) || length > capacity) {
++        return false;
++    }
++    if (!memcmp(header, "OFR2", 4)) {
++        return queue0 && input_length && length == input_length;
++    }
++    return !memcmp(header, "OFR1", 4) && !ldl_le_p(header + 8);
++}
++
+ static void fp_read(void *opaque)
+ {
+     AppleFairPlay *s = opaque;
+@@ -112,9 +130,9 @@
+         s->rx_len += n;
+         if (s->rx_len >= 16) {
+             length = ldl_le_p(s->rx + 12);
+-            if (memcmp(s->rx, "OFR1", 4) ||
+-                ldl_le_p(s->rx + 4) || ldl_le_p(s->rx + 8) ||
+-                length > s->capacity || s->rx_len > length + 16) {
++            if (!fp_valid_reply_header(s->rx, s->active_vq == s->vq[0],
++                                       s->tx_len - 16, s->capacity) ||
++                s->rx_len > length + 16) {
+                 fp_fail(s, "relay rejected request or returned invalid frame");
+                 return;
+             }

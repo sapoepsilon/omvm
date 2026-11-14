@@ -1,0 +1,79 @@
+diff --git a/hw/vmapple/cfg.c b/hw/vmapple/cfg.c
+--- a/hw/vmapple/cfg.c
++++ b/hw/vmapple/cfg.c
+@@ -50,7 +50,7 @@
+     char serial[32];          /* 0x380 */
+     char unk8[32];            /* 0x3a0 */
+     char model[32];           /* 0x3c0 */
+-    uint8_t unk9[32];         /* 0x3e0 */
++    char mlb[32];             /* 0x3e0, main logic board serial */
+     uint32_t unk10;           /* 0x400 */
+     char soc_name[32];        /* 0x404 */
+ } VMAppleCfg;
+@@ -63,6 +63,7 @@
+     char *serial;
+     char *model;
+     char *soc_name;
++    char *mlb;
+ };
+ 
+ static void vmapple_cfg_reset(Object *obj, ResetType type)
+@@ -114,6 +115,9 @@
+     if (!s->model) {
+         s->model = g_strdup("VM0001");
+     }
++    if (!s->mlb) {
++        s->mlb = g_strdup("");
++    }
+     if (!s->soc_name) {
+         s->soc_name = g_strdup("Apple M1 (Virtual)");
+     }
+@@ -122,6 +126,7 @@
+     set_fixlen_property_or_return(s->cfg.model, s->model, errp, "model");
+     set_fixlen_property_or_return(s->cfg.soc_name, s->soc_name, errp, "soc_name");
+     set_fixlen_property_or_return(s->cfg.unk8, "D/A", errp, "unk8");
++    set_fixlen_property_or_return(s->cfg.mlb, s->mlb, errp, "mlb");
+     s->cfg.version = 2;
+     s->cfg.unk1 = 1;
+     s->cfg.unk2 = 1;
+@@ -165,6 +170,7 @@
+     DEFINE_PROP_MACADDR("mac-bt0", VMAppleCfgState, cfg.mac_bt0),
+     DEFINE_PROP_STRING("serial", VMAppleCfgState, serial),
+     DEFINE_PROP_STRING("model", VMAppleCfgState, model),
++    DEFINE_PROP_STRING("mlb", VMAppleCfgState, mlb),
+     DEFINE_PROP_STRING("soc_name", VMAppleCfgState, soc_name),
+ };
+ 
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -7,6 +7,9 @@
+     bool
+ 
+ config VMAPPLE_BDIF
++    bool
++
++config VMAPPLE_IDENTITY
+     bool
+ 
+ config VMAPPLE_CFG
+@@ -35,5 +38,6 @@
+     select VMAPPLE_AVP_RTC
+     select VMAPPLE_BDIF
+     select VMAPPLE_CFG
++    select VMAPPLE_IDENTITY
+     select MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
+diff --git a/hw/vmapple/meson.build b/hw/vmapple/meson.build
+--- a/hw/vmapple/meson.build
++++ b/hw/vmapple/meson.build
+@@ -4,5 +4,9 @@
+ system_ss.add(when: 'CONFIG_VMAPPLE_AVP_RTC', if_true: files('avp-rtc.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_BDIF', if_true: files('bdif.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_CFG',  if_true: files('cfg.c'))
++system_ss.add(when: 'CONFIG_VMAPPLE', if_true: files('dma-mailbox.c'))
++system_ss.add(when: 'CONFIG_VMAPPLE_IDENTITY', if_true: files('apple-identity.c'))
+ system_ss.add(when: 'CONFIG_VMAPPLE_VIRTIO_BLK',  if_true: files('virtio-blk.c'))
+ specific_ss.add(when: 'CONFIG_VMAPPLE',     if_true: files('vmapple.c'))
++
++system_ss.add(when: 'CONFIG_VMAPPLE', if_true: files('apple-fairplay.c'))
