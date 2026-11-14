@@ -770,6 +770,22 @@ class HookTests(unittest.TestCase):
 
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_libvirt_machine_type_with_omvm_property_clause_keeps_exact_identity(self):
+        base=(b'/fake/qemu-system-aarch64\0-machine\0vmapple,accel=kvm\0-name\0guest=one,debug-threads=on\0'
+              b'-uuid\0'+fake_uuid('one').encode()+b'\0')
+        properties=b'-machine\0uuid=1234,aux-ram-share=on,identity=on\0'
+        for argv in (base+properties, properties+base):
+            # The executable stays first even when options precede the type.
+            if argv.startswith(properties):
+                argv=base.split(b'\0',1)[0]+b'\0'+properties+base.split(b'\0',1)[1]
+            with self.subTest(order=argv.startswith(base)),patch.object(Path,'read_bytes',return_value=argv), \
+                 patch.object(h,'process_start',return_value=300):
+                self.assertEqual(h.guest_process(Path('/fake/proc/101')),fake_guest())
+        for extra in (b'--machine\0type=vmapple\0',b'-machine\0type=virt\0'):
+            with self.subTest(conflict=extra),patch.object(Path,'read_bytes',return_value=base+properties+extra), \
+                 patch.object(h,'process_start',return_value=300):
+                self.assertFalse(h.guest_process(Path('/fake/proc/101'))['machine_verified'])
+
     def test_stable_reparented_qemu_has_uuid_and_start_without_daemon_ancestry(self):
         argv=(b'/fake/qemu-system-aarch64\0--machine\0type=vmapple\0--name\0guest=one,debug-threads=on\0'
               b'--uuid\0'+fake_uuid('one').encode()+b'\0')
