@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "patches": [
+    {
+      "path": "linux-sep-prerequisites.patch",
+      "repository": "https://github.com/omacom/linux-aurora.git",
+      "base_commit": "b798f2b0c767e3d780896cff2f57e19e412bf954",
+      "files": [
+        {
+          "path": "drivers/soc/apple/der.rs",
+          "base_sha256": "965989ad84f58152b733b79577815f49a0ba174b596a656adae915a9ec5bc8fb",
+          "prerequisite_sha256": "5d1e291595a90c3dfdb03283cfbf048928b4a7903a7d882d6b9cc15f4c6f505c"
+        },
+        {
+          "path": "drivers/soc/apple/keybag.rs",
+          "base_sha256": "b1b87d21c46332e709623fdf891fba933faffde878e7881bdcaf3d8dd42ae713",
+          "prerequisite_sha256": "340d97aa4ad0847cef364c91f56612b79fbc5ecac6d139d1bb5f3af1732e48e7"
+        },
+        {
+          "path": "drivers/soc/apple/profile.rs",
+          "base_sha256": "9f2ca393c0a70011c4d169a5c27f556597513c105d22b78bb850f58d4748fce6",
+          "prerequisite_sha256": "a4b01966afd3440ce1baeb10f85af51a6081401ef096281f4705b9b681745530"
+        },
+        {
+          "path": "drivers/soc/apple/refkey.rs",
+          "base_sha256": "f6db02cf75d668422ea284546b1cfad00f9662298fc9a9b9f63240cfaeeeb38a",
+          "prerequisite_sha256": "b9f61ea6ef444a12f1b31059a2e8968adc9755880edfbc9bf940deb36ddda76a"
+        },
+        {
+          "path": "drivers/soc/apple/sep.rs",
+          "base_sha256": "d5e207e37b98105b0c287a815b9fe63d521d968687d1c2239a01bfab8c029cc1",
+          "prerequisite_sha256": "4cd122d0007514f4ce0b7986f5e6d8807239cb6931c5466b3dc9d62e3f4f4004"
+        },
+        {
+          "path": "drivers/soc/apple/sks.rs",
+          "base_sha256": "58f347172e9763a1f6086d29e979034d1a7cc90a75e13ca6d6f1160c3f9346c7",
+          "prerequisite_sha256": "69a4911af3cbfc615538c6ea3cb29952ffe1dba779f7c9f917a84d1d2804e7e8"
+        },
+        {
+          "path": "drivers/soc/apple/xart_guard.rs",
+          "base_sha256": "65b47c5ea9bb98feb18f666e12a4958b78e7131bebf4fd0e45ea7b858ef1b979",
+          "prerequisite_sha256": "f5cf75dc9f940c892501daac3caf390d62eb76d38ad693c4d8f4c7e8dda46bbe"
+        },
+        {
+          "path": "drivers/soc/apple/xart_store.rs",
+          "base_sha256": "621ab65e033fb883576f947dca9636eee9350351022e250fe31422c2e2ef7a42",
+          "prerequisite_sha256": "ba7d38653cf2e32ba6919bb01083c192bd2194eb4bca57443029c2b576d02121"
+        }
+      ],
+      "license": "GPL-2.0-only OR MIT (existing per-file SPDX and copyright notices retained)",
+      "sha256": "c9a56da696b60d430078eb43ccfe51f08a72ae3ad0a6f06b315c60bd7ff65ad9"
+    },
+    {
+      "path": "qemu-identity-prerequisites.patch",
+      "repository": "https://github.com/steelbrain/qemu-reims-vgpu.git",
+      "base_commit": "760d1d0d29b07341409825eb55e760a52fd7d58f",
+      "base_kind": "local integration result; reconstructed from the existing omvm QEMU/USB patch series",
+      "files": [
+        {
+          "path": "hw/vmapple/cfg.c",
+          "base_sha256": "f53649f35878743cf4a60ac080bf956230885da819f23535c0474ff4baf68a76",
+          "prerequisite_sha256": "07b5aa754e5750eaa9a2fa147ce59c1cfdc58aa9b644c18efe50208177b84931"
+        },
+        {
+          "path": "hw/vmapple/Kconfig",
+          "base_sha256": "475ce89eaeafc3e908e60d7e97e02c9ef017c9625100fb2a654a9aa06c7fdb8f",
+          "prerequisite_sha256": "74066aa8eee37ffeffb5c9e065d737e5699da3f80568d1db17e877b6ec27eecd"
+        },
+        {
+          "path": "hw/vmapple/meson.build",
+          "base_sha256": "6a8ebae008dbdde859c4652f80950f01879eb79e1599f333b9d9a4d3dada78c4",
+          "prerequisite_sha256": "dd3443057418c8cee364a2ea3617fe3ea72f0db593f2dbc057ec87ff1e691f01"
+        }
+      ],
+      "license": "GPL-2.0-or-later",
+      "sha256": "43897b55244fffd617a23435d1b0bbe789c8bdd26f1e42ad37d38af44598bfec"
+    }
+  ],
+  "validation": [
+    {
+      "check": "linux_prerequisite_then_export_reconstruction",
+      "passed": true,
+      "files": [
+        {
+          "path": "drivers/soc/apple/bio.rs",
+          "sha256": "a7d6bd1f24bb3167e700046f98b1d8c24a59c8e9be6d7a9b8c774f679d77c488"
+        },
+        {
+          "path": "drivers/soc/apple/der.rs",
+          "sha256": "5d1e291595a90c3dfdb03283cfbf048928b4a7903a7d882d6b9cc15f4c6f505c"
+        },
+        {
+          "path": "drivers/soc/apple/keybag.rs",
+          "sha256": "340d97aa4ad0847cef364c91f56612b79fbc5ecac6d139d1bb5f3af1732e48e7"
+        },
+        {
+          "path": "drivers/soc/apple/profile.rs",
+          "sha256": "a4b01966afd3440ce1baeb10f85af51a6081401ef096281f4705b9b681745530"
+        },
+        {
+          "path": "drivers/soc/apple/refkey.rs",
+          "sha256": "a6820c2b1d21e33f4cdb14a173ad093643e8c2e2117ac264b3fed73f3e8d8ad4"
+        },
+        {
+          "path": "drivers/soc/apple/sbio.rs",
+          "sha256": "c57a8fafb282b4ea617dd5a866ad691aff308abd58dae941f029aef51c8b64eb"
+        },
+        {
+          "path": "drivers/soc/apple/sep.rs",
+          "sha256": "4cd122d0007514f4ce0b7986f5e6d8807239cb6931c5466b3dc9d62e3f4f4004"
+        },
+        {
+          "path": "drivers/soc/apple/sks.rs",
+          "sha256": "69a4911af3cbfc615538c6ea3cb29952ffe1dba779f7c9f917a84d1d2804e7e8"
+        },
+        {
+          "path": "drivers/soc/apple/xart_guard.rs",
+          "sha256": "f5cf75dc9f940c892501daac3caf390d62eb76d38ad693c4d8f4c7e8dda46bbe"
+        },
+        {
+          "path": "drivers/soc/apple/xart_store.rs",
+          "sha256": "ba7d38653cf2e32ba6919bb01083c192bd2194eb4bca57443029c2b576d02121"
+        },
+        {
+          "path": "include/uapi/linux/apple-sep.h",
+          "sha256": "4491c727754d4b641d7d607f0adacf66acefaad6f7c70d5c7da59e9f3df8d327"
+        },
+        {
+          "path": "tools/aurora-sep/README.md",
+          "sha256": "c48464932eaf4122c0ff3aae414e34f2f97f2debd1aef1245e56efeb6c18c034"
+        },
+        {
+          "path": "tools/aurora-sep/aurora-sep-export-attestation",
+          "sha256": "49bb054f498328d1116aa710597669b6c447e03ce6e3cb137f0f819050f124b3"
+        },
+        {
+          "path": "tools/aurora-sep/tests/test_export_attestation.py",
+          "sha256": "9794cecdd754ed90b4f9fc557314efbba7bfc926860c57b7961aa4612b218b62"
+        }
+      ],
+      "pre_export_baseline_manifest_matches": true
+    },
+    {
+      "check": "qemu_prerequisite_then_cfg_reconstruction",
+      "passed": true,
+      "files": [
+        {
+          "path": "hw/vmapple/cfg.c",
+          "sha256": "54d92ded8c82aa9dfc2df53a21b1119bbe1c6c9070a3a247ca564562522afb56"
+        },
+        {
+          "path": "hw/vmapple/Kconfig",
+          "sha256": "74066aa8eee37ffeffb5c9e065d737e5699da3f80568d1db17e877b6ec27eecd"
+        },
+        {
+          "path": "hw/vmapple/meson.build",
+          "sha256": "dd3443057418c8cee364a2ea3617fe3ea72f0db593f2dbc057ec87ff1e691f01"
+        }
+      ]
+    },
+    {
+      "check": "kernel_aes_and_optional_irq_series_application",
+      "passed": true,
+      "patches": [
+        "patches/standalone-fairplay/aes-snapshot/0001-dt-bindings-apple-t6000-aes.patch",
+        "patches/standalone-fairplay/aes-snapshot/0002-soc-apple-add-powered-aes-snapshot.patch",
+        "patches/standalone-fairplay/aes-snapshot/0003-arm64-dts-apple-describe-disabled-t6000-aes.patch",
+        "patches/standalone-fairplay/aes-snapshot/0004-OPTIONAL-enable-j314c-powered-snapshot.patch",
+        "patches/standalone-fairplay/uid1-provider/0001-arm64-dts-apple-j314c-add-aes-irq.patch"
+      ],
+      "makefile_context_rebased_to_clean_kernel": true,
+      "snapshot_driver_bytes_preserved": true
+    },
+    {
+      "check": "qemu_configured_compiler_syntax",
+      "passed": true,
+      "files": [
+        {
+          "path": "hw/vmapple/cfg.c",
+          "passed": true,
+          "warnings_as_errors": true
+        },
+        {
+          "path": "hw/vmapple/aes.c",
+          "passed": true,
+          "warnings_as_errors": true
+        },
+        {
+          "path": "hw/vmapple/vmapple.c",
+          "passed": true,
+          "warnings_as_errors": true
+        },
+        {
+          "path": "hw/vmapple/apple-identity.c",
+          "passed": true,
+          "warnings_as_errors": false,
+          "preexisting_warnings": [
+            "zero-size array initializer",
+            "mixed boolean-expression parentheses",
+            "uint64_t diagnostic format",
+            "unused diagnostic variables"
+          ]
+        },
+        {
+          "path": "hw/vmapple/dma-mailbox.c",
+          "passed": true,
+          "warnings_as_errors": true
+        },
+        {
+          "path": "hw/vmapple/apple-fairplay.c",
+          "passed": true,
+          "warnings_as_errors": true
+        },
+        {
+          "path": "hw/virtio/virtio-qmp.c",
+          "passed": true,
+          "warnings_as_errors": true
+        }
+      ],
+      "limitation": "Uses the existing configured QEMU headers/build flags; no full fresh configure/link/runtime validation."
+    },
+    {
+      "check": "rust_parser_only",
+      "passed": true,
+      "files": [
+        "drivers/soc/apple/der.rs",
+        "drivers/soc/apple/keybag.rs",
+        "drivers/soc/apple/profile.rs",
+        "drivers/soc/apple/refkey.rs",
+        "drivers/soc/apple/sep.rs",
+        "drivers/soc/apple/sks.rs",
+        "drivers/soc/apple/xart_guard.rs",
+        "drivers/soc/apple/xart_store.rs"
+      ],
+      "limitation": "No Rust macro expansion, kernel type check, link or hardware test."
+    },
+    {
+      "check": "kernel_compile",
+      "performed": false,
+      "reason": "No exact-kernel rebuild was run during source packaging."
+    }
+  ],
+  "qemu_public_base": {
+    "repository": "https://github.com/steelbrain/qemu-reims-vgpu.git",
+    "base_commit": "1b41f5f5db4d1067d023973b9bd74c7b341e0d28",
+    "resulting_local_commit": "760d1d0d29b07341409825eb55e760a52fd7d58f",
+    "patches": [
+      "patches/graphics/qemu/0001-vmapple-on-KVM-Asahi-port-aquarat-qemu-reims-vgpu-c6.patch",
+      "patches/graphics/qemu/0002-hw-vmapple-virtio-blk-drop-the-macOS-27-vendor-capab.patch",
+      "patches/graphics/qemu/0003-hw-display-apple-gfx-headless-displays-follow-the-UI.patch",
+      "patches/graphics/qemu/0004-hw-vmapple-virtio-blk-apple-vendor-cap-property-defa.patch",
+      "patches/graphics/qemu/0005-hw-vmapple-bdif-implement-backdoor-disk-writes-macOS.patch",
+      "patches/graphics/qemu/0006-hw-vmapple-virtio-blk-ascending-capabilities-without.patch",
+      "patches/graphics/qemu/0007-hw-audio-virtio-snd-pci-x-ascending-capabilities-for.patch",
+      "patches/usb/0001-hw-usb-hcd-xhci-IOC-event-after-a-short-packet.patch"
+    ],
+    "checked_touched_files": 30,
+    "byte_equivalence_verified": true
+  },
+  "privacy_review": {
+    "personal_values_found": false,
+    "scope": "New prerequisite patch text, source comments, manifests and instructions; no captured runtime values included.",
+    "runtime_caveats": [
+      "profile::T6000 named T6000/J316s changes xart_guard default from 1 to 0.",
+      "refkey_attest_sign invokes diagnostic probes when refkey_attest_acl is nonzero; probe methods log raw DER/attestation response bytes without an additional privacy gate."
+    ],
+    "deployment_endorsed": false
+  }
+}

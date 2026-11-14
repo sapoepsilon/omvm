@@ -1,0 +1,23 @@
+[Unit]
+Description=omvm Linux FairPlay helper for %i
+Requires=omvm-uid1-provider.service omvm-sep-identity.service
+After=omvm-uid1-provider.service omvm-sep-identity.service
+
+[Service]
+Type=exec
+RuntimeDirectory=omvm-fairplay-managed-%i
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/libexec/omvm-apple-helpers serve %i
+ExecStartPost=/usr/local/libexec/omvm-apple-helpers ready %i
+TimeoutStartSec=120
+TimeoutStopSec=60
+KillSignal=SIGTERM
+Restart=no
+UMask=0077
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=3G
+CPUQuota=200%
+LimitCORE=0
+
+# Started on demand by the serialized libvirt guest gate.

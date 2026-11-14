@@ -1,0 +1,71 @@
+diff --git a/Documentation/devicetree/bindings/crypto/apple,t6000-aes.yaml b/Documentation/devicetree/bindings/crypto/apple,t6000-aes.yaml
+new file mode 100644
+index 0000000..9262022
+--- /dev/null
++++ b/Documentation/devicetree/bindings/crypto/apple,t6000-aes.yaml
+@@ -0,0 +1,65 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/crypto/apple,t6000-aes.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Apple T6000 SIO AES engine
++
++maintainers:
++  - Asahi Linux <asahi@lists.linux.dev>
++
++description: |
++  The T6000-family SIO AES block has an engine register bank and a separate
++  shared key-disable bank. It uses stream 1 on both SIO DART instances and
++  the AES power domain. This binding covers the revision-3 layout with a
++  shared disable word at offset zero. It does not describe other revisions
++  or firmware layouts with per-slot disable-register overrides.
++
++properties:
++  compatible:
++    const: apple,t6000-aes
++
++  reg:
++    items:
++      - description: Engine registers
++      - description: Shared key-disable registers
++
++  reg-names:
++    items:
++      - const: engine
++      - const: key-disable
++
++  iommus:
++    items:
++      - description: SIO DART instance 0, stream 1
++      - description: SIO DART instance 1, stream 1
++
++  power-domains:
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - iommus
++  - power-domains
++
++additionalProperties: false
++
++examples:
++  - |
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        crypto@39b060000 {
++            compatible = "apple,t6000-aes";
++            reg = <0x3 0x9b060000 0x0 0x4000>,
++                  <0x2 0x922d0000 0x0 0x8000>;
++            reg-names = "engine", "key-disable";
++            iommus = <&sio_dart_0 1>, <&sio_dart_1 1>;
++            power-domains = <&ps_aes>;
++            status = "disabled";
++        };
++    };

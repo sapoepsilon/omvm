@@ -9,13 +9,13 @@
 --   Ctrl+Alt+1..5    leave the VM for Omarchy workspace 1..5
 -- Leaving the VM's window releases its capture (it loses the keyboard).
 --
--- Passthrough (remote mode): while a VNC viewer window has focus, every key
--- (Super = Cmd included) goes to the macOS guest: Hyprland switches to the empty
--- "macos-vm" submap. Ctrl+Alt+Escape gives the keys back while the viewer stays
+-- Passthrough (remote mode): while a VNC viewer window or an `omac seamless`
+-- window (class org.omvm.omac) has focus, every key (Super = Cmd included) goes
+-- to the macOS guest: Hyprland switches to the empty "macos-vm" submap. Ctrl+Alt+Escape gives the keys back while the viewer stays
 -- focused; clicking or focusing any other window gives them back too.
 local function is_vm_viewer(w)
   local c = (w and w.class or ""):lower()
-  return c:find("vncviewer", 1, true) ~= nil
+  return c:find("vncviewer", 1, true) ~= nil or c == "org.omvm.omac"
 end
 local function is_vm(w)
   return is_vm_viewer(w) or (w and (w.class or ""):lower() == "reims-vgpu") or false

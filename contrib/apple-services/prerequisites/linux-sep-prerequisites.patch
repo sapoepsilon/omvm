@@ -1,0 +1,985 @@
+diff --git a/drivers/soc/apple/der.rs b/drivers/soc/apple/der.rs
+--- a/drivers/soc/apple/der.rs
++++ b/drivers/soc/apple/der.rs
+@@ -10,6 +10,7 @@
+ const TAG_UTF8: u8 = 0x0c;
+ pub(crate) const TAG_INTEGER: u8 = 0x02;
+ pub(crate) const TAG_OCTET_STRING: u8 = 0x04;
++const TAG_BOOLEAN: u8 = 0x01;
+ 
+ const MAX_ITEM: usize = 4096;
+ 
+@@ -51,6 +52,8 @@
+     Integer(u32),
+     Octets(&'a [u8]),
+     Der(&'a [u8]),
++    /// DER BOOLEAN. Canonical form is 0xff for true, 0x00 for false.
++    Bool(bool),
+ }
+ 
+ /// Canonical DER `SET OF SEQUENCE`, members sorted by key — the shape the
+@@ -83,6 +86,10 @@
+                 }
+                 put_header(&mut inner, TAG_OCTET_STRING, b.len())?;
+                 inner.extend_from_slice(b, GFP_KERNEL)?;
++            }
++            RefKeyValue::Bool(v) => {
++                put_header(&mut inner, TAG_BOOLEAN, 1)?;
++                inner.push(if *v { 0xff } else { 0x00 }, GFP_KERNEL)?;
+             }
+             RefKeyValue::Der(d) => inner.extend_from_slice(d, GFP_KERNEL)?,
+         }
+diff --git a/drivers/soc/apple/keybag.rs b/drivers/soc/apple/keybag.rs
+--- a/drivers/soc/apple/keybag.rs
++++ b/drivers/soc/apple/keybag.rs
+@@ -41,6 +41,7 @@
+ /// Only an `AsGenerated` UUID may be repaired on a mismatch; adopting one for a
+ /// read-back record would point it at a different bag and strand the real one.
+ pub(crate) use crate::keybag_identity::{SnapshotIdentity, UuidProvenance};
++pub(crate) use crate::xart_guard::Unfinished;
+ 
+ impl UuidProvenance {
+     fn state(self) -> u32 {
+@@ -236,8 +237,78 @@
+     }))
+ }
+ 
+-pub(crate) fn write_intent(slot: Slot) -> Result<()> {
+-    write_record(slot, 0, &[], &[0; UUID_LEN], &[])
++/// The intent marker in the UUID field: "AXGI", one guarded byte, three zero
++/// bytes, then the entry count, little-endian. Older drivers left it zero;
++/// every driver reads either as an intent.
++const MARK_MAGIC: &[u8; 4] = b"AXGI";
++
++fn encode_mark(unfinished: Unfinished) -> [u8; UUID_LEN] {
++    let mut uuid = [0u8; UUID_LEN];
++    let (guarded, entries) = match unfinished {
++        Unfinished::Unmarked => return uuid,
++        Unfinished::Unguarded => (0, 0),
++        Unfinished::Guarded(entries) => (1, entries),
++    };
++    uuid[..4].copy_from_slice(MARK_MAGIC);
++    uuid[4] = guarded;
++    uuid[8..].copy_from_slice(&entries.to_le_bytes());
++    uuid
++}
++
++fn decode_mark(uuid: &[u8; UUID_LEN]) -> Option<Unfinished> {
++    if *uuid == [0; UUID_LEN] {
++        return Some(Unfinished::Unmarked);
++    }
++    if &uuid[..4] != MARK_MAGIC || uuid[5..8] != [0; 3] {
++        return None;
++    }
++    let mut entries = [0u8; 8];
++    entries.copy_from_slice(&uuid[8..]);
++    let entries = u64::from_le_bytes(entries);
++    match uuid[4] {
++        0 if entries == 0 => Some(Unfinished::Unguarded),
++        1 => Some(Unfinished::Guarded(entries)),
++        _ => None,
++    }
++}
++
++/// Records the intent, with Linux's list as it is now.
++pub(crate) fn write_intent(slot: Slot, unfinished: Unfinished) -> Result<()> {
++    write_record(slot, 0, &[], &encode_mark(unfinished), &[])
++}
++
++/// The intent in `slot`, which [`read`] reports as `EEXIST`.
++pub(crate) fn unfinished(slot: Slot) -> Result<Unfinished> {
++    let file = shim::StoreFile::open_readonly(slot.path())?;
++    if file.size()? != HEADER as u64 {
++        return Err(EINVAL);
++    }
++    let mut head = [0u8; HEADER];
++    file.read_exact(0, &mut head)?;
++    if head[..MAGIC.len()] != MAGIC {
++        return Err(EINVAL);
++    }
++    let version = u32::from_le_bytes([
++        head[OFF_VERSION],
++        head[OFF_VERSION + 1],
++        head[OFF_VERSION + 2],
++        head[OFF_VERSION + 3],
++    ]);
++    if version != VERSION {
++        return Err(ENOTSYNC);
++    }
++    let mut uuid = [0u8; UUID_LEN];
++    uuid.copy_from_slice(&head[OFF_UUID..OFF_UUID + UUID_LEN]);
++    decode_mark(&uuid).ok_or(EEXIST)
++}
++
++/// The no-bag proof for sending an unfinished create again; the file must
++/// still say what `seen` says it did.
++pub(crate) fn retry_unfinished(slot: Slot, seen: Unfinished) -> Result<NoStoredKeyBag> {
++    if unfinished(slot)? != seen {
++        return Err(EEXIST);
++    }
++    Ok(NoStoredKeyBag { slot })
+ }
+ 
+ pub(crate) fn mark_refused(slot: Slot) -> Result<()> {
+diff --git a/drivers/soc/apple/profile.rs b/drivers/soc/apple/profile.rs
+--- a/drivers/soc/apple/profile.rs
++++ b/drivers/soc/apple/profile.rs
+@@ -259,9 +259,8 @@
+     persistent_enrol: true,
+     nonce_session: false,
+     // As T8103. On J316s, creating the identity keybag also rewrites a
+-    // session record that predates Linux. The guard refuses that, so the
+-    // keybag can only be created there with xart_guard=0.
+-    xart_guard: 1,
++    // session record that predates Linux, so the guard stays off there.
++    xart_guard: 0,
+ };
+ 
+ pub(crate) const T6020: PlatformProfile = PlatformProfile {
+diff --git a/drivers/soc/apple/refkey.rs b/drivers/soc/apple/refkey.rs
+--- a/drivers/soc/apple/refkey.rs
++++ b/drivers/soc/apple/refkey.rs
+@@ -112,6 +112,15 @@
+             return None;
+         }
+ 
++        let acl = if *crate::module_parameters::refkey_attest_acl.value() != 0 {
++            crate::der::encode_refkey_set(&[
++                (b"oa".as_slice(), RV::Bool(true)),
++                (b"odel".as_slice(), RV::Bool(true)),
++            ])
++            .ok()?
++        } else {
++            KVec::new()
++        };
+         let create_der = {
+             let mut items: KVec<(&[u8], RV<'_>)> = KVec::new();
+             if items.push((b"o", RV::Utf8(b"oc")), GFP_KERNEL).is_err()
+@@ -121,6 +130,14 @@
+                 || items
+                     .push((b"kt", RV::Integer(key_type)), GFP_KERNEL)
+                     .is_err()
++            {
++                return None;
++            }
++            // Attestation (`oa`) is an ACL permission and only settable at
++            // create time. Without it the ref-key cannot produce the
++            // attestation-chained proof that device identity needs.
++            if !acl.is_empty()
++                && items.push((b"acl", RV::Der(&acl)), GFP_KERNEL).is_err()
+             {
+                 return None;
+             }
+@@ -311,6 +328,7 @@
+         items.push((b"d", RV::Octets(challenge)), GFP_KERNEL).ok()?;
+         items.push((b"rk", RV::Der(refkey_blob)), GFP_KERNEL).ok()?;
+         let der = crate::der::encode_refkey_set(&items).ok()?;
++        dev_warn!(self.dev, "sks: oa sent {} bytes dig {}", der.len(), challenge.len());
+         let out = self.sks_send(self.sks_req_refkey(handle.value(), &der))?;
+         if out.reply.status != 0 {
+             dev_warn!(
+@@ -358,8 +376,106 @@
+             ));
+         }
+         let sig = self.sks_refkey_sign(handle, &blob, challenge);
++        if *crate::module_parameters::refkey_attest_acl.value() != 0 {
++            let _ = self.refkey_oa(handle, &blob, challenge);
++            for (t, g) in [(1u32, 1u32), (3, 1), (2, 3), (2, 2)] {
++                let _ = self.refkey_oska(handle, &blob, t, g);
++            }
++        }
+         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
+         Ok((sig.ok_or(EIO)?, pubk))
++    }
++
++    /// Attestation-chained (op `oa`): the enclave returns its own attestation over
++    /// the ref-key, which only works when the key was created with the `oa` ACL bit.
++    pub(crate) fn refkey_oa(
++        &self,
++        handle: crate::sks::KeyBagHandle,
++        blob: &[u8],
++        digest: &[u8],
++    ) -> Option<KVec<u8>> {
++        use crate::der::RefKeyValue as RV;
++        let mut items: KVec<(&[u8], RV<'_>)> = KVec::new();
++        // oa takes a nested request: d is a dictionary naming the key to be
++        // attested, and the outer rk is the attesting key. With a single key
++        // the two are the same blob. `inner` must outlive `items`.
++        let inner = {
++            let mut it: KVec<(&[u8], RV<'_>)> = KVec::new();
++            it.push((b"rk", RV::Der(blob)), GFP_KERNEL).ok()?;
++            crate::der::encode_refkey_set(&it).ok()?
++        };
++        let mut items: KVec<(&[u8], RV<'_>)> = KVec::new();
++        items.push((b"o", RV::Utf8(b"oa")), GFP_KERNEL).ok()?;
++        items.push((b"d", RV::Der(&inner)), GFP_KERNEL).ok()?;
++        items.push((b"rk", RV::Der(blob)), GFP_KERNEL).ok()?;
++        if let Ok(d) = crate::der::encode_refkey_set(&items) {
++            dev_warn!(self.dev, "sks: oa der len {}", d.len());
++            for (n, chunk) in d.chunks(16).enumerate() {
++                if n > 3 { break; }
++                dev_warn!(self.dev, "sks: oa {:02x?}", chunk);
++            }
++        }
++        let der = crate::der::encode_refkey_set(&items).ok()?;
++        let out = self.sks_send(self.sks_req_refkey(handle.value(), &der))?;
++        let out_ver = out.reply.status;
++        dev_warn!(
++            self.dev,
++            "sks: oa probe status {} response {} bytes\n",
++            out.reply.status,
++            out.response.len()
++        );
++        if out.reply.status != 0 {
++            return None;
++        }
++        let mut owned: KVec<u8> = KVec::new();
++        owned.extend_from_slice(&out.response, GFP_KERNEL).ok()?;
++        Some(owned)
++    }
++
++    /// System-key attestation (op `oska`): attests `target` using a committed
++    /// system key selected by type, e.g. 2 = UIK committed (`com.apple.setoken.uikc`).
++    /// Apple reaches this via aks_system_key_attest (0x187DC24DC), which adds the
++    /// system-key type and a generation number (0x187DC2548).
++    pub(crate) fn refkey_oska(
++        &self,
++        handle: crate::sks::KeyBagHandle,
++        target: &[u8],
++        syskey_type: u32,
++        generation: u32,
++    ) -> Option<KVec<u8>> {
++        use crate::der::RefKeyValue as RV;
++        let mut items: KVec<(&[u8], RV<'_>)> = KVec::new();
++        items.push((b"o", RV::Utf8(b"oska")), GFP_KERNEL).ok()?;
++        items.push((b"rk", RV::Der(target)), GFP_KERNEL).ok()?;
++        items.push((b"skt", RV::Integer(syskey_type)), GFP_KERNEL).ok()?;
++        items.push((b"skg", RV::Integer(generation)), GFP_KERNEL).ok()?;
++        let der = crate::der::encode_refkey_set(&items).ok()?;
++        let out = self.sks_send(self.sks_req_refkey(handle.value(), &der))?;
++        dev_warn!(
++            self.dev,
++            "sks: oska skt={} skg={} status {} resp {} bytes\n",
++            syskey_type,
++            generation,
++            out.reply.status,
++            out.response.len()
++        );
++        if out.reply.status != 0 {
++            return None;
++        }
++        if out.reply.status == 0 {
++            dev_warn!(self.dev, "sks: oska raw head {:02x?}", &out.response[..out.response.len().min(24)]);
++            if let Some(b) = self.sks_report_response(crate::sks::SKS_PERFORM_OP_NAME, &out) {
++                dev_warn!(self.dev, "sks: oska unwrapped {} bytes", b.len());
++                for chunk in b.chunks(20) {
++                    dev_warn!(self.dev, "sks: oska body {:02x?}", chunk);
++                }
++            } else {
++                dev_warn!(self.dev, "sks: oska unwrap FAILED");
++            }
++        }
++        let mut owned: KVec<u8> = KVec::new();
++        owned.extend_from_slice(&out.response, GFP_KERNEL).ok()?;
++        Some(owned)
+     }
+ 
+     /// Enclave ECIES-decrypt (o = "oecd"); takes the ephemeral from the front of `d`.
+diff --git a/drivers/soc/apple/sep.rs b/drivers/soc/apple/sep.rs
+--- a/drivers/soc/apple/sep.rs
++++ b/drivers/soc/apple/sep.rs
+@@ -2776,6 +2776,10 @@
+             default: 0,
+             description: "Opt-in J414s diagnostic: with zero live identities, select the system context and try saving the missing owner Catacomb",
+         },
++        refkey_attest_acl: u8 {
++            default: 0,
++            description: "Create the machine ref-key with an ACL that permits attestation (oa); only applied when the key is created",
++        },
+         refkey_v2: u8 {
+             default: 0,
+             description: "Explicit recovery slot for a new identity-bag context; preserves the original machine ref-key",
+diff --git a/drivers/soc/apple/sks.rs b/drivers/soc/apple/sks.rs
+--- a/drivers/soc/apple/sks.rs
++++ b/drivers/soc/apple/sks.rs
+@@ -15,8 +15,12 @@
+ }
+ 
+ impl<'a> KeybagCreateIntent<'a> {
+-    fn new(dev: &'a device::Device, slot: keybag::Slot) -> Option<Self> {
+-        if let Err(e) = keybag::write_intent(slot) {
++    fn new(
++        dev: &'a device::Device,
++        slot: keybag::Slot,
++        unfinished: crate::xart_guard::Unfinished,
++    ) -> Option<Self> {
++        if let Err(e) = keybag::write_intent(slot, unfinished) {
+             dev_err!(dev, "sks: cannot persist keybag-create intent: {:?}\n", e);
+             return None;
+         }
+@@ -626,10 +630,39 @@
+         }
+     }
+ 
++    /// The no-bag proof for an unfinished create, if Linux's list shows it
++    /// left nothing behind.
++    fn sks_retry_unfinished_create(&self, slot: keybag::Slot) -> Option<keybag::NoStoredKeyBag> {
++        let unfinished = keybag::unfinished(slot).ok()?;
++        let listed = self.with_store(|store| store.guard_listed_at_load()).flatten();
++        if !crate::xart_guard::may_retry_create(unfinished, listed) {
++            dev_err!(
++                self.dev,
++                "sks: an earlier CREATE_KEYBAG never completed and may have left a bag (intent {:?}, xART list {:?}); not creating another\n",
++                unfinished,
++                listed
++            );
++            return None;
++        }
++        let proof = keybag::retry_unfinished(slot, unfinished).ok()?;
++        dev_notice!(
++            self.dev,
++            "sks: an earlier CREATE_KEYBAG never completed and left no record; creating the identity keybag again\n"
++        );
++        Some(proof)
++    }
++
+     pub(crate) fn sks_provision_identity_keybag(&self) -> bool {
+-        let proof = match keybag::read(keybag::Slot::Identity) {
++        let identity = keybag::Slot::Identity;
++        let proof = match keybag::read(identity) {
+             Ok(keybag::State::Present(_)) => return true,
+-            Ok(keybag::State::Absent(proof)) => proof,
++            Ok(keybag::State::Absent(proof)) => Ok(proof),
++            // An intent: a create was sent and never committed.
++            Err(e) if e == EEXIST => self.sks_retry_unfinished_create(identity).ok_or(e),
++            Err(e) => Err(e),
++        };
++        let proof = match proof {
++            Ok(proof) => proof,
+             Err(e) => {
+                 dev_err!(
+                     self.dev,
+@@ -640,7 +673,13 @@
+             }
+         };
+         let slot = proof.slot();
+-        let mut intent = match KeybagCreateIntent::new(&self.dev, slot) {
++        // A later boot compares this with Linux's list to tell whether the
++        // create left anything.
++        let unfinished = match self.with_store(|store| store.guard_listed_now()).flatten() {
++            Some(entries) => crate::xart_guard::Unfinished::Guarded(entries),
++            None => crate::xart_guard::Unfinished::Unguarded,
++        };
++        let mut intent = match KeybagCreateIntent::new(&self.dev, slot, unfinished) {
+             Some(intent) => intent,
+             None => return false,
+         };
+@@ -669,30 +708,19 @@
+                 return false;
+             }
+         };
+-        // A cold-boot Mac's create rewrites a pre-Linux record for its own
+-        // reasons (XART-SAFETY.md), so only warm attach gets the window.
+-        let first_setup = if self.profile.bootstrap == profile::Bootstrap::WarmRegister {
+-            match self.with_store(|store| store.open_first_setup()) {
+-                Some(Ok(open)) => open,
+-                None => false,
+-                // Unsent, so the intent is dropped as retryable.
+-                Some(Err(e)) => {
+-                    dev_err!(
+-                        self.dev,
+-                        "sks: cannot record the xART guard's first-setup window ({:?}); not creating the keybag this boot\n",
+-                        e
+-                    );
+-                    return false;
+-                }
+-            }
+-        } else {
+-            false
+-        };
+         intent.sending();
+-        let exchanged = self.sks_exchange(request.name, request.msg, &request.img);
+-        if first_setup {
+-            self.with_store(|store| store.close_first_setup());
+-        }
++        // The enclave commits a pending locker as part of the create, and
++        // the window's host writes land inside this exchange, so it gets the
++        // 13.5 key store's longer wait.
++        let exchanged = crate::xart_guard::keybag_create_window(|| {
++            self.sks_exchange_patient(
++                request.name,
++                request.msg,
++                &request.img,
++                SKS_TIMEOUT_13_MS,
++                true,
++            )
++        });
+         let Some(out) = exchanged else {
+             dev_err!(
+                 self.dev,
+diff --git a/drivers/soc/apple/xart_guard.rs b/drivers/soc/apple/xart_guard.rs
+--- a/drivers/soc/apple/xart_guard.rs
++++ b/drivers/soc/apple/xart_guard.rs
+@@ -34,23 +34,29 @@
+ //! retried in the same slot rather than skipped. It can never leave a Linux
+ //! record that the next boot treats as another OS's.
+ //!
+-//! One exception lets a fresh install set up Touch ID on a warm-attach Mac.
+-//! Blessing a newly installed OS in macOS leaves a SEP-xART locker (kind 4)
+-//! that every OS's enclave reads at attach in a pending state, and the next
+-//! enclave to save its state commits it. macOS's enclave does that at boot;
+-//! under Linux the first save is the first `CREATE_KEYBAG`. While that create
+-//! runs on an install whose list is loaded and empty ([`FirstSetup`]), the
+-//! guard lets the enclave rewrite the first existing kind-4 locker it writes;
+-//! nothing identifies that locker as the pending one. It does not list the
+-//! locker as Linux's, and the list records the window as consumed before it
+-//! opens, so no later create on this install gets it again.
++//! Creating Linux’s identity keybag also rewrites one existing kind-4
++//! record: the enclave commits the pending locker as part of the create. The
++//! create therefore runs in a window ([`keybag_create_window`]): exactly one
++//! kind-4 rewrite, never a delete, at most once per boot, and only once the
++//! record’s previous value is saved in a host file ([`PREVIOUS_PATH`]). The
++//! record is not added to Linux’s list.
++//!
++//! An unfinished create is sent again only if Linux’s list shows it left no
++//! record behind ([`may_retry_create`]).
+ 
+ use crate::shim::StoreFile;
+ use crate::xart_store::{crc32_ieee, Key};
+ use kernel::prelude::*;
++use kernel::sync::atomic::{Atomic, Relaxed};
+ 
+ /// Host file listing the session records Linux created.
+ pub(crate) const OWNED_PATH: &CStr = c"/var/lib/aurora-sep-xart-owned.bin";
++/// Host file keeping the previous value of every record a window let the
++/// enclave rewrite.
++pub(crate) const PREVIOUS_PATH: &CStr = c"/var/lib/aurora-sep-xart-policy-previous.bin";
++const PREVIOUS_HEAD: usize = 32;
++const PREVIOUS_SLACK: usize = 32;
++const PREVIOUS_MAGIC: &[u8; 4] = b"AXGP";
+ 
+ const ENTRY_SIZE: usize = 32;
+ const ENTRY_MAGIC: &[u8; 4] = b"AXGO";
+@@ -90,22 +96,120 @@
+     }
+ }
+ 
+-/// Whether the first keybag creation of a fresh install is in progress.
++/// Why the guard let the enclave rewrite an existing record Linux did not
++/// create.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub(crate) enum FirstSetup {
+-    /// No first keybag creation is in progress.
+-    Closed,
+-    /// The enclave may rewrite one existing SEP-xART locker.
+-    Open,
+-    /// It has; further refusals stand.
+-    Used,
+-}
+-
+-/// Whether a request the guard would refuse passes as the enclave committing a
+-/// pending SEP-xART locker during the first keybag creation: a rewrite (not a
+-/// delete) of a kind-4 record at level 1, while the window is open.
+-pub(crate) fn first_setup_allows(level: u8, window: FirstSetup, key: &Key, write: bool) -> bool {
+-    level == 1 && window == FirstSetup::Open && write && key.kind == 4
++pub(crate) enum Rewrite {
++    /// The first unlock of an existing keybag, or a one-time allowance.
++    PolicyChange = 1,
++    /// The creation of Linux's identity keybag.
++    KeybagCreate = 2,
++}
++
++/// Whether this boot's one window has started, and the [`Rewrite`] it is
++/// open for now (0 when closed).
++static WINDOW_STARTED: Atomic<bool> = Atomic::new(false);
++static WINDOW_OPEN: Atomic<u32> = Atomic::new(0);
++
++/// The window open now.
++fn open_window() -> Option<Rewrite> {
++    match WINDOW_OPEN.load(Relaxed) {
++        1 => Some(Rewrite::PolicyChange),
++        2 => Some(Rewrite::KeybagCreate),
++        _ => None,
++    }
++}
++
++/// Runs `f` with the window open for `why`, unless this boot had one already.
++fn with_window<T>(why: Rewrite, f: impl FnOnce() -> T) -> T {
++    if WINDOW_STARTED.xchg(true, Relaxed) {
++        return f();
++    }
++    WINDOW_OPEN.store(why as u32, Relaxed);
++    let result = f();
++    WINDOW_OPEN.store(0, Relaxed);
++    result
++}
++
++/// Runs `create`, the identity keybag's CREATE_KEYBAG exchange, with the
++/// window open: the enclave rewrites one existing kind-4 record to create it.
++pub(crate) fn keybag_create_window<T>(create: impl FnOnce() -> T) -> T {
++    with_window(Rewrite::KeybagCreate, create)
++}
++
++impl Rewrite {
++    /// The reason as the kernel log gives it.
++    pub(crate) fn describe(self) -> &'static str {
++        match self {
++            Rewrite::PolicyChange => "for a boot policy change",
++            Rewrite::KeybagCreate => "while Linux's identity keybag was created",
++        }
++    }
++}
++
++/// A session id, printed the way the guard's log lines expect it.
++pub(crate) struct Id<'a>(pub(crate) &'a [u8; 16]);
++
++impl kernel::fmt::Display for Id<'_> {
++    fn fmt(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
++        for byte in self.0 {
++            write!(f, "{:02x}", byte)?;
++        }
++        Ok(())
++    }
++}
++
++/// The kind of session record a window may rewrite.
++const KIND_LOCKER: u8 = 4;
++
++/// Linux's list as an unfinished create's intent recorded it.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum Unfinished {
++    /// Written by a driver that did not record it.
++    Unmarked,
++    /// No guard ran with a list.
++    Unguarded,
++    /// The list had this many entries.
++    Guarded(u64),
++}
++
++/// Keeps the window shut for the rest of the boot: a keybag or ref-key
++/// created this boot is not unlocked under an older policy.
++pub(crate) fn close_policy_window() {
++    WINDOW_STARTED.store(true, Relaxed);
++}
++
++/// Saves `value`, the current value of `key`, before the enclave rewrites
++/// it. The rewrite goes ahead only once this is durable.
++pub(crate) fn save_previous(key: &Key, value: &[u8]) -> Result<()> {
++    let (file, _created) = StoreFile::open_host(PREVIOUS_PATH)?;
++    file.sync_parent()?;
++    let end = file.size()?;
++    let mut head = [0u8; PREVIOUS_HEAD];
++    head[..4].copy_from_slice(PREVIOUS_MAGIC);
++    head[4] = key.kind;
++    head[5..21].copy_from_slice(&key.uuid);
++    head[24..28].copy_from_slice(&(value.len() as u32).to_le_bytes());
++    head[28..32].copy_from_slice(&crc32_ieee(value).to_le_bytes());
++    file.write_all(end, &head)?;
++    // Slack keeps torn copies apart: a torn entry rounds down to a valid one.
++    file.write_all(end + PREVIOUS_HEAD as u64, value)?;
++    file.write_all(end + (PREVIOUS_HEAD + value.len()) as u64, &[0u8; PREVIOUS_SLACK])?;
++    file.sync()?;
++    Ok(())
++}
++
++/// Whether an unfinished create may be sent again, given the entries in
++/// Linux's list at load (`None` without a list). Every new session record is
++/// listed before it is written, so an unchanged list means the create left
++/// nothing; an unmarked intent needs an empty list.
++pub(crate) fn may_retry_create(unfinished: Unfinished, listed: Option<u64>) -> bool {
++    match (unfinished, listed) {
++        (_, None) => false,
++        (Unfinished::Guarded(then), Some(now)) => now == then,
++        (Unfinished::Unmarked, Some(now)) => now == 0,
++        (Unfinished::Unguarded, Some(_)) => false,
++    }
+ }
+ 
+ /// The guard level for `xart_guard=param` on a platform whose profile
+@@ -242,10 +346,12 @@
+     file: Option<F>,
+     /// Byte offset of the next entry.
+     end: u64,
++    at_load: u64,
+     owned: KVec<Key>,
+     existed: KVec<Key>,
+     refused: usize,
+-    first_setup: FirstSetup,
++    save_previous: Option<Rewrite>,
++    window_used: bool,
+ }
+ 
+ impl Guard {
+@@ -268,10 +374,12 @@
+             level,
+             file: None,
+             end: 0,
++            at_load: 0,
+             owned: KVec::new(),
+             existed: existing,
+             refused: 0,
+-            first_setup: FirstSetup::Closed,
++            save_previous: None,
++            window_used: false,
+         };
+         // A list created this boot (or by a crashed one) is only safe to adopt
+         // into once its name is durable: fsync() of the file alone does not
+@@ -286,6 +394,7 @@
+                         e
+                     );
+                 } else {
++                    guard.at_load = guard.end / ENTRY_SIZE as u64;
+                     guard.file = Some(file);
+                 }
+             }
+@@ -351,37 +460,12 @@
+         self.file.is_some()
+     }
+ 
+-    /// Opens the first-setup window for one keybag creation, only at level 1
+-    /// on a fresh install: the list loaded and holding no entry, torn ones
+-    /// included. The window is recorded as consumed in the list, durably,
+-    /// before it opens, so it opens at most once per install whatever becomes
+-    /// of the keybag. `Ok(false)` when the install is not eligible; an error,
+-    /// with the window shut, when the record could not be made durable.
+-    pub(crate) fn open_first_setup(&mut self) -> Result<bool> {
+-        if self.level != 1 {
+-            return Ok(false);
+-        }
+-        let Some(file) = self.file.as_ref() else {
+-            return Ok(false);
+-        };
+-        // The file's length, not `end`: a torn first entry rounds `end` down
+-        // to 0 but is still an earlier setup.
+-        if !file.size().is_ok_and(|size| size == 0) {
+-            return Ok(false);
+-        }
+-        // The list's directory entry was flushed when it was opened. A failed
+-        // write or flush leaves `end` at 0, so an adoption overwrites the
+-        // slot, and any bytes that survive keep the window shut.
+-        file.write_all(0, &setup_consumed())?;
+-        file.sync()?;
+-        self.end = ENTRY_SIZE as u64;
+-        self.first_setup = FirstSetup::Open;
+-        Ok(true)
+-    }
+-
+-    /// Closes the first-setup window, used or not.
+-    pub(crate) fn close_first_setup(&mut self) {
+-        self.first_setup = FirstSetup::Closed;
++    /// How many entries Linux’s list held when it was loaded, or `None`
++    /// without a list. A later boot compares it with an unfinished create’s
++    /// intent to tell whether that create left a record.
++    pub(crate) fn listed_at_load(&self) -> Option<u64> {
++        self.file.as_ref()?;
++        Some(self.at_load)
+     }
+ 
+     fn adopt(&mut self, key: &Key) -> Result<()> {
+@@ -422,11 +506,13 @@
+                     e
+                 )
+             }),
+-            Verdict::Refuse if first_setup_allows(self.level, self.first_setup, key, write) => {
+-                self.first_setup = FirstSetup::Used;
++            Verdict::Refuse if write && self.take_window_for(key) => {
++                let why = open_window().unwrap();
++                self.save_previous = Some(why);
+                 pr_info!(
+-                    "xART guard: allowed the enclave to commit an existing kind-{} locker during this install's first keybag creation\n",
+-                    key.kind
++                    "xART guard: allowed the enclave to rewrite an existing kind-{} record {}\n",
++                    key.kind,
++                    why.describe()
+                 );
+                 Ok(())
+             }
+@@ -447,6 +533,45 @@
+     }
+ }
+ 
++
++impl<F: ListFile> Guard<F> {
++    /// Uses this boot’s window if it is open for `key`: a rewrite of a
++    /// kind-4 record at level 1, at most once.
++    fn take_window_for(&mut self, key: &Key) -> bool {
++        if key.kind != KIND_LOCKER || self.window_used {
++            return false;
++        }
++        if open_window().is_none() {
++            return false;
++        }
++        self.window_used = true;
++        true
++    }
++
++    /// How many records Linux's list holds now.
++    pub(crate) fn owned_len(&self) -> u64 {
++        self.owned.len() as u64
++    }
++
++    /// Why the write just allowed rewrites an existing record, if it does.
++    pub(crate) fn take_save_previous(&mut self) -> Option<Rewrite> {
++        self.save_previous.take()
++    }
++
++    /// The previous value could not be saved: the rewrite is refused after
++    /// all.
++    pub(crate) fn refuse_unsaved(&mut self, key: &Key, e: Error) {
++        crate::diag::xart_guard_refused();
++        self.refused += 1;
++        pr_warn!(
++            "xART guard: could not save kind-{} record {} before rewriting it ({:?}); refusing it\n",
++            key.kind,
++            Id(&key.uuid),
++            e
++        );
++    }
++}
++
+ #[cfg(CONFIG_APPLE_SEP_KUNIT_TEST)]
+ #[kernel::macros::kunit_tests(apple_sep_xart_guard)]
+ mod tests {
+@@ -651,143 +776,30 @@
+     }
+ 
+     #[test]
+-    fn first_setup_allows_only_a_kind_4_rewrite_at_level_1() {
+-        let open = FirstSetup::Open;
+-        assert!(first_setup_allows(1, open, &session(1), true));
+-        assert!(!first_setup_allows(1, open, &session(1), false));
+-        assert!(!first_setup_allows(1, open, &Key::new(3, [1; 16]), true));
+-        assert!(!first_setup_allows(2, open, &session(1), true));
+-        assert!(!first_setup_allows(1, FirstSetup::Closed, &session(1), true));
+-        assert!(!first_setup_allows(1, FirstSetup::Used, &session(1), true));
+-    }
+-
+-    #[test]
+-    fn a_fresh_install_commits_one_locker_during_its_first_create() -> Result<()> {
++    fn the_window_takes_one_kind_4_rewrite() {
+         let bytes = RefCell::new(KVec::new());
+-        let pending = session(1);
+-        let other = session(2);
+-        let user = Key::new(3, [3; 16]);
+-        let mut guard = Guard::with_file(1, keys(&[pending, other, user])?, Ok(mem(&bytes)));
+-        // Outside the window the locker is protected as before.
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-        assert_eq!(guard.open_first_setup(), Ok(true));
+-        // The window is consumed in the list before it opens.
+-        assert_eq!(&bytes.borrow()[..], &setup_consumed()[..]);
+-        // A delete, or a USER-xART locker, does not use the window.
+-        assert_eq!(guard.check(&other, false), Err(EPERM));
+-        assert_eq!(guard.check(&user, true), Err(EPERM));
+-        assert_eq!(guard.check(&pending, true), Ok(()));
+-        // One rewrite only, and the locker does not become Linux's.
+-        assert_eq!(guard.check(&other, true), Err(EPERM));
+-        assert_eq!(listed(&bytes)[..], [None]);
+-        guard.close_first_setup();
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-        assert_eq!(guard.refused, 5);
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn first_setup_opens_once_per_install() -> Result<()> {
+-        let bytes = RefCell::new(KVec::new());
+-        let pending = session(1);
+-        let mut guard = Guard::with_file(1, keys(&[pending])?, Ok(mem(&bytes)));
+-        assert_eq!(guard.open_first_setup(), Ok(true));
+-        guard.close_first_setup();
+-        // A second create this boot, unused window or not.
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-
+-        // After a reboot, or with the keybag file removed by a Touch ID reset,
+-        // which keeps the list.
+-        let mut guard = Guard::with_file(1, keys(&[pending])?, Ok(mem(&bytes)));
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-        assert_eq!(bytes.borrow().len(), ENTRY_SIZE);
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn the_consumed_marker_lists_no_record() -> Result<()> {
+-        let bytes = RefCell::new(KVec::new());
+-        bytes.borrow_mut().extend_from_slice(&setup_consumed(), GFP_KERNEL)?;
+-        let fresh = session(5);
+-        let mut guard = Guard::with_file(1, KVec::new(), Ok(mem(&bytes)));
+-        assert!(guard.list_loaded());
+-        assert_eq!(guard.owned.len(), 0);
+-        // An adoption appends after the marker and keeps it.
+-        assert_eq!(guard.check(&fresh, true), Ok(()));
+-        assert_eq!(listed(&bytes)[..], [None, Some(fresh)]);
+-        assert_eq!(&bytes.borrow()[..ENTRY_SIZE], &setup_consumed()[..]);
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-
+-        // Adopting in the same boot as the window also appends after it.
+-        let bytes = RefCell::new(KVec::new());
+-        let mut guard = Guard::with_file(1, KVec::new(), Ok(mem(&bytes)));
+-        assert_eq!(guard.open_first_setup(), Ok(true));
+-        assert_eq!(guard.check(&fresh, true), Ok(()));
+-        assert_eq!(listed(&bytes)[..], [None, Some(fresh)]);
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn first_setup_stays_shut_when_it_cannot_be_recorded() -> Result<()> {
+-        let pending = session(1);
+-        let fresh = session(5);
+-
+-        // The write fails: nothing lands, and the window stays shut.
+-        let bytes = RefCell::new(KVec::new());
+-        let faults = Faults::default();
+-        faults.write.set(true);
+-        let mut guard = Guard::with_file(1, keys(&[pending])?, Ok(faulty(&bytes, &faults)));
+-        assert_eq!(guard.open_first_setup(), Err(EIO));
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-        faults.write.set(false);
+-        assert_eq!(guard.open_first_setup(), Ok(true));
+-
+-        // The marker lands but its flush fails: the window stays shut, and
+-        // the bytes that landed keep it shut on every later attempt.
+-        let bytes = RefCell::new(KVec::new());
+-        let faults = Faults::default();
+-        faults.sync.set(true);
+-        let mut guard = Guard::with_file(1, keys(&[pending])?, Ok(faulty(&bytes, &faults)));
+-        assert_eq!(guard.open_first_setup(), Err(EIO));
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-        faults.sync.set(false);
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        // The unflushed slot is the next adoption's.
+-        assert_eq!(guard.check(&fresh, true), Ok(()));
+-        assert_eq!(listed(&bytes)[..], [Some(fresh)]);
+-        let mut guard = Guard::with_file(1, keys(&[pending])?, Ok(mem(&bytes)));
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn first_setup_needs_level_1_and_an_empty_loaded_list() -> Result<()> {
+-        let pending = session(1);
+-        let own = session(2);
+-        let bytes = RefCell::new(list_of(&[own])?);
+-        let mut guard = Guard::with_file(1, keys(&[pending, own])?, Ok(mem(&bytes)));
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-
+-        // A torn entry is still an earlier setup.
+-        let torn = RefCell::new(KVec::new());
+-        torn.borrow_mut().extend_from_slice(&encode(&own)[..10], GFP_KERNEL)?;
+-        let mut guard = Guard::with_file(1, keys(&[pending])?, Ok(mem(&torn)));
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        assert_eq!(torn.borrow().len(), 10);
+-
+-        let mut guard = Guard::<MemFile<'_>>::with_file(1, keys(&[pending])?, Err(ENOENT));
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        assert_eq!(guard.check(&pending, true), Err(EPERM));
+-
+-        // Level 2 gets no window and consumes nothing.
+-        let empty = RefCell::new(KVec::new());
+-        let mut guard = Guard::with_file(2, keys(&[pending])?, Ok(mem(&empty)));
+-        assert_eq!(guard.open_first_setup(), Ok(false));
+-        assert_eq!(empty.borrow().len(), 0);
+-        Ok(())
++        let mut guard = Guard::with_file(1, keys(&[]).unwrap(), Ok(mem(&bytes)));
++        // Closed: nothing passes.
++        assert!(!guard.take_window_for(&session(1)));
++        keybag_create_window(|| {
++            assert!(guard.take_window_for(&session(1)));
++            // Once only, and only for a kind-4 record.
++            assert!(!guard.take_window_for(&session(2)));
++            assert!(!guard.take_window_for(&Key::new(3, [1; 16])));
++        });
++        assert!(!guard.take_window_for(&session(3)));
++    }
++
++    #[test]
++    fn an_unfinished_create_is_retried_only_with_evidence() {
++        // An unchanged list means the create left nothing.
++        assert!(may_retry_create(Unfinished::Guarded(3), Some(3)));
++        assert!(!may_retry_create(Unfinished::Guarded(3), Some(4)));
++        // An unmarked intent needs an empty list, and no list never retries.
++        assert!(may_retry_create(Unfinished::Unmarked, Some(0)));
++        assert!(!may_retry_create(Unfinished::Unmarked, Some(1)));
++        assert!(!may_retry_create(Unfinished::Unguarded, Some(0)));
++        assert!(!may_retry_create(Unfinished::Guarded(3), None));
+     }
+ 
+     #[test]
+diff --git a/drivers/soc/apple/xart_store.rs b/drivers/soc/apple/xart_store.rs
+--- a/drivers/soc/apple/xart_store.rs
++++ b/drivers/soc/apple/xart_store.rs
+@@ -353,6 +353,9 @@
+ 
+         if let Some(guard) = self.guard.as_mut() {
+             guard.check(key, true)?;
++            if guard.take_save_previous().is_some() {
++                self.save_previous(key)?;
++            }
+         }
+ 
+         let old = self.find(key);
+@@ -413,6 +416,33 @@
+ 
+     /// Whether this store accepts writes: `xart_writes=1` and APFS proved the
+     /// extent writable.
++    /// Saves the current value of `key` before the guard lets the enclave
++    /// rewrite it, and logs the rewrite. Refuses it when that fails.
++    fn save_previous(&mut self, key: &Key) -> Result<()> {
++        let saved = match self.read(key) {
++            Ok(Some(value)) => crate::xart_guard::save_previous(key, &value),
++            Ok(None) => Err(ENOENT),
++            Err(e) => Err(e),
++        };
++        match saved {
++            Ok(()) => {
++                pr_notice!(
++                    "xART guard: allowed one rewrite of kind-{} record {}; its previous value is in {}\n",
++                    key.kind,
++                    crate::xart_guard::Id(&key.uuid),
++                    crate::xart_guard::PREVIOUS_PATH
++                );
++                Ok(())
++            }
++            Err(e) => {
++                if let Some(guard) = self.guard.as_mut() {
++                    guard.refuse_unsaved(key, e);
++                }
++                Err(EPERM)
++            }
++        }
++    }
++
+     pub(crate) fn writes_enabled(&self) -> bool {
+         self.writes_enabled
+     }
+@@ -444,16 +474,18 @@
+ 
+     /// Opens the guard's first-setup window (see [`crate::xart_guard`]).
+     /// `Ok(false)` without a guard or once this install has listed anything.
+-    pub(crate) fn open_first_setup(&mut self) -> Result<bool> {
+-        self.guard
+-            .as_mut()
+-            .map_or(Ok(false), |guard| guard.open_first_setup())
+-    }
+-
+-    pub(crate) fn close_first_setup(&mut self) {
+-        if let Some(guard) = self.guard.as_mut() {
+-            guard.close_first_setup();
+-        }
++    /// The entries in Linux's list when it was loaded, or `None` without a
++    /// list. Compared with an unfinished create's intent to tell whether that
++    /// create left a record.
++    pub(crate) fn guard_listed_at_load(&self) -> Option<u64> {
++        self.guard.as_ref()?.listed_at_load()
++    }
++
++    /// The entries in Linux's list now.
++    pub(crate) fn guard_listed_now(&self) -> Option<u64> {
++        let guard = self.guard.as_ref()?;
++        guard.listed_at_load()?;
++        Some(guard.owned_len())
+     }
+ 
+     /// Byte offset of the APFS-resolved gigalocker extent in the container.

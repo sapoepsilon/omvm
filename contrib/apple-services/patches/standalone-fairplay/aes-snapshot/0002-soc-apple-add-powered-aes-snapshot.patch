@@ -1,0 +1,304 @@
+diff --git a/Documentation/admin-guide/apple-sio-aes-snapshot.rst b/Documentation/admin-guide/apple-sio-aes-snapshot.rst
+new file mode 100644
+index 0000000..151ded4
+--- /dev/null
++++ b/Documentation/admin-guide/apple-sio-aes-snapshot.rst
+@@ -0,0 +1,76 @@
++.. SPDX-License-Identifier: GPL-2.0-only
++
++======================================
++Apple T6000 AES powered-state snapshot
++======================================
++
++Scope
++=====
++
++``CONFIG_APPLE_SIO_AES_SNAPSHOT`` provides a diagnostic snapshot for the
++revision-3 T6000-family SIO AES layout. It does not register a crypto algorithm
++or provide a transform, key-export or command interface. It does not initialize
++the engine, request an interrupt, acknowledge status, reset hardware, submit
++DMA, write a FIFO, access a DKEY bank or write any AES register.
++
++The driver takes at most two register reads during probe: the engine readiness
++word at offset 0x0c, followed by the shared disable word at offset zero only
++when every native readiness-mask bit (0x3f80) is set. All-ones values are
++conservatively rejected. There is no polling or retry. Unready or rejected
++reads yield unavailable disable state, never an inference from zero-filled
++storage. Reading the diagnostic file accesses only the cached result.
++
++Power and ownership
++===================
++
++This is a **powered-probe observation**, not an immutable boot-state report.
++The ordinary platform bus can power the AES domain before probe. Runtime PM
++then holds that domain during the reads and releases it afterwards. Normal
++power management writes PMGR state and can change power or clock gating.
++The normal IOMMU path attaches stream 1 on both existing SIO DART instances;
++that attachment can configure stream state even though no DMA is submitted.
++There is no claim that power transitions preserve a pre-Linux disable latch.
++
++The shared device-tree node is disabled by default and the Kconfig option
++defaults to N. A reviewed normal kernel/DTB build must explicitly enable the
++node on a board whose resources and revision have been verified. Keeping the
++node disabled prevents the device from being created; a check inside probe
++would be too late to prevent initial platform power-domain attachment. Do not
++use a dynamic node or forced module load as a substitute for that review.
++
++The owned T6001/J314c firmware metadata used for this layout identifies engine
++0x39b060000 (0x4000 bytes), shared disable bank 0x2922d0000 (0x8000 bytes),
++AES revision 3, no disable-offset overrides, the paired SIO DART mapper at
++stream 1, and power gate AES with parent SIO. No other revision is supported.
++The driver requires both named register banks, both IOMMU references, an
++attached IOMMU domain, and one attached power domain. Resource and power errors
++fail probe and provide no snapshot.
++
++Inspection
++==========
++
++After an explicitly enabled normal boot and successful probe, the mode-0400
++debugfs file is::
++
++  /sys/kernel/debug/apple-sio-aes-snapshot-<device-name>/state
++
++It reports ``phase: powered-probe`` and the sampled readiness word. When
++readiness or the disable read is unavailable, every disable bit is reported
++as ``unavailable``. Otherwise it reports the shared word's UID1 bit 0, GID0
++bit 1 and GID1 bit 2 as ``set`` or ``clear``. A clear disable bit does not
++establish that a hardware key, transform, or higher-level operation works.
++No key material is read or returned. This is a diagnostic debugfs format,
++not a stable userspace API.
++
++The separately named driver does not replace or modify any existing AES
++driver draft. Only one driver may bind the same AES device; do not enable
++another driver claiming ``apple,t6000-aes`` in the diagnostic build.
++
++Build review
++============
++
++Before an enabled boot, review the source and DT changes and run the normal
++kernel, DT binding and DTB build checks with matching generated kernel files.
++Keep a known-good boot entry and review the activation change separately.
++No status value obtained here permits guessing a key or substituting a
++software key for an unavailable hardware operation.
+diff --git a/Documentation/admin-guide/index.rst b/Documentation/admin-guide/index.rst
+index cd28dfe..6b94720 100644
+--- a/Documentation/admin-guide/index.rst
++++ b/Documentation/admin-guide/index.rst
+@@ -72,6 +72,7 @@ problems and bugs in particular.
+    tainted-kernels
+    ramoops
+    dynamic-debug-howto
++   apple-sio-aes-snapshot
+    init
+    kdump/index
+    perf/index
+diff --git a/drivers/soc/apple/Kconfig b/drivers/soc/apple/Kconfig
+index 9001a70..1cb2586 100644
+--- a/drivers/soc/apple/Kconfig
++++ b/drivers/soc/apple/Kconfig
+@@ -130,6 +130,22 @@ config APPLE_SART
+ 
+ 	  Say 'y' here if you have an Apple SoC.
+ 
++config APPLE_SIO_AES_SNAPSHOT
++	tristate "Apple T6000 AES powered-state diagnostic snapshot"
++	depends on OF && PM && DEBUG_FS
++	depends on APPLE_DART && APPLE_PMGR_PWRSTATE
++	depends on APPLE_SIO_AES = n
++	help
++	  Cache the readiness and shared key-disable bits of a verified
++	  revision-3 T6000 SIO AES device during a powered probe. The device
++	  tree node is disabled by default and must be explicitly enabled
++	  for a reviewed diagnostic build. Normal power and IOMMU attachment
++	  change hardware state; this is not an immutable boot-state report.
++	  The driver performs no AES register writes or cryptographic work.
++	  See Documentation/admin-guide/apple-sio-aes-snapshot.rst.
++
++	  If unsure, say N.
++
+ config APPLE_TUNABLE
+ 	tristate
+ 	depends on ARCH_APPLE || COMPILE_TEST
+diff --git a/drivers/soc/apple/Makefile b/drivers/soc/apple/Makefile
+--- a/drivers/soc/apple/Makefile
++++ b/drivers/soc/apple/Makefile
+@@ -1,4 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++
++obj-$(CONFIG_APPLE_SIO_AES_SNAPSHOT) += apple-sio-aes-snapshot.o
+ 
+ obj-$(CONFIG_APPLE_DOCKCHANNEL) += apple-dockchannel.o
+ apple-dockchannel-y = dockchannel.o
+diff --git a/drivers/soc/apple/apple-sio-aes-snapshot.c b/drivers/soc/apple/apple-sio-aes-snapshot.c
+new file mode 100644
+index 0000000..4103e75
+--- /dev/null
++++ b/drivers/soc/apple/apple-sio-aes-snapshot.c
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * One powered-probe snapshot of the T6000 SIO AES readiness and disable bits.
++ * No engine initialization, reset, interrupt, FIFO, DMA or key operations.
++ */
++
++#include <linux/debugfs.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/iommu.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++
++#define APPLE_AES_READINESS_OFFSET	0x0c
++#define APPLE_AES_V3_READY_MASK		0x3f80
++#define APPLE_AES_DISABLE_MASK		0x07
++
++struct apple_aes_snapshot {
++	u32 readiness;
++	u32 disable;
++	bool disable_valid;
++};
++
++static int apple_aes_snapshot_show(struct seq_file *s, void *unused)
++{
++	const struct apple_aes_snapshot *snapshot = s->private;
++
++	seq_puts(s, "phase: powered-probe\n");
++	seq_printf(s, "readiness_raw: %#010x\n", snapshot->readiness);
++	seq_printf(s, "readiness_required_mask: %#010x\n",
++		   APPLE_AES_V3_READY_MASK);
++	if (!snapshot->disable_valid) {
++		seq_puts(s, "disable_state: unavailable\n");
++		seq_puts(s, "uid1_disable_bit: unavailable\n");
++		seq_puts(s, "gid0_disable_bit: unavailable\n");
++		seq_puts(s, "gid1_disable_bit: unavailable\n");
++		return 0;
++	}
++
++	seq_puts(s, "disable_state: sampled\n");
++	seq_printf(s, "uid1_disable_bit: %s\n",
++		   snapshot->disable & 0x01 ? "set" : "clear");
++	seq_printf(s, "gid0_disable_bit: %s\n",
++		   snapshot->disable & 0x02 ? "set" : "clear");
++	seq_printf(s, "gid1_disable_bit: %s\n",
++		   snapshot->disable & 0x04 ? "set" : "clear");
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(apple_aes_snapshot);
++
++static void apple_aes_snapshot_remove_debugfs(void *directory)
++{
++	debugfs_remove_recursive(directory);
++}
++
++static void __iomem *apple_aes_snapshot_map(struct platform_device *pdev,
++					  unsigned int index, const char *name,
++					  resource_size_t expected_size)
++{
++	struct resource *resource, *named;
++
++	resource = platform_get_resource(pdev, IORESOURCE_MEM, index);
++	named = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++	if (!resource || resource != named ||
++	    resource_size(resource) != expected_size)
++		return IOMEM_ERR_PTR(-EINVAL);
++
++	return devm_ioremap_resource(&pdev->dev, resource);
++}
++
++static int apple_aes_snapshot_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct apple_aes_snapshot *snapshot;
++	struct dentry *directory, *state;
++	void __iomem *engine, *disable;
++	char *name;
++	int ret;
++
++	/* The ordinary platform/PM/IOMMU paths own power and both SIO DARTs. */
++	if (!dev->pm_domain ||
++	    of_count_phandle_with_args(dev->of_node, "power-domains",
++				       "#power-domain-cells") != 1)
++		return dev_err_probe(dev, -EINVAL, "Missing AES power domain\n");
++	if (of_count_phandle_with_args(dev->of_node, "iommus",
++				       "#iommu-cells") != 2 ||
++	    !iommu_get_domain_for_dev(dev))
++		return dev_err_probe(dev, -ENODEV, "Missing paired SIO DART domain\n");
++	if (platform_get_resource(pdev, IORESOURCE_MEM, 2))
++		return dev_err_probe(dev, -EINVAL, "Unexpected register bank\n");
++
++	engine = apple_aes_snapshot_map(pdev, 0, "engine", 0x4000);
++	if (IS_ERR(engine))
++		return dev_err_probe(dev, PTR_ERR(engine), "Invalid engine bank\n");
++	disable = apple_aes_snapshot_map(pdev, 1, "key-disable", 0x8000);
++	if (IS_ERR(disable))
++		return dev_err_probe(dev, PTR_ERR(disable), "Invalid disable bank\n");
++
++	snapshot = devm_kzalloc(dev, sizeof(*snapshot), GFP_KERNEL);
++	if (!snapshot)
++		return -ENOMEM;
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "Failed to power AES for snapshot\n");
++
++	/*
++	 * At most two AES register reads; no polling or register writes.
++	 * Revision 3 requires every readiness bit, not just a nonzero word.
++	 * Reject all-ones reads conservatively as unavailable as well.
++	 */
++	snapshot->readiness = readl(engine + APPLE_AES_READINESS_OFFSET);
++	if (snapshot->readiness != ~0U &&
++	    (snapshot->readiness & APPLE_AES_V3_READY_MASK) ==
++						APPLE_AES_V3_READY_MASK) {
++		u32 value = readl(disable);
++
++		if (value != ~0U) {
++			snapshot->disable = value & APPLE_AES_DISABLE_MASK;
++			snapshot->disable_valid = true;
++		}
++	}
++
++	ret = pm_runtime_put_sync_suspend(dev);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "Failed to release AES power\n");
++
++	name = devm_kasprintf(dev, GFP_KERNEL, "apple-sio-aes-snapshot-%s",
++			     dev_name(dev));
++	if (!name)
++		return -ENOMEM;
++	directory = debugfs_create_dir(name, NULL);
++	if (IS_ERR(directory))
++		return PTR_ERR(directory);
++	ret = devm_add_action_or_reset(dev, apple_aes_snapshot_remove_debugfs,
++				       directory);
++	if (ret)
++		return ret;
++	state = debugfs_create_file("state", 0400, directory, snapshot,
++				    &apple_aes_snapshot_fops);
++	return PTR_ERR_OR_ZERO(state);
++}
++
++static const struct of_device_id apple_aes_snapshot_match[] = {
++	{ .compatible = "apple,t6000-aes" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, apple_aes_snapshot_match);
++
++static struct platform_driver apple_aes_snapshot_driver = {
++	.probe = apple_aes_snapshot_probe,
++	.driver = {
++		.name = "apple-sio-aes-snapshot",
++		.of_match_table = apple_aes_snapshot_match,
++	},
++};
++module_platform_driver(apple_aes_snapshot_driver);
++
++MODULE_DESCRIPTION("Apple T6000 AES powered-probe status snapshot");
++MODULE_LICENSE("GPL");

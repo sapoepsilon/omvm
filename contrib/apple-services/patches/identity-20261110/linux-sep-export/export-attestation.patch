@@ -1,0 +1,749 @@
+diff --git a/drivers/soc/apple/bio.rs b/drivers/soc/apple/bio.rs
+--- a/drivers/soc/apple/bio.rs
++++ b/drivers/soc/apple/bio.rs
+@@ -156,6 +156,39 @@
+     /// out: DER signature, zero-padded to `ATTEST_SIG_MAX`.
+     pub(crate) signature: [u8; ATTEST_SIG_MAX],
+     pub(crate) reserved: [u8; 3],
++}
++
++/// Upper bound for a complete, transport-unwrapped system-key attestation DER.
++pub(crate) const EXPORT_ATTESTATION_MAX: usize = 4096;
++
++#[repr(C)]
++pub(crate) struct ExportAttestationHeader {
++    pub(crate) version: u32,
++    pub(crate) der_len: u32,
++    pub(crate) public_key: [u8; ATTEST_PUB_LEN],
++    pub(crate) reserved: [u8; 7],
++}
++
++// This type fixes the ioctl size; the handler writes its header and payload
++// separately to avoid placing the complete buffer on the kernel stack.
++#[repr(C)]
++pub(crate) struct ExportAttestation {
++    pub(crate) header: ExportAttestationHeader,
++    pub(crate) der: [u8; EXPORT_ATTESTATION_MAX],
++}
++
++#[repr(C)]
++pub(crate) struct SystemPublicKeyHeader {
++    pub(crate) version: u32,
++    pub(crate) system_key_type: u32,
++    pub(crate) generation: u32,
++    pub(crate) key_len: u32,
++}
++
++#[repr(C)]
++pub(crate) struct SystemPublicKey {
++    pub(crate) header: SystemPublicKeyHeader,
++    pub(crate) data: [u8; EXPORT_ATTESTATION_MAX],
+ }
+ 
+ // Sizes are baked into the ioctl numbers.
+@@ -168,6 +201,10 @@
+ static_assert!(core::mem::size_of::<VerifyPoll>() == 72);
+ static_assert!(core::mem::size_of::<Delete>() == 16);
+ static_assert!(core::mem::size_of::<Attest>() == 176);
++static_assert!(core::mem::size_of::<ExportAttestationHeader>() == 80);
++static_assert!(core::mem::size_of::<ExportAttestation>() == 4176);
++static_assert!(core::mem::size_of::<SystemPublicKeyHeader>() == 16);
++static_assert!(core::mem::size_of::<SystemPublicKey>() == 4112);
+ 
+ macro_rules! ioctl_pod {
+     (to_user: $($t:ty),*; from_user: $($u:ty),*) => {
+@@ -182,8 +219,8 @@
+     };
+ }
+ ioctl_pod! {
+-    to_user: Info, List, EnrolPoll, VerifyPoll, Attest;
+-    from_user: EnrolStart, VerifyStart, Delete, Attest
++    to_user: Info, List, EnrolPoll, VerifyPoll, Attest, ExportAttestationHeader, SystemPublicKeyHeader;
++    from_user: EnrolStart, VerifyStart, Delete, Attest, SystemPublicKeyHeader
+ }
+ 
+ const MAGIC: u32 = 0xB1;
+@@ -198,6 +235,8 @@
+ const IOC_DELETE: u32 = _IOW::<Delete>(MAGIC, 0x08);
+ const IOC_DELETE_ALL: u32 = _IO(MAGIC, 0x09);
+ pub(crate) const IOC_ATTEST: u32 = _IOWR::<Attest>(MAGIC, 0x0a);
++pub(crate) const IOC_EXPORT_ATTESTATION: u32 = _IOR::<ExportAttestation>(MAGIC, 0x0c);
++pub(crate) const IOC_SYSTEM_PUBLIC_KEY: u32 = _IOWR::<SystemPublicKey>(MAGIC, 0x0d);
+ 
+ pub(crate) struct MatchEvidence {
+     identity: [u8; UUID_LEN],
+diff --git a/drivers/soc/apple/sbio.rs b/drivers/soc/apple/sbio.rs
+--- a/drivers/soc/apple/sbio.rs
++++ b/drivers/soc/apple/sbio.rs
+@@ -3410,6 +3410,12 @@
+         if cmd == bio::IOC_ATTEST {
+             return self.bio_attest(arg);
+         }
++        if cmd == bio::IOC_EXPORT_ATTESTATION {
++            return self.bio_export_attestation(arg);
++        }
++        if cmd == bio::IOC_SYSTEM_PUBLIC_KEY {
++            return self.bio_system_public_key(arg);
++        }
+         // With xART writes off the enclave cannot persist what an enrolment or
+         // a match changes. It saves anti-replay state after every match, and a
+         // refused save has left it unresponsive until reboot. Refuse the
+@@ -3513,6 +3519,86 @@
+         kernel::uaccess::UserSlice::new(user, core::mem::size_of::<bio::Attest>())
+             .writer()
+             .write(&out)?;
++        Ok(bio::Handled {
++            ret: 0,
++            wake: false,
++            start_enrol: false,
++            start_verify: false,
++            delete_identity: None,
++            delete_identities: KVec::new(),
++        })
++    }
++
++    fn bio_export_attestation(&self, arg: usize) -> Result<bio::Handled> {
++        if !shim::capable_admin() {
++            return Err(EPERM);
++        }
++        let (der, public_key) = self.refkey_export_attestation()?;
++        if der.len() > bio::EXPORT_ATTESTATION_MAX || public_key.len() != bio::ATTEST_PUB_LEN {
++            return Err(EOVERFLOW);
++        }
++        let mut header = bio::ExportAttestationHeader {
++            version: 1,
++            der_len: der.len() as u32,
++            public_key: [0u8; bio::ATTEST_PUB_LEN],
++            reserved: [0u8; 7],
++        };
++        header.public_key.copy_from_slice(&public_key);
++        let user = kernel::uaccess::UserPtr::from_addr(arg);
++        let mut writer = kernel::uaccess::UserSlice::new(
++            user,
++            core::mem::size_of::<bio::ExportAttestation>(),
++        ).writer();
++        writer.write(&header)?;
++        writer.write_slice(&der)?;
++        // Always initialise the whole userspace struct, including unused tail.
++        let zeros = [0u8; 128];
++        let mut remaining = bio::EXPORT_ATTESTATION_MAX - der.len();
++        while remaining != 0 {
++            let n = remaining.min(zeros.len());
++            writer.write_slice(&zeros[..n])?;
++            remaining -= n;
++        }
++        Ok(bio::Handled {
++            ret: 0,
++            wake: false,
++            start_enrol: false,
++            start_verify: false,
++            delete_identity: None,
++            delete_identities: KVec::new(),
++        })
++    }
++
++    fn bio_system_public_key(&self, arg: usize) -> Result<bio::Handled> {
++        if !shim::capable_admin() {
++            return Err(EPERM);
++        }
++        let user = kernel::uaccess::UserPtr::from_addr(arg);
++        let mut header: bio::SystemPublicKeyHeader = kernel::uaccess::UserSlice::new(
++            user,
++            core::mem::size_of::<bio::SystemPublicKeyHeader>(),
++        ).reader().read()?;
++        if header.version != 1 || header.key_len != 0 {
++            return Err(EINVAL);
++        }
++        let data = self.refkey_system_public_key(header.system_key_type, header.generation)?;
++        if data.is_empty() || data.len() > bio::EXPORT_ATTESTATION_MAX {
++            return Err(EOVERFLOW);
++        }
++        header.key_len = data.len() as u32;
++        let mut writer = kernel::uaccess::UserSlice::new(
++            user,
++            core::mem::size_of::<bio::SystemPublicKey>(),
++        ).writer();
++        writer.write(&header)?;
++        writer.write_slice(&data)?;
++        let zeros = [0u8; 128];
++        let mut remaining = bio::EXPORT_ATTESTATION_MAX - data.len();
++        while remaining != 0 {
++            let n = remaining.min(zeros.len());
++            writer.write_slice(&zeros[..n])?;
++            remaining -= n;
++        }
+         Ok(bio::Handled {
+             ret: 0,
+             wake: false,
+diff --git a/drivers/soc/apple/refkey.rs b/drivers/soc/apple/refkey.rs
+--- a/drivers/soc/apple/refkey.rs
++++ b/drivers/soc/apple/refkey.rs
+@@ -13,7 +13,54 @@
+ 
+ pub(crate) const REFKEY_ENVELOPE_VERSION: u32 = 2;
+ 
++// Validate only the envelope's DER framing. Its content may be encrypted and
++// must remain byte-for-byte intact for the attestation consumer.
++fn complete_attestation_der(der: &[u8]) -> bool {
++    if der.len() < 2 || der[0] != 0x30 {
++        return false;
++    }
++    let first = der[1];
++    let (header, len) = if first < 0x80 {
++        (2, usize::from(first))
++    } else {
++        let n = usize::from(first & 0x7f);
++        // The export is bounded to 4096 bytes; longer DER length fields cannot
++        // be canonical here. Also reject indefinite and overlong encodings.
++        if n == 0 || n > 2 || der.len() < 2 + n || der[2] == 0 {
++            return false;
++        }
++        let mut len = 0usize;
++        for byte in &der[2..2 + n] {
++            len = (len << 8) | usize::from(*byte);
++        }
++        if len < 128 {
++            return false;
++        }
++        (2 + n, len)
++    };
++    len != 0 && header + len == der.len()
++}
++
+ impl SepData {
++    // System-key getters use keybag -1, not the target ref-key's designated
++    // identity bag. Keep only the negotiated profile's operation envelope.
++    fn sks_req_system_public_key(&self, der_set: &[u8]) -> Result<SksRequest> {
++        let envelope = match self.profile.key_store {
++            profile::KeyStore::Sepos13 { .. } => 3,
++            profile::KeyStore::Variant5 => REFKEY_ENVELOPE_VERSION,
++        };
++        let mut body = image::Body::new();
++        body.put_u32(0)?;
++        body.put_u64(crate::sks::SKS_CLIENT_ID)?;
++        body.put_i32(-1)?;
++        body.put_u32(envelope)?;
++        body.put_blob(der_set)?;
++        let img = image::build_request(image::Version::V1, self.sks_timestamp_us(), &body)?;
++        let len = self.sks_image_len(&img)?;
++        let msg = crate::sks::encode_sks_perform_operation(self.sks_next_seq(), len).ok_or(EINVAL)?;
++        Ok(SksRequest { name: crate::sks::SKS_PERFORM_OP_NAME, msg, img })
++    }
++
+     fn sks_req_refkey(&self, keybag: i32, der_set: &[u8]) -> Result<SksRequest> {
+         let (keybag, envelope) = match self.profile.key_store {
+             // The 13.5 operation envelope is 3. Use the designated identity
+@@ -240,6 +287,42 @@
+         }
+         *self.machine_refkey.lock() = Some(MachineRefKey { blob, pub_raw });
+         true
++    }
++
++    // Export must work after reboot without taking ensure_machine_refkey's
++    // create-on-missing path. Loading an existing wrapped reference is read-only.
++    fn load_existing_machine_refkey(&self) -> Result<()> {
++        if self.machine_refkey.lock().is_some() {
++            return Ok(());
++        }
++        let path = if *crate::module_parameters::refkey_v2.value() != 0 {
++            c"/var/lib/aurora-sep-refkey-v2.bin"
++        } else {
++            c"/var/lib/aurora-sep-refkey.bin"
++        };
++        let file = shim::StoreFile::open_readonly(path).map_err(|error| {
++            if error == ENOENT { ENOKEY } else { error }
++        })?;
++        let size = file.size()?;
++        if !(1..=8192).contains(&size) {
++            return Err(EINVAL);
++        }
++        let mut blob = KVec::new();
++        blob.resize(size as usize, 0u8, GFP_KERNEL)?;
++        file.read_exact(0, &mut blob)?;
++        let point = Self::refkey_pub(&blob).ok_or(EINVAL)?;
++        if point.first() != Some(&4) {
++            return Err(EINVAL);
++        }
++        let mut public_key = KVec::new();
++        public_key.extend_from_slice(point, GFP_KERNEL)?;
++        let mut cached = self.machine_refkey.lock();
++        // Another consumer may have loaded the key while the file was read.
++        // Never replace that cached key with our file snapshot.
++        if cached.is_none() {
++            *cached = Some(MachineRefKey { blob, pub_raw: public_key });
++        }
++        Ok(())
+     }
+ 
+     fn ensure_machine_refkey(&self) -> Result<()> {
+@@ -384,6 +467,116 @@
+         }
+         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
+         Ok((sig.ok_or(EIO)?, pubk))
++    }
++
++    /// Export committed-UIK attestation of the existing machine key.
++    /// This path never creates, replaces, or persists a key, and never logs its
++    /// reference blob, public point, or attestation payload.
++    pub(crate) fn refkey_export_attestation(&self) -> Result<(KVec<u8>, KVec<u8>)> {
++        use crate::der::RefKeyValue as RV;
++        self.wait_for_trusted_ready()?;
++        self.load_existing_machine_refkey()?;
++        let (blob, public_key) = {
++            let guard = self.machine_refkey.lock();
++            let mk = guard.as_ref().ok_or(ENOKEY)?;
++            // Take both from one cached snapshot and verify the public point
++            // is the point embedded in the exact reference passed to oska.
++            if Self::refkey_pub(&mk.blob) != Some(mk.pub_raw.as_slice())
++                || mk.pub_raw.first() != Some(&4)
++            {
++                return Err(EIO);
++            }
++            let mut blob = KVec::new();
++            blob.extend_from_slice(&mk.blob, GFP_KERNEL)?;
++            let mut public_key = KVec::new();
++            public_key.extend_from_slice(&mk.pub_raw, GFP_KERNEL)?;
++            (blob, public_key)
++        };
++        let keybag::State::Present(stored) = keybag::read(keybag::Slot::Identity)? else {
++            return Err(ENOKEY);
++        };
++        let (handle, _uuid) = self.sks_recover(&stored).ok_or(EIO)?;
++        // Keep every failure inside this closure so the recovered bag is
++        // unloaded on both success and failure.
++        let result = (|| {
++            if self.profile.key_store == profile::KeyStore::Variant5 {
++                let healthy = self.sks_health_check(c"system-key attestation").ok_or(EIO)?;
++                let out = self.sks_send(self.sks_req_change_lock_state(
++                    handle, LockState::Unlocked, stored.secret(), healthy,
++                )).ok_or(EIO)?;
++                if out.reply.status != 0 {
++                    return Err(EIO);
++                }
++            } else if !self.sks_prepare_identity_refkey(handle, stored.secret()) {
++                return Err(EIO);
++            }
++            let mut items: KVec<(&[u8], RV<'_>)> = KVec::new();
++            items.push((b"o", RV::Utf8(b"oska")), GFP_KERNEL)?;
++            items.push((b"rk", RV::Der(&blob)), GFP_KERNEL)?;
++            items.push((b"skt", RV::Integer(2)), GFP_KERNEL)?;
++            items.push((b"skg", RV::Integer(2)), GFP_KERNEL)?;
++            let request = crate::der::encode_refkey_set(&items)?;
++            let out = self.sks_send(self.sks_req_refkey(handle.value(), &request)).ok_or(EIO)?;
++            if out.reply.status != 0 {
++                return Err(EIO);
++            }
++            let body = self.sks_report_response(crate::sks::SKS_PERFORM_OP_NAME, &out).ok_or(EIO)?;
++            let mut fields = proto::FieldCursor::new(body);
++            let (Some(0), Some(der)) = (fields.i32(), fields.blob()) else {
++                return Err(EIO);
++            };
++            if der.len() > crate::bio::EXPORT_ATTESTATION_MAX {
++                return Err(EOVERFLOW);
++            }
++            if !complete_attestation_der(der) {
++                return Err(EIO);
++            }
++            let mut exported = KVec::new();
++            exported.extend_from_slice(der, GFP_KERNEL)?;
++            Ok(exported)
++        })();
++        let _ = self.sks_send(self.sks_req_unload_keybag(handle));
++        Ok((result?, public_key))
++    }
++
++    /// Read SIK (1,1) or committed UIK (2,2) public data, without creating a key.
++    /// The returned bytes are opaque; callers must not assume a point encoding.
++    pub(crate) fn refkey_system_public_key(
++        &self,
++        system_key_type: u32,
++        generation: u32,
++    ) -> Result<KVec<u8>> {
++        use crate::der::RefKeyValue as RV;
++        if !matches!((system_key_type, generation), (1, 1) | (2, 2)) {
++            return Err(EINVAL);
++        }
++        self.wait_for_trusted_ready()?;
++        let mut items: KVec<(&[u8], RV<'_>)> = KVec::new();
++        items.push((b"o", RV::Utf8(b"oskgp")), GFP_KERNEL)?;
++        items.push((b"skt", RV::Integer(system_key_type)), GFP_KERNEL)?;
++        items.push((b"skg", RV::Integer(generation)), GFP_KERNEL)?;
++        let request = crate::der::encode_refkey_set(&items)?;
++        let out = self.sks_send(self.sks_req_system_public_key(&request)).ok_or(EIO)?;
++        if out.reply.status != 0 {
++            return Err(EIO);
++        }
++        // As for other SKS operations, strip the IPC image, then require a
++        // successful status and one bounded length-delimited blob. Reject an
++        // unexpected layout instead of returning framed bytes.
++        let body = self.sks_report_response(crate::sks::SKS_PERFORM_OP_NAME, &out).ok_or(EIO)?;
++        let mut fields = proto::FieldCursor::new(body);
++        let (Some(0), Some(data)) = (fields.i32(), fields.blob()) else {
++            return Err(EIO);
++        };
++        if data.is_empty() {
++            return Err(EIO);
++        }
++        if data.len() > crate::bio::EXPORT_ATTESTATION_MAX {
++            return Err(EOVERFLOW);
++        }
++        let mut exported = KVec::new();
++        exported.extend_from_slice(data, GFP_KERNEL)?;
++        Ok(exported)
+     }
+ 
+     /// Attestation-chained (op `oa`): the enclave returns its own attestation over
+diff --git a/include/uapi/linux/apple-sep.h b/include/uapi/linux/apple-sep.h
+--- a/include/uapi/linux/apple-sep.h
++++ b/include/uapi/linux/apple-sep.h
+@@ -117,6 +117,41 @@
+ 	__u8  reserved[3];
+ };
+ 
++/*
++ * Committed-UIK (system type 2, generation 2) attestation of the existing
++ * machine ref-key. Requires CAP_SYS_ADMIN in addition to device permissions.
++ * No key is created or replaced: an existing persisted reference is loaded
++ * read-only if needed; ENOKEY means it is absent. The 65-byte public point
++ * belongs to the exact target key
++ * passed to the enclave. DER is returned verbatim, without SEP IPC framing;
++ * encrypted attestation envelopes are valid results. No private key is exported.
++ * version is 1; all reserved bytes and unused DER bytes are zero on success.
++ * EOVERFLOW means the complete DER exceeds this API's fixed bound.
++ */
++#define SEP_BIO_EXPORT_ATTESTATION_MAX 4096
++struct sep_bio_export_attestation {
++	__u32 version;
++	__u32 der_len;
++	__u8 public_key[SEP_BIO_ATTEST_PUB_LEN];
++	__u8 reserved[7];
++	__u8 der[SEP_BIO_EXPORT_ATTESTATION_MAX];
++};
++
++/*
++ * Read-only system public data, requiring CAP_SYS_ADMIN. Input version=1,
++ * key_len=0, and only (system_key_type,generation)=(1,1) for SIK or (2,2)
++ * for committed UIK. Output key_len bytes are verbatim oskgp public data,
++ * stripped of SKS status/blob framing; no EC-point/DER encoding is implied.
++ * Unused data bytes are zero. This operation never creates or commits a key.
++ */
++struct sep_bio_system_public_key {
++	__u32 version;
++	__u32 system_key_type;
++	__u32 generation;
++	__u32 key_len;
++	__u8 data[SEP_BIO_EXPORT_ATTESTATION_MAX];
++};
++
+ #define SEP_BIO_IOC_MAGIC 0xB1
+ 
+ #define SEP_BIO_GET_INFO     _IOR(SEP_BIO_IOC_MAGIC, 0x01, struct sep_bio_info)
+@@ -129,5 +164,8 @@
+ #define SEP_BIO_DELETE       _IOW(SEP_BIO_IOC_MAGIC, 0x08, struct sep_bio_delete)
+ #define SEP_BIO_DELETE_ALL   _IO(SEP_BIO_IOC_MAGIC, 0x09)
+ #define SEP_BIO_ATTEST       _IOWR(SEP_BIO_IOC_MAGIC, 0x0a, struct sep_bio_attest)
++/* 0x0b is reserved by newer SEP_BIO_LIST_ENCLAVE interfaces. */
++#define SEP_BIO_EXPORT_ATTESTATION _IOR(SEP_BIO_IOC_MAGIC, 0x0c, struct sep_bio_export_attestation)
++#define SEP_BIO_SYSTEM_PUBLIC_KEY _IOWR(SEP_BIO_IOC_MAGIC, 0x0d, struct sep_bio_system_public_key)
+ 
+ #endif /* _UAPI_LINUX_APPLE_SEP_H */
+diff --git a/tools/aurora-sep/README.md b/tools/aurora-sep/README.md
+--- a/tools/aurora-sep/README.md
++++ b/tools/aurora-sep/README.md
+@@ -2,6 +2,26 @@
+ 
+ These files connect the Apple SEP kernel driver to the shared APFS xART
+ gigalocker and the desktop fingerprint stack.
++
++`aurora-sep-export-attestation --output-dir /tmp/sep-attestation` exports
++committed-UIK attestation of the driver's existing machine ref-key and
++the corresponding public point. It needs the matching
++`SEP_BIO_EXPORT_ATTESTATION` ioctl, CAP_SYS_ADMIN, and permission to open
++`/dev/sep-bio`.
++The output directory must be new; it is created with mode 0700 and its files
++with mode 0600. The command never exports a private key, requests certificate
++issuance, creates a missing ref-key, or replaces an existing output. A persisted
++reference may be loaded read-only when the driver's cache is empty. The DER
++may be an encrypted envelope: it is preserved verbatim after removing SEP
++transport framing. `ENOKEY` means the existing key is unavailable; `ENOTTY`
++means the running module predates this interface. Building a new module does
++not activate the ioctl; do not reload an attached SEP to try it.
++Add `--include-system-public-keys` to also retrieve SIK `(1,1)` and committed
++UIK `(2,2)` via `SEP_BIO_SYSTEM_PUBLIC_KEY`, saving `SIKPub.bin` and `UIKPub.bin`.
++These outputs are opaque `oskgp` public data; the exporter makes no assumption
++about their encoding and preserves their bytes. The getter requires the standard
++SKS success-status/blob framing and fails on an unexpected response. Its live
++framing must still be verified when this driver build is activated.
+ 
+ The current release installer and matched packages are published in
+ [omacom/linux-aurora](https://github.com/omacom/linux-aurora/releases/latest):
+diff --git a/tools/aurora-sep/aurora-sep-export-attestation b/tools/aurora-sep/aurora-sep-export-attestation
+new file mode 100755
+--- /dev/null
++++ b/tools/aurora-sep/aurora-sep-export-attestation
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only OR MIT
++"""Export committed-UIK attestation and its existing target key's public point.
++
++Requires the matching SEP_BIO_EXPORT_ATTESTATION kernel ioctl. This does not
++request certificate issuance, create a key, or export private key material.
++"""
++
++import argparse
++import errno
++import fcntl
++import json
++import os
++import struct
++import sys
++from pathlib import Path
++
++DER_MAX = 4096
++HEADER = struct.Struct("=II65s7s")
++RESPONSE_SIZE = HEADER.size + DER_MAX
++# Linux generic _IOR: direction 2, sizeof(struct)=4176, magic 0xb1, nr 0x0c.
++EXPORT_ATTESTATION = (2 << 30) | (RESPONSE_SIZE << 16) | (0xB1 << 8) | 0x0C
++SYSTEM_HEADER = struct.Struct("=IIII")
++SYSTEM_RESPONSE_SIZE = SYSTEM_HEADER.size + DER_MAX
++SYSTEM_PUBLIC_KEY = (3 << 30) | (SYSTEM_RESPONSE_SIZE << 16) | (0xB1 << 8) | 0x0D
++
++
++def complete_der(data):
++    """Check complete canonical SEQUENCE framing without interpreting its body."""
++    if len(data) < 2 or data[0] != 0x30:
++        return False
++    first = data[1]
++    if first < 0x80:
++        header, length = 2, first
++    else:
++        count = first & 0x7F
++        if not 1 <= count <= 2 or len(data) < 2 + count or data[2] == 0:
++            return False
++        header = 2 + count
++        length = int.from_bytes(data[2:header], "big")
++        if length < 128:
++            return False
++    return length > 0 and header + length == len(data)
++
++
++def decode_response(response):
++    if len(response) != RESPONSE_SIZE:
++        raise ValueError("incorrect ioctl response size")
++    version, length, point, reserved = HEADER.unpack_from(response)
++    if version != 1 or reserved != bytes(7):
++        raise ValueError("unsupported response version or nonzero reserved bytes")
++    if not 0 < length <= DER_MAX:
++        raise ValueError("invalid attestation length")
++    if point[0] != 4:
++        raise ValueError("target public key is not an uncompressed P-256 point")
++    der = bytes(response[HEADER.size:HEADER.size + length])
++    if not complete_der(der):
++        raise ValueError("attestation is not a complete DER SEQUENCE")
++    if any(response[HEADER.size + length:]):
++        raise ValueError("nonzero unused response bytes")
++    return der, point
++
++
++def decode_system_key_response(response, system_key_type, generation):
++    if len(response) != SYSTEM_RESPONSE_SIZE:
++        raise ValueError("incorrect system public-key response size")
++    version, actual_type, actual_generation, length = SYSTEM_HEADER.unpack_from(response)
++    if (version, actual_type, actual_generation) != (1, system_key_type, generation):
++        raise ValueError("incorrect system public-key selector or response version")
++    if not 0 < length <= DER_MAX:
++        raise ValueError("invalid system public-key length")
++    if any(response[SYSTEM_HEADER.size + length:]):
++        raise ValueError("nonzero unused system public-key bytes")
++    return bytes(response[SYSTEM_HEADER.size:SYSTEM_HEADER.size + length])
++
++
++def export(device, include_system_public_keys=False):
++    fd = os.open(device, os.O_RDONLY | os.O_CLOEXEC)
++    try:
++        response = bytearray(RESPONSE_SIZE)
++        fcntl.ioctl(fd, EXPORT_ATTESTATION, response, True)
++        der, point = decode_response(response)
++        system_keys = {}
++        if include_system_public_keys:
++            for name, system_key_type, generation in [("SIKPub", 1, 1), ("UIKPub", 2, 2)]:
++                public_response = bytearray(SYSTEM_RESPONSE_SIZE)
++                SYSTEM_HEADER.pack_into(public_response, 0, 1, system_key_type, generation, 0)
++                fcntl.ioctl(fd, SYSTEM_PUBLIC_KEY, public_response, True)
++                system_keys[name] = decode_system_key_response(
++                    public_response, system_key_type, generation)
++    finally:
++        os.close(fd)
++    return der, point, system_keys
++
++
++def save_bundle(directory, der, point, system_keys=None):
++    # Refuse every existing destination, including symlinks. All artifacts are
++    # private by default even though no private key is present.
++    directory.mkdir(mode=0o700, parents=False, exist_ok=False)
++    created = []
++    try:
++        metadata = {
++            "format_version": 1,
++            "system_key_type": 2,
++            "system_key_generation": 2,
++            "attestation_bytes": len(der),
++            "public_key_format": "uncompressed-P256-X9.63",
++            "public_key_bytes": len(point),
++            "private_key_exported": False,
++        }
++        contents = {
++            "attestation.der": der,
++            "public-key.x963": point,
++        }
++        if system_keys:
++            if set(system_keys) != {"SIKPub", "UIKPub"}:
++                raise ValueError("both SIKPub and UIKPub are required")
++            for name, data in system_keys.items():
++                contents[f"{name}.bin"] = data
++            metadata["system_public_keys"] = {
++                name: {"bytes": len(data), "format": "opaque-oskgp-public-data"}
++                for name, data in system_keys.items()
++            }
++        contents["metadata.json"] = (json.dumps(metadata, indent=2) + "\n").encode()
++        for name, data in contents.items():
++            path = directory / name
++            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
++            created.append(path)
++            with os.fdopen(fd, "wb") as output:
++                output.write(data)
++                output.flush()
++                os.fsync(output.fileno())
++    except BaseException:
++        for path in reversed(created):
++            path.unlink()
++        directory.rmdir()
++        raise
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--device", default="/dev/sep-bio")
++    parser.add_argument("--include-system-public-keys", action="store_true",
++                        help="also export opaque SIKPub (1,1) and committed UIKPub (2,2)")
++    parser.add_argument("--output-dir", required=True, type=Path,
++                        help="new private directory; an existing path is never overwritten")
++    args = parser.parse_args()
++    try:
++        if args.output_dir.exists() or args.output_dir.is_symlink():
++            raise FileExistsError(errno.EEXIST, "output path already exists", str(args.output_dir))
++        der, point, system_keys = export(args.device, args.include_system_public_keys)
++        save_bundle(args.output_dir, der, point, system_keys)
++    except (OSError, ValueError) as error:
++        if isinstance(error, OSError) and error.errno == errno.ENOTTY:
++            print("export failed: the running SEP driver lacks the export ioctl", file=sys.stderr)
++        else:
++            print(f"export failed: {error}", file=sys.stderr)
++        return 1
++    print(f"Exported {len(der)} attestation bytes and {len(point)} public-key bytes to {args.output_dir}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/aurora-sep/tests/test_export_attestation.py b/tools/aurora-sep/tests/test_export_attestation.py
+new file mode 100644
+--- /dev/null
++++ b/tools/aurora-sep/tests/test_export_attestation.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only OR MIT
++"""Exercise the attestation ABI boundary without touching a SEP or key store."""
++
++import importlib.machinery
++import importlib.util
++import os
++from pathlib import Path
++import tempfile
++import unittest
++
++SCRIPT = Path(__file__).resolve().parents[1] / "aurora-sep-export-attestation"
++LOADER = importlib.machinery.SourceFileLoader("export_attestation", str(SCRIPT))
++SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
++EXPORT = importlib.util.module_from_spec(SPEC)
++LOADER.exec_module(EXPORT)
++
++# Public NIST P-256 generator; no private key or device identity is used.
++POINT = bytes.fromhex(
++    "04"
++    "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
++    "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
++)
++# A version-2 envelope is deliberately accepted as opaque DER, not decoded as
++# a supposed plaintext X.509 certificate. This was misidentified in old notes.
++ENVELOPE = bytes.fromhex("300a02010230050403616263")
++
++
++def response(der=ENVELOPE, length=None):
++    if length is None:
++        length = len(der)
++    return bytearray(EXPORT.HEADER.pack(1, length, POINT, bytes(7))
++                     + der.ljust(EXPORT.DER_MAX, b"\0"))
++
++
++class ExportBoundaryTest(unittest.TestCase):
++    def test_preserves_encrypted_der_and_matching_public_point(self):
++        der, point = EXPORT.decode_response(response())
++        self.assertEqual(der, ENVELOPE)
++        self.assertEqual(point, POINT)
++        self.assertEqual(EXPORT.RESPONSE_SIZE, 4176)
++        self.assertEqual(EXPORT.EXPORT_ATTESTATION, 0x9050B10C)
++
++    def test_rejects_transport_framing_instead_of_silently_exporting_it(self):
++        framed = (0).to_bytes(4, "little") + len(ENVELOPE).to_bytes(4, "little") + ENVELOPE
++        with self.assertRaisesRegex(ValueError, "complete DER"):
++            EXPORT.decode_response(response(framed))
++
++    def test_system_public_data_is_opaque_but_selector_and_bounds_are_checked(self):
++        data = b"opaque public data, no point or DER assumption"
++        reply = bytearray(EXPORT.SYSTEM_HEADER.pack(1, 2, 2, len(data))
++                          + data.ljust(EXPORT.DER_MAX, b"\0"))
++        self.assertEqual(EXPORT.decode_system_key_response(reply, 2, 2), data)
++        self.assertEqual(EXPORT.SYSTEM_PUBLIC_KEY, 0xD010B10D)
++        with self.assertRaisesRegex(ValueError, "selector"):
++            EXPORT.decode_system_key_response(reply, 1, 1)
++        reply[-1] = 1
++        with self.assertRaisesRegex(ValueError, "unused"):
++            EXPORT.decode_system_key_response(reply, 2, 2)
++
++    def test_rejects_length_and_initialisation_failures(self):
++        invalid = [response(length=0), response(length=4097), response()[:-1]]
++        reserved = response()
++        reserved[73] = 1
++        invalid.append(reserved)
++        tail = response()
++        tail[-1] = 1
++        invalid.append(tail)
++        for data in invalid:
++            with self.subTest(length=len(data)):
++                with self.assertRaises(ValueError):
++                    EXPORT.decode_response(data)
++
++    def test_rejects_truncation_padding_and_noncanonical_der(self):
++        for data in [ENVELOPE[:-1], ENVELOPE + b"\0", b"\x30\x80\0\0",
++                     b"\x30\x81\x01\0", b"\x30\x82\0\x80" + bytes(128)]:
++            with self.subTest(data_length=len(data)):
++                with self.assertRaisesRegex(ValueError, "complete DER"):
++                    EXPORT.decode_response(response(data))
++
++    def test_saves_privately_and_never_overwrites_an_existing_bundle(self):
++        with tempfile.TemporaryDirectory() as root:
++            directory = Path(root) / "bundle"
++            EXPORT.save_bundle(directory, ENVELOPE, POINT)
++            self.assertEqual((directory / "attestation.der").read_bytes(), ENVELOPE)
++            self.assertEqual((directory / "public-key.x963").read_bytes(), POINT)
++            self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
++            for path in directory.iterdir():
++                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
++            with self.assertRaises(FileExistsError):
++                EXPORT.save_bundle(directory, b"replacement", POINT)
++            self.assertEqual((directory / "attestation.der").read_bytes(), ENVELOPE)
++
++
++if __name__ == "__main__":
++    unittest.main()

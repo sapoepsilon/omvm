@@ -4,6 +4,7 @@
 # aquarat/apple-macos-arm64-vm-guest. Ships no Apple software: the boot ROM
 # (AVPBooter), restore image (IPSW) and Xcode come from the user's own Mac.
 #
+#   omvm helpers status NAME | install-hook  Linux Apple Account helper readiness
 #   omvm doctor                 check this host
 #   omvm kernel build|install|default|revert
 #   omvm qemu build             build the vmapple QEMU fork
@@ -40,8 +41,9 @@ KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
 # The guest account omvm logs in as. Upstream's create-account.sh names it aquarat
 # unless told otherwise; set OMVM_GUEST_USER before `omvm setup` (or after renaming
 # the account) and keep it in ~/.config/omvm/gui.env, which services also read.
-cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1; }
+cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1 || true; }
 GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"; GUEST_USER="${GUEST_USER:-aquarat}"
+OMVM_VM="${OMVM_VM:-$(cfg_env OMVM_VM)}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
 KPKG=linux-aurora-vmapple
@@ -454,10 +456,10 @@ cmd_virt() {
     {
         echo '#!/bin/sh'
         echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
-        echo "[ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0"
+        echo "case \"\$2/\$3\" in prepare/begin|release/end) ;; *) [ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0 ;; esac"
         echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY' OMVM_GUEST_USER='$GUEST_USER'"
         echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-wayland-1}'"
-        echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" >/dev/null 2>&1 </dev/null"
+        echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" \"\$3\""
     } > "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
     chmod +x "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
     # libvirt reads hooks only from /etc/libvirt/hooks, also for per-user daemons:
@@ -953,7 +955,24 @@ mode) shift; cmd_mode "$@" ;;
 perf) shift; cmd_perf "$@" ;;
 usb) shift; cmd_usb "$@" ;;
 show) shift; cmd_show "$@" ;;
-virt-hook) shift; upstream; case "${2:-}" in started) clip_start "$1"; follow_start "$1"; governor_start "$1" ;; stopped) clip_stop "$1"; governor_stop "$1" ;; esac ;;
+helpers) shift; case "${1:-}" in
+    status) sudo -n /usr/local/libexec/omvm-apple-helpers status "${2:?usage: omvm helpers status NAME}" ;;
+    install-hook) python3 "$SHARE/apple-helpers-hook.py" ;;
+    *) die "usage: omvm helpers status NAME | install-hook" ;;
+    esac ;;
+virt-hook) shift
+    # prepare/begin and release/end need the original XML on stdin. No libvirt
+    # calls (including upstream checkout) may occur inside this hook.
+    if [ -x /usr/local/libexec/omvm-apple-helpers ]; then
+        case "${2:-}/${3:-}" in
+        prepare/begin|release/end)
+            sudo -n /usr/local/libexec/omvm-apple-helpers gate "$1" "$2" "$3" ;;
+        esac
+    fi
+    case "${2:-}" in
+    started) { clip_start "$1"; follow_start "$1"; governor_start "$1"; } >/dev/null 2>&1 </dev/null ;;
+    stopped) { clip_stop "$1"; governor_stop "$1"; } >/dev/null 2>&1 </dev/null ;;
+    esac ;;
 ssh) shift; cmd_ssh "$@" ;;
 stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;
