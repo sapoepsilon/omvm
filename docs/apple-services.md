@@ -58,8 +58,8 @@ identity signing and FairPlay service execution on Linux.
 ## What must be resolved before wider deployment
 
 - **Fresh source builds:** reconstruction and syntax checks passed during source
-  preservation; a full clean kernel build and QEMU configure/link from this
-  published chain have not been accepted.
+  preservation; fresh QEMU configuration now also passes. A full clean kernel
+  build and QEMU compile/link from this published chain remain untested.
 - **Complete installation:** the helper installer expects an already installed
   SEP signer, its private configuration, reviewed Apple cache, per-VM identity
   and provider inputs. A clone alone does not supply a working stack.
@@ -90,3 +90,20 @@ and [prerequisite provenance](../contrib/apple-services/prerequisites/provenance
 These checks do not establish fresh hardware activation, account sign-in or
 reboot recovery for binaries rebuilt from this branch. Use the manual checklist
 to record a new run without replacing the earlier evidence.
+
+On 2026-11-14, source checkpoint `fd4794f` was reconstructed in a new detached
+QEMU worktree from public base `1b41f5f5db4d1067d023973b9bd74c7b341e0d28` and
+the published patch sequence. All 30 base integration files and the recorded
+identity prerequisite hashes matched. A new out-of-tree configure with the
+[graphics recipe](graphics.md#build-about-40-minutes) succeeded with KVM, Reims
+graphics, GnuTLS and VNC enabled. The compile database includes all seven
+reviewed identity/FairPlay-related C sources; a dry run of
+`ninja -n qemu-system-aarch64` resolved 2,314 planned steps.
+
+This used a newly created Python environment and the pinned public Meson
+subprojects, with configure's default download policy. It reused the existing
+Reims static development library. QEMU compilation/linking, a fresh Reims build,
+kernel builds and deployment were not performed. Rutabaga is optional for this
+path. A later Reims rebuild must use its pinned Rust 1.98.1 toolchain explicitly
+if the system compiler differs; retain the documented sibling shader-translator
+checkout and graphics patches.

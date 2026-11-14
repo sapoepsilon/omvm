@@ -91,6 +91,12 @@ QEMU source remains GPL-2.0-or-later with existing notices preserved.
 
 ## Checks and limits
 
+The checks below describe the source-preservation checkpoint. The later
+[validation record](../../../docs/apple-services.md#validation-record) also
+records successful fresh QEMU configuration and a dry-run build graph from the
+published chain. Full compilation, dependency rebuilds and runtime acceptance
+remain separate.
+
 Both prerequisite patches apply to their exact baselines. The SEP chain matches
 the recorded pre-export hashes and reconstructs the existing relevant files.
 The complete QEMU source chain matches the preserved implementation before the
