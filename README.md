@@ -18,6 +18,11 @@ m1n1, and wraps the guest lifecycle in a few commands.
 
 ## What you get
 
+**Apple-services development:** start with the
+[status and source map](docs/apple-services.md), then the
+[manual test checklist](docs/apple-services-testing.md) and
+[Omarchy/Aurora upstream plan](docs/apple-services-upstream.md).
+
 ```console
 $ omvm run -- 'sw_vers; xcodebuild -version'
 ProductName:    macOS
@@ -83,9 +88,11 @@ Xcode 27.2
   PipeWire: macOS output plays through the laptop's speakers (a stream named after the VM),
   and its input records from the host's default microphone.
 - **Apple Account:** experimental Linux SEP/FairPlay source and lifecycle tooling
-  are available in [the helper guide](docs/apple-helpers.md). This is a development
-  integration, not a complete installer. Full encrypted-data sync, Contact Key
-  Verification and authenticated host-reboot recovery remain under test.
+  are available in [the helper guide](docs/apple-helpers.md). The development
+  installation passed sign-in, two-way iMessage and authenticated host-reboot
+  recovery using Linux helpers. This is not yet a complete installer or a fresh
+  build acceptance result. Keychain/Contact Key Verification and first-attempt
+  sign-in reliability remain unfinished; see the [current status](docs/apple-services.md).
 - **macOS apps:** `omac run Foo.app` runs an arm64 application in a dedicated guest;
   see [the application guide](docs/omac.md).
 

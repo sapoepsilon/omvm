@@ -1,5 +1,10 @@
 # Drafts for proposing omvm to Omarchy
 
+**Historical drafts and posting record.** For the consolidated Apple-services
+source, current testing gates and proposed component split, use the
+[current upstream plan](apple-services-upstream.md). Preserve the posted links
+below; do not replay an old proposal as a new submission.
+
 Omarchy's own guidelines decide where each piece goes (research of 2026-11-07):
 
 - **omacom/omarchy** (core): feature ideas go to *Discussions › Suggestions*.
