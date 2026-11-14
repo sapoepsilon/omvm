@@ -18,7 +18,9 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 import xml.etree.ElementTree as ET
 
 CONFIG = Path('/etc/omvm/apple-helpers.json')
@@ -30,6 +32,7 @@ HASH = re.compile(r'[0-9a-f]{64}\Z')
 DEVICE = Path('/dev/omvm-uid1-provider')
 BOARD = Path('/sys/bus/platform/devices/39b060000.crypto')
 MODULE = Path('/sys/module/omvm_uid1_provider')
+PID_RUN = Path('/run/user')
 REVIEWED_DIAGNOSTIC_SHA256 = {
     '4c016ac4e28d2dd65f4405ca32859dd5daa2fe3757f736edab6beb30d38a0b11',
     'b6c0543eae149de5eb1c0e24c0cd0c39d9a33d0ab00c9a903eee1845179c5fcc',
@@ -403,61 +406,92 @@ def running_guests():
     return names
 
 
+def uuid_digest(value):
+    try:
+        return hashlib.sha256(uuid.UUID(value).bytes).hexdigest()
+    except (ValueError, AttributeError, TypeError):
+        raise Failure('domain needs one valid UUID') from None
+
+
+def domain_uuid(root):
+    values=root.findall('uuid')
+    require(len(values)==1, 'domain needs one valid UUID')
+    return uuid_digest(values[0].text)
+
+
+def guest_process(proc):
+    """A stable physical QEMU identity, independent of libvirt reparenting."""
+    pid = int(proc.name)
+    try:
+        before = process_start(pid)
+    except (Failure, OSError):
+        before = None
+    try:
+        raw = (proc/'cmdline').read_bytes().split(b'\0')
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError:
+        raise Failure('cannot inspect running guests') from None
+    if not raw or not Path(os.fsdecode(raw[0])).name.startswith('qemu-system-'):
+        return None
+    if not any(b'vmapple' in arg for arg in raw):
+        return None
+    guest = {'pid': pid, 'name': None}
+    try:
+        args = [os.fsdecode(arg) for arg in raw]
+        names = qemu_options(args, ('-name',))
+        if len(names) == 1:
+            values=[]
+            for i, part in enumerate(names[0].split(',')):
+                key, separator, value = part.partition('=')
+                if key == 'guest' and separator:
+                    values.append(value)
+                elif i == 0 and not separator:
+                    values.append(key)
+            if len(values) == 1 and NAME.fullmatch(values[0]):
+                guest['name'] = values[0]
+        identities = qemu_options(args, ('-uuid',))
+        if len(identities) == 1:
+            guest['uuid_sha256'] = uuid_digest(identities[0])
+        guest['machine_verified'] = machine_types(args) == [['vmapple']]
+    except Failure:
+        guest = {'pid': pid, 'name': None}
+    try:
+        after = process_start(pid)
+    except (Failure, OSError):
+        after = None
+    if before is None or after != before:
+        # Retain the physical slot without binding old argv to a recycled PID.
+        return {'pid': pid, 'name': None}
+    guest['start'] = before
+    return guest
+
+
 def running_guest_processes():
-    """Keep each QEMU PID: duplicate or unnamed vmapple guests consume slots."""
+    """Keep every observed vmapple PID, including unnamed/uncertain processes."""
     guests = []
     for proc in Path('/proc').glob('[0-9]*'):
-        pid = int(proc.name)
-        try:
-            before = process_start(pid)
-        except (Failure, OSError):
-            before = None
-        try:
-            args = (proc/'cmdline').read_bytes().split(b'\0')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except OSError:
-            raise Failure('cannot inspect running guests') from None
-        if not args or not Path(os.fsdecode(args[0])).name.startswith('qemu-system-'):
-            continue
-        if not any(b'vmapple' in arg for arg in args):
-            continue
-        name = None
-        try:
-            name = os.fsdecode(args[args.index(b'-name') + 1]).split(',')[0].removeprefix('guest=')
-        except (ValueError, IndexError):
-            pass
-        try:
-            ancestor = daemon_identity(pid)
-        except (Failure, OSError):
-            ancestor = {}
-        try:
-            after = process_start(pid)
-        except (Failure, OSError):
-            after = None
-        if before is None or after != before:
-            # Keep the observed physical slot, but never associate an old
-            # cmdline with a reused PID's name/daemon for ledger de-duplication.
-            name, ancestor = None, {}
-        guests.append({'pid': pid, 'name': name, **ancestor})
+        guest = guest_process(proc)
+        if guest is not None:
+            guests.append(guest)
     return guests
 
 
 def process_start(pid):
     """Linux starttime distinguishes a live daemon from a reused PID."""
-    require(type(pid) is int and pid > 0, 'invalid daemon process identity')
+    require(type(pid) is int and pid > 0, 'invalid process identity')
     try:
         value = Path(f'/proc/{pid}/stat').read_text()
     except (FileNotFoundError, ProcessLookupError):
         return None
     # comm can contain whitespace and parentheses; the last ')' ends it.
     fields = value.rsplit(')', 1)
-    require(len(fields) == 2, 'cannot verify daemon process identity')
+    require(len(fields) == 2, 'cannot verify process identity')
     try:
         started = int(fields[1].split()[19])
     except (IndexError, ValueError):
-        raise Failure('cannot verify daemon process identity') from None
-    require(started >= 0, 'cannot verify daemon process identity')
+        raise Failure('cannot verify process identity') from None
+    require(started >= 0, 'cannot verify process identity')
     return started
 
 
@@ -484,14 +518,26 @@ def daemon_identity(pid=None):
 def read_reservation(path):
     require(stat.S_IMODE(path.lstat().st_mode) == 0o600, 'reservation ownership/mode mismatch')
     record = json.loads(secure_file(path, 4096))
-    require(isinstance(record, dict)
-            and set(record) == {'version', 'vm', 'daemon_pid', 'daemon_start'}
-            and type(record['version']) is int and record['version'] == 2
+    base = {'version', 'vm', 'daemon_pid', 'daemon_start'}
+    require(isinstance(record, dict) and base <= set(record)
+            and type(record['version']) is int and record['version'] in (2, 3)
             and isinstance(record['vm'], str) and NAME.fullmatch(record['vm'])
             and path.name == record['vm'] + '.json'
             and type(record['daemon_pid']) is int and record['daemon_pid'] > 0
             and type(record['daemon_start']) is int and record['daemon_start'] >= 0,
             'invalid two-VM reservation; inspect it before starting guests')
+    if record['version'] == 2:
+        require(set(record) == base, 'invalid legacy two-VM reservation')
+    else:
+        fields = base | {'uuid_sha256', 'prepare_tick'}
+        require(set(record) in (fields, fields | {'qemu_pid', 'qemu_start'})
+                and isinstance(record['uuid_sha256'], str) and HASH.fullmatch(record['uuid_sha256'])
+                and type(record['prepare_tick']) is int and record['prepare_tick'] >= record['daemon_start'],
+                'invalid launch reservation')
+        if 'qemu_pid' in record:
+            require(type(record['qemu_pid']) is int and record['qemu_pid'] > 0
+                    and type(record['qemu_start']) is int and record['qemu_start'] > record['prepare_tick'],
+                    'invalid bound launch identity')
     return record
 
 
@@ -503,22 +549,147 @@ def reservation_slots(directory, running):
     for path in directory.iterdir():
         require(path.suffix == '.json', 'unexpected two-VM reservation entry')
         record = read_reservation(path)
-        try:
-            started = process_start(record['daemon_pid'])
-        except (OSError, Failure):
-            started = None
-        represented = started == record['daemon_start'] and any(
+        represented = 'qemu_pid' in record and any(
             guest['name'] == record['vm']
-            and guest.get('daemon_pid') == record['daemon_pid']
-            and guest.get('daemon_start') == record['daemon_start']
+            and guest['pid'] == record['qemu_pid']
+            and guest.get('start') == record['qemu_start']
+            and guest.get('uuid_sha256') == record['uuid_sha256']
+            and guest.get('machine_verified') is True
             for guest in running)
         if not represented:
             # Daemon death/PID reuse does not prove that an orphaned pre-exec
-            # launch child is gone. Unknown ancestry cannot merge two slots.
-            # Only the owning release/end or explicit all-off cleanup retires
-            # a reservation that has no positively associated running QEMU.
+            # launch child is gone. Only started/begin binds an exact QEMU;
+            # an old/unbound record remains pending until its owning release
+            # or explicit all-off cleanup.
             pending.add(record['vm'])
     return len(running) + len(pending), set(names), pending
+
+
+def prepare_epoch():
+    """Return a boot tick that has ended before libvirt may spawn the QEMU."""
+    frequency = os.sysconf('SC_CLK_TCK')
+    def ticks():
+        return time.clock_gettime_ns(time.CLOCK_BOOTTIME) * frequency // 1_000_000_000
+    started = ticks()
+    deadline = time.monotonic() + 1
+    while ticks() <= started:
+        require(time.monotonic() < deadline, 'cannot establish launch start ordering')
+        time.sleep(min(1 / frequency, .01))
+    return started
+
+
+@contextlib.contextmanager
+def canonical_pid_file(cfg, name):
+    """Open only the canonical session-libvirt PID file; never follow links."""
+    require(NAME.fullmatch(name), 'invalid VM name')
+    for parent in reversed(PID_RUN.parents):
+        st = parent.lstat()
+        require(stat.S_ISDIR(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o022,
+                'untrusted libvirt runtime directory')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    directory = os.open(PID_RUN, flags)
+    fd = None
+    try:
+        st = os.fstat(directory)
+        require(stat.S_ISDIR(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o022,
+                'untrusted libvirt runtime directory')
+        for part in (str(cfg['allow_uid']), 'libvirt', 'qemu', 'run'):
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+            st = os.fstat(directory)
+            require(stat.S_ISDIR(st.st_mode) and st.st_uid == cfg['allow_uid'] and not st.st_mode & 0o022,
+                    'untrusted libvirt runtime directory')
+        fd = os.open(name + '.pid', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     dir_fd=directory)
+        st = os.fstat(fd)
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == cfg['allow_uid']
+                and not st.st_mode & 0o022 and st.st_size <= 32,
+                'untrusted libvirt domain PID file')
+        data = os.read(fd, 33)
+        require(len(data) <= 32 and re.fullmatch(rb'[1-9][0-9]*\n?', data),
+                'invalid libvirt domain PID file')
+        yield int(data), st
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(directory)
+
+
+def pid_file_locked(st, pid):
+    """A number alone is not provenance: QEMU must own the inode's POSIX lock."""
+    for line in Path('/proc/locks').read_text().splitlines():
+        fields = line.split()
+        # Blocked waiter lines have an extra '->'; they do not own a lock.
+        if len(fields) != 8 or fields[1:4] != ['POSIX', 'ADVISORY', 'WRITE']:
+            continue
+        try:
+            major, minor, inode = fields[5].split(':')
+            matches = (int(major, 16), int(minor, 16), int(inode)) == (
+                os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+            if int(fields[4]) == pid and matches and fields[6] == '0' and fields[7] in ('0', 'EOF'):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def verify_qemu_owner(cfg, pid):
+    try:
+        proc = Path('/proc')/str(pid)
+        require(proc.stat().st_uid == cfg['allow_uid']
+                and Path(os.readlink(proc/'exe')).name.startswith('qemu-system-'),
+                'started process is not the expected QEMU owner/executable')
+    except OSError:
+        raise Failure('cannot verify the started QEMU executable') from None
+
+
+def bind_started(cfg, name, root, reservation, running):
+    require(reservation.exists(), 'started VM has no launch reservation')
+    record = read_reservation(reservation)
+    require(record['version'] == 3, 'legacy unbound reservation requires explicit all-off cleanup')
+    require(domain_uuid(root) == record['uuid_sha256'], 'started domain UUID does not match its reservation')
+    owner = daemon_identity()
+    require(all(record[key] == owner[key] for key in ('daemon_pid', 'daemon_start')),
+            'started hook does not belong to the reserving libvirt daemon')
+    require(len(running) <= 2, 'too many running guests to bind the launch reservation')
+    with canonical_pid_file(cfg, name) as (pid, st):
+        guest = guest_process(Path('/proc')/str(pid))
+        require(guest is not None and guest['name'] == name and guest.get('machine_verified') is True
+                and guest.get('uuid_sha256') == record['uuid_sha256']
+                and guest.get('start', -1) > record['prepare_tick'],
+                'canonical PID does not match the newly started domain')
+        require(any(item['pid'] == pid and item.get('start') == guest['start'] for item in running)
+                and not any(item['name'] == name and item['pid'] != pid for item in running),
+                'started QEMU does not have an unambiguous running process identity')
+        verify_qemu_owner(cfg, pid)
+        require(pid_file_locked(st, pid), 'canonical PID file is not locked by the started QEMU')
+        with canonical_pid_file(cfg, name) as (current_pid, current):
+            require(current_pid == pid and (current.st_dev, current.st_ino) == (st.st_dev, st.st_ino),
+                    'canonical PID file changed during launch verification')
+        try:
+            current_qemu, current_daemon = process_start(pid), process_start(owner['daemon_pid'])
+        except (Failure, OSError):
+            raise Failure('cannot verify launch process identities; reservation retained') from None
+        require(current_qemu == guest['start'], 'QEMU process changed during launch verification')
+        require(current_daemon == owner['daemon_start'],
+                'libvirt daemon changed during launch verification')
+    bound = {'qemu_pid': pid, 'qemu_start': guest['start']}
+    if 'qemu_pid' in record:
+        require(all(record[key] == value for key, value in bound.items()),
+                'started hook cannot replace an existing QEMU binding')
+        return
+    fd, temporary = tempfile.mkstemp(prefix='.' + name + '.', dir=reservation.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump({**record, **bound}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, reservation)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def gate_two(cfg, name, operation, root, managed):
@@ -530,12 +701,26 @@ def gate_two(cfg, name, operation, root, managed):
     private_dir(directory)
     reservation = directory/(name + '.json')
     running = running_guest_processes()
+    if operation == 'started':
+        if managed:
+            check_domain(name, root)
+        return bind_started(cfg, name, root, reservation, running)
     if operation == 'release':
         if reservation.exists() and not any(guest['name'] == name for guest in running):
             record = read_reservation(reservation)
             owner = daemon_identity()
-            require(all(record[key] == owner[key] for key in ('daemon_pid', 'daemon_start')),
-                    'reservation belongs to another libvirt daemon; explicit all-off cleanup is required')
+            if record['version'] == 3:
+                require(domain_uuid(root) == record['uuid_sha256'], 'released domain UUID does not match its reservation')
+            if 'qemu_pid' in record:
+                try:
+                    current = process_start(record['qemu_pid'])
+                except (Failure, OSError):
+                    raise Failure('cannot prove the bound QEMU has exited; reservation retained') from None
+                require(current != record['qemu_start'],
+                        'bound QEMU is still running; reservation retained')
+            else:
+                require(all(record[key] == owner[key] for key in ('daemon_pid', 'daemon_start')),
+                        'reservation belongs to another libvirt daemon; explicit all-off cleanup is required')
             reservation.unlink()
         return
     if managed:
@@ -547,6 +732,7 @@ def gate_two(cfg, name, operation, root, managed):
     require(name not in pending, 'this VM start is reserved; wait for its owning release/end or perform explicit all-off cleanup')
     require(slots < 2, 'two macOS guests or pending starts already occupy the two-VM limit')
     identity = daemon_identity()
+    identity_digest = domain_uuid(root)
     require_ready(provider_status(cfg))
     verify_running_backends(cfg, expected)
     wait_for_clock()
@@ -563,7 +749,8 @@ def gate_two(cfg, name, operation, root, managed):
     fd = os.open(reservation, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'w') as stream:
         os.fchmod(stream.fileno(), 0o600)
-        json.dump({'version': 2, 'vm': name, **identity}, stream)
+        json.dump({'version': 3, 'vm': name, **identity, 'uuid_sha256': identity_digest,
+                   'prepare_tick': prepare_epoch()}, stream)
         stream.flush()
         os.fsync(stream.fileno())
 
@@ -649,7 +836,9 @@ def gate(cfg,name,operation,phase,xml):
     require(NAME.fullmatch(name), 'invalid VM name')
     caller=int(os.environ.get('SUDO_UID','0'))
     require(caller in (0,cfg['allow_uid']), 'caller cannot operate this helper configuration')
-    if (operation,phase) not in [('prepare','begin'),('release','end')]:
+    if (operation,phase) not in [('prepare','begin'),('started','begin'),('release','end')]:
+        return
+    if operation == 'started' and max_active_vms(cfg) == 1:
         return
     root=domain(name,xml)
     machine=root.find('os/type')

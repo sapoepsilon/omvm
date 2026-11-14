@@ -11,6 +11,8 @@ The host needs its existing SEP identity signer, the pinned UID1 provider and
 one persistent FairPlay service for each enrolled VM. A guest launch waits for
 these services through libvirt's `prepare/begin` hook. The GUI and CLI therefore
 use the same readiness gate, as do direct `virsh start` and the watchdog.
+Two-VM mode also needs `started/begin` to bind the admitted QEMU process to its
+reservation, and `release/end` to retire that reservation after shutdown.
 This integration does not turn on guest autostart or change its display.
 
 The [source overlay](../contrib/apple-services/README.md) preserves the QEMU,
@@ -60,7 +62,10 @@ J314c board, exact kernel/module/seed pins and reviewed diagnostic builds. A new
 kernel/provider needs a new review; do not update a manifest merely to silence
 a mismatch. Two-VM support does not change the kernel/module/seed pins.
 
-Run from the reviewed repository checkout:
+For an upgrade, follow the all-guests-off procedure in the
+[concurrency guide](apple-services-concurrency.md#upgrade-and-rollback). Update
+the `omvm` CLI used by the existing hook as well as the helper code; the helper
+installer does not install the CLI. Run from the reviewed repository checkout:
 
 ```sh
 sudo python3 share/install-apple-helpers.py /var/lib/omvm/private-stage/apple-helpers.json
@@ -76,8 +81,12 @@ afterward for state continuity; eager parallel initialization of every enrolled
 helper is avoided. Changed installed files are retained in a root-private backup
 directory.
 `install-hook` updates only the recognized existing omvm hook, preserving its
-environment; it forwards the phase and original domain XML. It does not regenerate
-a domain. Preserve any custom hook if this operation reports an unfamiliar shape.
+environment. It forwards `prepare/begin`, `started/begin` and `release/end` with
+the original domain XML, including domains outside the managed VM directory.
+Rerunning it upgrades the older prepare/release wrapper idempotently; it does
+not regenerate a domain. Preserve any custom hook if this operation reports an
+unfamiliar shape. A wrapper that omits `started/begin` leaves reservations
+unbound and can block the next guest launch.
 
 Legacy one-VM migration from an in-memory v22 helper needs a cleanly stopped
 guest and paired disk/auxiliary/identity backup; that historical procedure kept
@@ -129,9 +138,14 @@ expected, not a reason to reset its checkpoint or provider.
   The default keeps the one-guest reservation. Opt-in two-VM mode counts actual
   QEMU processes plus private pending-start reservations and rejects a third
   slot. It verifies the pinned running backends and refuses legacy or unmanaged
-  hardware clients. Uncertain orphan/PID-reused reservations remain occupied;
-  only the owning daemon's `release/end` clears one after QEMU exits. See the
-  [recovery rules](apple-services-concurrency.md#opt-in-and-admission).
+  hardware clients. `started/begin` binds a version-3 reservation to a stable
+  QEMU PID/start identity after verifying its domain UUID, canonical libvirt PID
+  file and kernel POSIX-lock ownership. Reparenting or the reserving daemon's
+  exit does not double-count that bound guest. Unbound, legacy or ambiguous
+  records remain pending. A verified daemon can release a bound record only
+  with a matching UUID and proof that the exact QEMU process is gone; unbound
+  records require the original owner. See the
+  [admission and recovery rules](apple-services-concurrency.md#opt-in-and-admission).
 - Before admitting a vmapple launch, the gate waits up to 30 seconds for
   `timedatectl` to report `NTPSynchronized=yes`. An unavailable or unsynchronized
   host clock rejects the launch before starting helpers or reserving the VM slot;

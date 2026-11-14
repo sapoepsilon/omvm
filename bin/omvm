@@ -456,7 +456,7 @@ cmd_virt() {
     {
         echo '#!/bin/sh'
         echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
-        echo "case \"\$2/\$3\" in prepare/begin|release/end) ;; *) [ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0 ;; esac"
+        echo "case \"\$2/\$3\" in prepare/begin|started/begin|release/end) ;; *) [ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0 ;; esac"
         echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY' OMVM_GUEST_USER='$GUEST_USER'"
         echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-wayland-1}'"
         echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" \"\$3\""
@@ -961,18 +961,20 @@ helpers) shift; case "${1:-}" in
     *) die "usage: omvm helpers status NAME | install-hook" ;;
     esac ;;
 virt-hook) shift
-    # prepare/begin and release/end need the original XML on stdin. No libvirt
+    # prepare/started/begin and release/end need the original XML on stdin. No libvirt
     # calls (including upstream checkout) may occur inside this hook.
     if [ -x /usr/local/libexec/omvm-apple-helpers ]; then
         case "${2:-}/${3:-}" in
-        prepare/begin|release/end)
+        prepare/begin|started/begin|release/end)
             sudo -n /usr/local/libexec/omvm-apple-helpers gate "$1" "$2" "$3" ;;
         esac
     fi
-    case "${2:-}" in
-    started) { clip_start "$1"; follow_start "$1"; governor_start "$1"; } >/dev/null 2>&1 </dev/null ;;
-    stopped) { clip_stop "$1"; governor_stop "$1"; } >/dev/null 2>&1 </dev/null ;;
-    esac ;;
+    if [ -f "$IMAGES/vms/$1/ssh_port" ]; then
+        case "${2:-}" in
+        started) { clip_start "$1"; follow_start "$1"; governor_start "$1"; } >/dev/null 2>&1 </dev/null ;;
+        stopped) { clip_stop "$1"; governor_stop "$1"; } >/dev/null 2>&1 </dev/null ;;
+        esac
+    fi ;;
 ssh) shift; cmd_ssh "$@" ;;
 stop) shift; cmd_stop "$@" ;;
 list) cmd_list ;;

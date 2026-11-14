@@ -1,16 +1,29 @@
 # Experimental two-VM Apple services
 
-The two-VM implementation has passed source builds and offline contract tests.
-It has **not been installed or verified with two live authenticated guests**.
+The revised launch-binding implementation passes 104 root offline Python tests,
+including the reparented-QEMU regression, PID-file validation, process reuse,
+hook migration and bound/unbound release behavior. Shell syntax and whitespace
+checks also pass. These checks do not replace the pending live retry below.
+
+The two-VM implementation remains experimental. Source checkpoint `df38783`
+was installed for a controlled first-guest test: cold boot, helper readiness
+and SSH passed, and the provider stayed healthy without a reset. QEMU was
+reparented to the user's systemd, so the ancestry-only gate counted that live
+guest and its pending reservation twice. A second guest was not launched. The
+first guest and its helper were cleanly stopped, leaving no reservations.
+
+The revised gate below binds reservations to verified QEMU process identities
+so reparenting does not consume another slot. **The second live attempt and
+concurrent authenticated-service proof are pending.**
 The [one-VM Apple Account, iMessage and normal-reboot results](apple-services.md)
 remain the historical tested baseline. Contact Key Verification remains deferred.
 Successful capability probes and helper readiness are not service acceptance.
 
-Offline validation on Linux ARM64 passed 84 Python tests as root with fake
-hardware/services, all eight Go SAP/library and tool packages, and the focused
-device/client race checks. Both binaries built with Go1.26.5; a fresh public-base
-reconstruction matched all 12 changed files. No live acceptance follows from
-these results alone.
+At `df38783`, offline validation on Linux ARM64 passed 84 Python tests as root
+with fake hardware/services, all eight Go SAP/library and tool packages, and
+the focused device/client race checks. Both binaries built with Go1.26.5; a
+fresh public-base reconstruction matched all 12 changed files. These results
+predate the revised process binding and do not establish live acceptance.
 
 This mode keeps one shared Linux SEP signer and UID1 provider, with a separate
 FairPlay process, identifier and durable checkpoint for each VM. It does not
@@ -78,20 +91,33 @@ unmanaged hardware backends and services still stopping block startup.
 
 All vmapple starts share the existing root lifecycle lock. In two-VM mode a
 private reservation per VM counts pending starts alongside actual QEMU
-processes, including unmanaged or unnamed guests. A reservation is counted
-with an existing QEMU only when both its name and owning libvirt daemon's
-PID/start time match. Duplicate names or uncertain ancestry cannot free a slot.
-The gate counts again after readiness, before admission, and rejects a third
-guest or pending start. Configured guests still require their exact domain
-sockets, synchronized host clock and healthy helpers.
+processes, including unmanaged or unnamed guests. `prepare/begin` records a
+version-3 reservation with the domain UUID hash, reserving daemon's PID/start
+time and a completed boot-time tick. The gate counts again after readiness,
+before admission, and rejects a third guest or pending start. Configured guests
+still require their exact domain sockets, synchronized host clock and healthy
+helpers.
 
-Reservations do not expire. Daemon death or PID reuse cannot prove an orphaned
-launch child is gone. Only that reservation's owning `release/end` hook clears
-it after the VM is absent. Otherwise, recovery requires explicit inspection
+`started/begin` from the same reserving daemon binds that reservation to an exact
+QEMU PID/start time. It verifies the canonical libvirt domain PID file and its
+ownership, the kernel's POSIX-lock owner for that file, and the QEMU owner,
+executable, name, UUID and vmapple machine type. The process must have started
+after the recorded prepare tick; the process and PID file must remain stable
+through verification. A bound live process and its reservation then occupy one
+slot even after QEMU reparenting or the original daemon's exit. Unbound,
+version-2 or ambiguous reservations still consume pending slots; a name or
+ancestry match alone never merges them. Duplicate guest names reject admission.
+
+Reservations do not expire. For a bound version-3 record, a verified libvirt
+daemon may handle `release/end` when the domain UUID matches, no same-name guest
+is observed, and the exact bound PID/start identity is provably gone. That
+daemon need not be the original reserver. An unbound reservation still requires
+its original owner to release it after the guest is absent. Uncertain process
+state retains the reservation. Otherwise, recovery requires explicit inspection
 with all guests and pending starts stopped and the relevant libvirt daemon
-stopped. A legacy `active.json` blocks two-VM mode; two-VM reservation files
-block a return to one-VM mode until deliberately reconciled at that boundary.
-Do not treat reservation cleanup as permission to delete checkpoint dirty or
+stopped. A legacy `active.json` blocks two-VM mode; two-VM reservation files block
+a return to one-VM mode until deliberately reconciled at that boundary. Do not
+treat reservation cleanup as permission to delete checkpoint dirty or
 interrupted-operation markers.
 
 ## Upgrade and rollback
@@ -111,10 +137,15 @@ and does not perform the reservation migration for you.
    and identity pins. Update only the reviewed binary paths/hashes and the
    optional limit in a staged manifest. Do not reenroll existing guests.
 3. Resolve any old reservation only after verifying all guests, pending launch
-   children and their libvirt daemon are stopped. Run the
+   children and their libvirt daemon are stopped. Update the `omvm` CLI used by
+   the existing hook along with the helper code, then run the
    [helper installer and hook installation](apple-helpers.md#installation-and-migration)
    with the reviewed manifest. It validates the binaries and configuration,
    preserves changed installed files, and leaves per-VM helpers on demand.
+   The CLI and hook must forward `prepare/begin`, `started/begin` and
+   `release/end` with the original XML, including domains outside the managed
+   VM directory. The hook installer upgrades the older phase-aware wrapper
+   idempotently; the helper installer alone does not update the CLI.
 4. Start guests with normal libvirt cold boots. The gate starts each helper and
    preserves its existing checkpoint. Reuse the READY provider; do not unload,
    unbind, reset or reinitialize it. A poisoned provider still requires the

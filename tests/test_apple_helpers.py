@@ -27,21 +27,48 @@ h=importlib.util.module_from_spec(spec);spec.loader.exec_module(h)
 CFG={'allow_uid':1000,'vms':{'one':{'identifier':{}}},'provider':{'diagnostic':{'path':'/fake/diagnostic'}}}
 TWO={**CFG,'max_active_vms':2,'backend':{'path':'/fake/backend'},
      'vms':{name:{'identifier':{'path':'/fake/'+name}} for name in ('one','two','three')}}
-XML=b'<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0"><name>one</name><os><type machine="vmapple"/></os><qemu:commandline><qemu:arg value="-device"/><qemu:arg value="apple-fairplay-pci,relay-socket=/run/omvm-fairplay-managed-one/relay.sock"/><qemu:env name="OMVM_IDENTITY_SIGNER" value="/run/omvm-identity/sep.sock"/></qemu:commandline></domain>'
+
+
+def fake_uuid(name):
+    return str(h.uuid.uuid5(h.uuid.NAMESPACE_DNS, 'omvm-test-'+name))
+
+
+XML=('<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0"><name>one</name><uuid>'+fake_uuid('one')+'</uuid><os><type machine="vmapple"/></os><qemu:commandline><qemu:arg value="-device"/><qemu:arg value="apple-fairplay-pci,relay-socket=/run/omvm-fairplay-managed-one/relay.sock"/><qemu:env name="OMVM_IDENTITY_SIGNER" value="/run/omvm-identity/sep.sock"/></qemu:commandline></domain>').encode()
 
 
 def vm_xml(name, managed=True):
     if managed:
-        return XML.replace(b'one',name.encode())
-    return f'<domain><name>{name}</name><os><type machine="vmapple"/></os></domain>'.encode()
+        return XML.replace(b'one',name.encode()).replace(fake_uuid('one').encode(),fake_uuid(name).encode())
+    return f'<domain><name>{name}</name><uuid>{fake_uuid(name)}</uuid><os><type machine="vmapple"/></os></domain>'.encode()
 
 
-def write_reservation(directory,name,pid=501,started=100):
+def write_reservation(directory,name,pid=501,started=100,qemu_pid=None,qemu_start=300,legacy=False):
     directory.mkdir(parents=True,exist_ok=True)
     path=directory/(name+'.json')
-    path.write_text(json.dumps({'version':2,'vm':name,'daemon_pid':pid,'daemon_start':started}))
+    record={'version':2 if legacy else 3,'vm':name,'daemon_pid':pid,'daemon_start':started}
+    if not legacy:
+        record.update(uuid_sha256=h.uuid_digest(fake_uuid(name)),prepare_tick=max(200,started))
+        if qemu_pid is not None:record.update(qemu_pid=qemu_pid,qemu_start=qemu_start)
+    path.write_text(json.dumps(record))
     path.chmod(0o600)
     return path
+
+
+def fake_guest(name='one',pid=101,started=300):
+    return {'pid':pid,'name':name,'start':started,'uuid_sha256':h.uuid_digest(fake_uuid(name)),
+            'machine_verified':True}
+
+
+@contextlib.contextmanager
+def fake_binding(guest=None):
+    guest=fake_guest() if guest is None else guest
+    @contextlib.contextmanager
+    def pidfile(cfg,name):yield guest['pid'],SimpleNamespace(st_dev=os.makedev(0,50),st_ino=900)
+    with patch.object(h,'canonical_pid_file',side_effect=pidfile) as pidfile_call, \
+         patch.object(h,'guest_process',return_value=guest) as process, \
+         patch.object(h,'pid_file_locked',return_value=True) as kernel_lock, \
+         patch.object(h,'verify_qemu_owner') as owner:
+        yield SimpleNamespace(pidfile=pidfile_call,process=process,kernel_lock=kernel_lock,owner=owner)
 
 
 @contextlib.contextmanager
@@ -65,6 +92,7 @@ def fake_two_gate(run,running=None,starts=None):
             'running_guest_processes':lambda:list(running),
             'process_start':lambda pid:starts.get(pid),
             'daemon_identity':lambda:{'daemon_pid':501,'daemon_start':100},
+            'prepare_epoch':lambda:200,
             'validate':lambda cfg:cfg,'backend_executable':lambda cfg:(8,9),
             'verify_running_backends':lambda *args,**kwargs:set(),
             'provider_status':lambda cfg:{'state':2,'flags':6},
@@ -73,7 +101,7 @@ def fake_two_gate(run,running=None,starts=None):
         command=stack.enter_context(patch.object(h,'command',return_value=b''))
         ready=stack.enter_context(patch.object(h,'ready'))
         clock=stack.enter_context(patch.object(h,'wait_for_clock'))
-        yield SimpleNamespace(command=command,ready=ready,clock=clock)
+        yield SimpleNamespace(command=command,ready=ready,clock=clock,starts=starts)
 
 
 class GateTests(unittest.TestCase):
@@ -244,15 +272,15 @@ class TwoGateTests(unittest.TestCase):
 
     def test_running_qemu_and_its_reservation_are_one_slot(self):
         with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
-            run=Path(d);running=[{'pid':101,'name':'one','daemon_pid':501,'daemon_start':100}]
-            write_reservation(run/'reservations','one')
+            run=Path(d);running=[fake_guest()]
+            write_reservation(run/'reservations','one',qemu_pid=101)
             with fake_two_gate(run,running) as fake:
                 h.gate(TWO,'two','prepare','begin',vm_xml('two'))
                 with self.assertRaisesRegex(h.Failure,'two-VM limit'):
                     h.gate(TWO,'three','prepare','begin',vm_xml('three'))
             self.assertEqual(fake.command.call_count,1)
 
-    def test_same_name_with_foreign_or_unknown_ancestry_does_not_merge_slots(self):
+    def test_unbound_same_name_is_not_merged_even_with_matching_ancestry(self):
         for ancestry in ({},{'daemon_pid':502,'daemon_start':100},{'daemon_pid':501,'daemon_start':101}):
             with self.subTest(ancestry=ancestry),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
                 run=Path(d);running=[{'pid':101,'name':'one',**ancestry}]
@@ -414,6 +442,135 @@ class TwoGateTests(unittest.TestCase):
             self.assertFalse(list((run/'reservations').iterdir()))
 
 
+class StartedGateTests(unittest.TestCase):
+    def test_reparented_qemu_binding_admits_second_guest_and_refuses_third(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            run=Path(d);running=[]
+            with fake_two_gate(run,running) as fake:
+                h.gate(TWO,'one','prepare','begin',XML)
+                running.append(fake_guest());fake.starts[101]=300
+                self.assertEqual(h.reservation_slots(run/'reservations',running)[0],2)
+                with fake_binding():h.gate(TWO,'one','started','begin',XML)
+                self.assertEqual(h.reservation_slots(run/'reservations',running)[0],1)
+                record=json.loads((run/'reservations/one.json').read_text())
+                self.assertEqual((record['version'],record['qemu_pid'],record['qemu_start']),(3,101,300))
+                self.assertNotIn(fake_uuid('one'),(run/'reservations/one.json').read_text())
+                h.gate(TWO,'two','prepare','begin',vm_xml('two'))
+                with self.assertRaisesRegex(h.Failure,'two-VM limit'):
+                    h.gate(TWO,'three','prepare','begin',vm_xml('three'))
+                self.assertEqual(fake.command.call_count,2)
+
+    def test_bound_process_remains_one_slot_when_original_daemon_has_exited(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            run=Path(d);write_reservation(run/'reservations','one',qemu_pid=101)
+            with fake_two_gate(run,starts={}),patch.object(h,'process_start',side_effect=AssertionError('not needed')):
+                self.assertEqual(h.reservation_slots(run/'reservations',[fake_guest()]),(1,{'one'},set()))
+
+    def test_binding_is_idempotent_and_cannot_move_to_another_pid(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            run=Path(d);record=write_reservation(run/'reservations','one',qemu_pid=101)
+            original=record.read_bytes()
+            with fake_two_gate(run,[fake_guest()],starts={501:100,101:300}),fake_binding():
+                h.gate(TWO,'one','started','begin',XML)
+            self.assertEqual(record.read_bytes(),original)
+            with fake_two_gate(run,[fake_guest(pid=102)],starts={501:100,102:300}),fake_binding(fake_guest(pid=102)):
+                with self.assertRaisesRegex(h.Failure,'cannot replace'):h.gate(TWO,'one','started','begin',XML)
+            self.assertEqual(record.read_bytes(),original)
+
+    def test_foreign_daemon_or_uuid_cannot_complete_pending_reservation(self):
+        for change in ('daemon','uuid','legacy'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                run=Path(d);record=write_reservation(run/'reservations','one',legacy=change=='legacy')
+                original=record.read_bytes()
+                xml=XML.replace(fake_uuid('one').encode(),fake_uuid('other').encode()) if change=='uuid' else XML
+                with fake_two_gate(run,[fake_guest()],starts={501:100,101:300}),fake_binding(),contextlib.ExitStack() as stack:
+                    if change=='daemon':stack.enter_context(patch.object(h,'daemon_identity',return_value={'daemon_pid':700,'daemon_start':100}))
+                    with self.assertRaises(h.Failure):h.gate(TWO,'one','started','begin',xml)
+                self.assertEqual(record.read_bytes(),original)
+
+    def test_stale_reused_wrong_uuid_or_wrong_machine_pid_preserves_pending(self):
+        cases=[{**fake_guest(),'start':200},{**fake_guest(),'start':199},
+               {**fake_guest(),'uuid_sha256':h.uuid_digest(fake_uuid('other'))},
+               {**fake_guest(),'name':'other'},{**fake_guest(),'machine_verified':False},
+               {'pid':101,'name':None}]
+        for guest in cases:
+            with self.subTest(guest=guest),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                run=Path(d);record=write_reservation(run/'reservations','one');original=record.read_bytes()
+                with fake_two_gate(run,[guest],starts={501:100,101:300}) as fake,fake_binding(guest):
+                    with self.assertRaisesRegex(h.Failure,'canonical PID'):h.gate(TWO,'one','started','begin',XML)
+                    fake.command.assert_not_called();fake.ready.assert_not_called()
+                self.assertEqual(record.read_bytes(),original)
+
+    def test_missing_kernel_lock_or_bad_process_owner_preserves_pending(self):
+        for failure in ('lock','owner'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                run=Path(d);record=write_reservation(run/'reservations','one');original=record.read_bytes()
+                with fake_two_gate(run,[fake_guest()],starts={501:100,101:300}),fake_binding() as binding:
+                    if failure=='lock':binding.kernel_lock.return_value=False
+                    else:binding.owner.side_effect=h.Failure('wrong QEMU owner')
+                    with self.assertRaises(h.Failure):h.gate(TWO,'one','started','begin',XML)
+                self.assertEqual(record.read_bytes(),original)
+
+    def test_pidfile_replacement_or_late_process_reuse_cannot_bind(self):
+        for change in ('pidfile','qemu','daemon'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                run=Path(d);record=write_reservation(run/'reservations','one');original=record.read_bytes()
+                with fake_two_gate(run,[fake_guest()],starts={501:100,101:300}) as fake,fake_binding() as binding:
+                    if change=='pidfile':
+                        stats=iter([900,901])
+                        @contextlib.contextmanager
+                        def changed_file(cfg,name):yield 101,SimpleNamespace(st_dev=os.makedev(0,50),st_ino=next(stats))
+                        binding.pidfile.side_effect=changed_file
+                    else:fake.starts[101 if change=='qemu' else 501]+=1
+                    with self.assertRaises(h.Failure):h.gate(TWO,'one','started','begin',XML)
+                self.assertEqual(record.read_bytes(),original)
+
+    def test_failed_atomic_binding_keeps_pending_and_cleans_its_temporary_file(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            run=Path(d);record=write_reservation(run/'reservations','one');original=record.read_bytes()
+            with fake_two_gate(run,[fake_guest()],starts={501:100,101:300}),fake_binding(), \
+                 patch.object(h.os,'replace',side_effect=OSError('fake replace failure')):
+                with self.assertRaises(OSError):h.gate(TWO,'one','started','begin',XML)
+            self.assertEqual(record.read_bytes(),original)
+            self.assertEqual(list((run/'reservations').iterdir()),[record])
+
+    def test_new_daemon_releases_only_provably_completed_and_exited_binding(self):
+        for current,release in [(None,True),(301,True),(300,False),(PermissionError('test'),False)]:
+            with self.subTest(current=current),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                run=Path(d);record=write_reservation(run/'reservations','one',qemu_pid=101)
+                with fake_two_gate(run) as fake, \
+                     patch.object(h,'daemon_identity',return_value={'daemon_pid':700,'daemon_start':600}), \
+                     patch.object(h,'process_start',side_effect=current) if isinstance(current,Exception) else \
+                     patch.object(h,'process_start',return_value=current):
+                    if release:h.gate(TWO,'one','release','end',XML)
+                    else:
+                        with self.assertRaises(h.Failure):h.gate(TWO,'one','release','end',XML)
+                    self.assertEqual(record.exists(),not release)
+                    fake.command.assert_not_called();fake.ready.assert_not_called()
+
+    def test_release_uuid_mismatch_cannot_clear_completed_binding(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            run=Path(d);record=write_reservation(run/'reservations','one',qemu_pid=101)
+            with fake_two_gate(run):
+                with self.assertRaisesRegex(h.Failure,'UUID'):
+                    h.gate(TWO,'one','release','end',XML.replace(fake_uuid('one').encode(),fake_uuid('other').encode()))
+            self.assertTrue(record.exists())
+
+    def test_old_or_unbound_record_is_not_deduplicated_against_an_arbitrary_name(self):
+        for legacy in (False,True):
+            with self.subTest(legacy=legacy),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                run=Path(d);write_reservation(run/'reservations','one',legacy=legacy)
+                with fake_two_gate(run):
+                    self.assertEqual(h.reservation_slots(run/'reservations',[fake_guest()])[0],2)
+
+    def test_started_without_prepare_fails_and_legacy_default_ignores_new_phase(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            with fake_two_gate(Path(d)) as fake:
+                with self.assertRaisesRegex(h.Failure,'no launch reservation'):h.gate(TWO,'one','started','begin',XML)
+                h.gate(CFG,'one','started','begin',b'not XML')
+                fake.command.assert_not_called();fake.ready.assert_not_called()
+
+
 @unittest.skipUnless(os.geteuid()==0 and sys.platform=='linux','Linux root two-VM ledger/lock contract')
 class RootTwoGateTests(unittest.TestCase):
     def test_real_lifecycle_lock_and_root_private_ledgers_admit_exactly_two(self):
@@ -552,16 +709,92 @@ class HookTests(unittest.TestCase):
             env={**os.environ,'XDG_CONFIG_HOME':d}
             installer=SRC.parent/'apple-helpers-hook.py'
             subprocess.run([sys.executable,str(installer)],env=env,check=True,capture_output=True)
-            output=subprocess.check_output([str(hook),'one','prepare','begin'],input=XML)
-            args,xml=json.loads(output)
-            self.assertEqual(args,['virt-hook','one','prepare','begin'])
-            self.assertEqual(xml,XML.decode())
+            for operation,phase in [('prepare','begin'),('started','begin'),('release','end')]:
+                output=subprocess.check_output([str(hook),'one',operation,phase],input=XML)
+                args,xml=json.loads(output)
+                self.assertEqual(args,['virt-hook','one',operation,phase])
+                self.assertEqual(xml,XML.decode())
             before=hook.read_bytes()
             subprocess.run([sys.executable,str(installer)],env=env,check=True,capture_output=True)
             self.assertEqual(hook.read_bytes(),before)
 
+    def test_phase_aware_hook_is_upgraded_to_forward_started_for_unmanaged_guests(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+            root=Path(d);hook=root/'libvirt/hooks/qemu';hook.parent.mkdir(parents=True)
+            recorder=root/'recorder.py'
+            recorder.write_text('import sys,json; print(json.dumps([sys.argv[1:],sys.stdin.read()]))\n')
+            original=('#!/bin/sh\ncase "$2/$3" in prepare/begin|release/end) ;; *) [ -f "'+d+
+                      '/vms/$1/ssh_port" ] || exit 0 ;; esac\nexport OMVM_IMAGES="'+d+'"\nexec '+
+                      shlex.quote(sys.executable)+' '+shlex.quote(str(recorder))+' virt-hook "$1" "$2" "$3"\n')
+            hook.write_text(original);hook.chmod(0o700)
+            env={**os.environ,'XDG_CONFIG_HOME':d};installer=SRC.parent/'apple-helpers-hook.py'
+            subprocess.run([sys.executable,str(installer)],env=env,check=True,capture_output=True)
+            output=subprocess.check_output([str(hook),'unmanaged','started','begin'],input=vm_xml('unmanaged',False))
+            args,xml=json.loads(output)
+            self.assertEqual(args,['virt-hook','unmanaged','started','begin'])
+            self.assertEqual(xml,vm_xml('unmanaged',False).decode())
+            self.assertEqual(hook.with_name('qemu.before-apple-helpers').read_text(),original)
+            before=hook.read_bytes()
+            subprocess.run([sys.executable,str(installer)],env=env,check=True,capture_output=True)
+            self.assertEqual(hook.read_bytes(),before)
+            self.assertEqual(subprocess.check_output([str(hook),'unmanaged','stopped','end'],input=b''),b'')
+
+    def test_cli_started_binding_precedes_preserved_managed_followups(self):
+        # Execute only the real virt-hook case arm with fake commands, not the
+        # CLI's host initialization or an installed privileged helper.
+        source=(SRC.parent.parent/'bin/omvm').read_text()
+        case=source.split('\nvirt-hook) shift\n',1)[1].split('\nssh) shift;',1)[0]
+        for managed,fail in [(True,False),(False,False),(True,True)]:
+            with self.subTest(managed=managed,fail=fail),tempfile.TemporaryDirectory(dir=TEST_TMP) as d:
+                root=Path(d);trace=root/'trace';helper=root/'helper';sudo=root/'sudo'
+                helper.write_text('#!'+sys.executable+'\nimport os,sys,json\n'
+                                  'with open(os.environ["TRACE"],"a") as f: f.write(json.dumps(["gate",sys.argv[1:],sys.stdin.read()])+"\\n")\n'
+                                  'sys.exit(int(os.environ["FAIL"]))\n')
+                helper.chmod(0o700)
+                sudo.write_text('#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n');sudo.chmod(0o700)
+                if managed:
+                    vm=root/'vms/one';vm.mkdir(parents=True);(vm/'ssh_port').write_text('1')
+                script=root/'hook-case'
+                functions='\n'.join(name+'() { echo '+value+' >> "$TRACE"; }' for name,value in
+                                    [('clip_start','clip'),('follow_start','follow'),('governor_start','governor'),
+                                     ('clip_stop','clip-stop'),('governor_stop','governor-stop')])
+                script.write_text('#!/bin/bash\nset -euo pipefail\n'+functions+'\ncase "$1" in\nvirt-hook) shift\n'+
+                                  case.replace('/usr/local/libexec/omvm-apple-helpers',shlex.quote(str(helper)))+'\nesac\n')
+                script.chmod(0o700)
+                env={**os.environ,'PATH':d+':'+os.environ.get('PATH',''),'TRACE':str(trace),'IMAGES':d,'FAIL':'7' if fail else '0'}
+                result=subprocess.run([str(script),'virt-hook','one','started','begin'],input=XML,env=env,capture_output=True)
+                self.assertEqual(result.returncode,7 if fail else 0,result.stderr)
+                lines=trace.read_text().splitlines()
+                self.assertEqual(json.loads(lines[0]),['gate',['gate','one','started','begin'],XML.decode()])
+                self.assertEqual(lines[1:],['clip','follow','governor'] if managed and not fail else [])
+
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_stable_reparented_qemu_has_uuid_and_start_without_daemon_ancestry(self):
+        argv=(b'/fake/qemu-system-aarch64\0--machine\0type=vmapple\0--name\0guest=one,debug-threads=on\0'
+              b'--uuid\0'+fake_uuid('one').encode()+b'\0')
+        with patch.object(Path,'read_bytes',return_value=argv),patch.object(h,'process_start',return_value=300), \
+             patch.object(h,'daemon_identity',side_effect=AssertionError('QEMU ancestry must not be required')):
+            self.assertEqual(h.guest_process(Path('/fake/proc/101')),fake_guest())
+
+    def test_ambiguous_uuid_name_or_machine_cannot_be_a_bound_identity(self):
+        base=b'/fake/qemu-system-aarch64\0-machine\0vmapple\0-name\0one\0-uuid\0'+fake_uuid('one').encode()+b'\0'
+        for extra,field in [(b'-uuid\0'+fake_uuid('other').encode()+b'\0','uuid_sha256'),
+                            (b'--name\0two\0','name'),(b'--machine\0vmapple\0','machine_verified')]:
+            with self.subTest(field=field),patch.object(Path,'read_bytes',return_value=base+extra), \
+                 patch.object(h,'process_start',return_value=300):
+                self.assertFalse(h.guest_process(Path('/fake/proc/101')).get(field))
+
+    def test_prepare_epoch_crosses_tick_and_fails_closed_if_clock_does_not_advance(self):
+        with patch.object(h.os,'sysconf',return_value=100), \
+             patch.object(h.time,'clock_gettime_ns',side_effect=[2_000_000_000,2_000_000_000,2_010_000_000]), \
+             patch.object(h.time,'monotonic',return_value=0),patch.object(h.time,'sleep') as sleep:
+            self.assertEqual(h.prepare_epoch(),200);sleep.assert_called_once_with(.01)
+        with patch.object(h.os,'sysconf',return_value=100), \
+             patch.object(h.time,'clock_gettime_ns',return_value=2_000_000_000), \
+             patch.object(h.time,'monotonic',side_effect=[0,2]):
+            with self.assertRaisesRegex(h.Failure,'start ordering'):h.prepare_epoch()
+
     def test_proc_scan_counts_each_pid_including_duplicate_or_missing_names(self):
         processes={
             '/fake/proc/10/cmdline':b'/fake/qemu-system-aarch64\0-machine\0vmapple\0-name\0guest=one,debug-threads=on\0',
@@ -572,12 +805,11 @@ class ProcessIdentityTests(unittest.TestCase):
         }
         with patch.object(Path,'glob',return_value=[Path(path).parent for path in processes]), \
              patch.object(Path,'read_bytes',lambda path:processes[str(path)]), \
-             patch.object(h,'process_start',return_value=1000), \
-             patch.object(h,'daemon_identity',return_value={'daemon_pid':501,'daemon_start':100}):
+             patch.object(h,'process_start',return_value=1000):
             self.assertEqual(h.running_guest_processes(),
-                             [{'pid':10,'name':'one','daemon_pid':501,'daemon_start':100},
-                              {'pid':11,'name':'one','daemon_pid':501,'daemon_start':100},
-                              {'pid':12,'name':None,'daemon_pid':501,'daemon_start':100}])
+                             [{'pid':10,'name':'one','start':1000,'machine_verified':True},
+                              {'pid':11,'name':'one','start':1000,'machine_verified':True},
+                              {'pid':12,'name':None,'start':1000,'machine_verified':True}])
 
     def test_qemu_pid_reuse_or_unreadable_identity_cannot_merge_a_pending_slot(self):
         for starts in ([1000,1001],[1000,None],[None,1000],[PermissionError(),1000]):
@@ -618,6 +850,57 @@ class ProcessIdentityTests(unittest.TestCase):
         with patch.object(h.os,'getppid',return_value=50),patch.object(Path,'read_text',return_value='virtqemud\n'), \
              patch.object(h,'process_start',side_effect=[500,501]):
             with self.assertRaisesRegex(h.Failure,'daemon changed'):h.daemon_identity()
+
+
+class PidMetadataTests(unittest.TestCase):
+    def test_kernel_pidfile_lock_requires_granted_posix_write_owner_and_inode(self):
+        st=SimpleNamespace(st_dev=os.makedev(1,2),st_ino=300)
+        good='2: POSIX ADVISORY WRITE 101 01:02:300 0 0\n'
+        cases=[(good,True),(good.replace(' 0 0\n',' 0 EOF\n'),True),
+               (good.replace('2: ','2: -> '),False),(good.replace('101','102'),False),
+               (good.replace(':300',':301'),False),(good.replace('WRITE','READ'),False),
+               (good.replace('POSIX','OFDLCK'),False),(good.replace(' 0 0\n',' 1 1\n'),False),
+               ('invalid private lock data\n',False)]
+        for text,expected in cases:
+            with self.subTest(text=text),patch.object(Path,'read_text',return_value=text):
+                self.assertEqual(h.pid_file_locked(st,101),expected)
+
+    def test_qemu_owner_and_real_executable_are_required(self):
+        for owner,executable,accepted in [(1000,'/fake/qemu-system-aarch64',True),
+                                        (0,'/fake/qemu-system-aarch64',False),(1000,'/fake/python',False)]:
+            with self.subTest(owner=owner,executable=executable), \
+                 patch.object(Path,'stat',return_value=SimpleNamespace(st_uid=owner)), \
+                 patch.object(h.os,'readlink',return_value=executable):
+                if accepted:h.verify_qemu_owner(TWO,101)
+                else:
+                    with self.assertRaisesRegex(h.Failure,'owner/executable'):h.verify_qemu_owner(TWO,101)
+
+    @unittest.skipUnless(os.geteuid()==0 and sys.platform=='linux','Linux root canonical PID metadata contract')
+    def test_canonical_pid_file_ownership_links_modes_types_and_bounded_content(self):
+        for change in ('valid','symlink','fifo','owner','mode','size','contents','directory-link','directory-mode'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory(dir='/run') as d:
+                users=Path(d)/'users';users.mkdir(mode=0o700)
+                current=users
+                for part in ('1000','libvirt','qemu','run'):
+                    current=current/part;current.mkdir(mode=0o700);os.chown(current,1000,-1)
+                path=current/'one.pid';path.write_text('101\n');path.chmod(0o644);os.chown(path,1000,-1)
+                if change=='symlink':
+                    target=current/'actual';path.rename(target);path.symlink_to(target)
+                elif change=='fifo':path.unlink();os.mkfifo(path)
+                elif change=='owner':os.chown(path,0,-1)
+                elif change=='mode':path.chmod(0o666)
+                elif change=='size':path.write_text('1'*33)
+                elif change=='contents':path.write_text('private-not-a-pid')
+                elif change=='directory-link':
+                    target=current.with_name('actual-run');current.rename(target);current.symlink_to(target)
+                elif change=='directory-mode':current.chmod(0o770)
+                with patch.object(h,'PID_RUN',users):
+                    if change=='valid':
+                        with h.canonical_pid_file(TWO,'one') as (pid,st):
+                            self.assertEqual(pid,101);self.assertEqual(st.st_uid,1000)
+                    else:
+                        with self.assertRaises((h.Failure,OSError)):
+                            with h.canonical_pid_file(TWO,'one'):self.fail('untrusted metadata accepted')
 
 
 class BackendGuardTests(unittest.TestCase):
