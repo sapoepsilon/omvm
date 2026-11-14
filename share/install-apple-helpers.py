@@ -74,8 +74,8 @@ def main():
         helpers.private_dir(helpers.paths(name)[1].parent)
     helpers.command(['/usr/bin/systemctl','daemon-reload'])
     helpers.command(['/usr/bin/systemctl','enable','omvm-uid1-provider.service','omvm-sep-identity.service'])
-    # Eager sibling startup bypasses the one-guest gate and may overlap hardware
-    # access. The existing libvirt gate starts and checks the selected helper.
+    # Eager sibling startup bypasses the configured admission/readiness gate.
+    # The libvirt gate starts and checks each helper under its lifecycle lock.
     # Remove old boot links without --now: running helper state stays intact.
     helpers.command(['/usr/bin/systemctl','disable']+[helpers.unit(n) for n in sorted(managed_names)])
     print('Installed helpers. Host prerequisites enabled; VM helpers start at guest launch.')

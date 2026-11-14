@@ -90,9 +90,11 @@ Xcode 27.2
 - **Apple Account:** experimental Linux SEP/FairPlay source and lifecycle tooling
   are available in [the helper guide](docs/apple-helpers.md). The development
   installation passed sign-in, two-way iMessage and authenticated host-reboot
-  recovery using Linux helpers. This is not yet a complete installer or a fresh
-  build acceptance result. Keychain/Contact Key Verification and first-attempt
-  sign-in reliability remain unfinished; see the [current status](docs/apple-services.md).
+  recovery using Linux helpers. Opt-in [two-VM support](docs/apple-services-concurrency.md)
+  also passed overlapping fresh Apple Account requests in two signed-in guests.
+  The complete stack still needs a fresh build/install test. Keychain/Contact
+  Key Verification and first-attempt sign-in reliability remain unfinished;
+  see the [current status](docs/apple-services.md).
 - **macOS apps:** `omac run Foo.app` runs an arm64 application in a dedicated guest;
   see [the application guide](docs/omac.md).
 

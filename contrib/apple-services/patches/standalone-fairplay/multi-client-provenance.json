@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "upstream": "https://github.com/majd/ipatool.git",
+  "upstream_commit": "3e84853e2e5d60540a5022b64895d496910144eb",
+  "apply_order": [
+    "ipatool-linux-experiment.patch",
+    "multi-client-serialization.patch"
+  ],
+  "patch_sha256": {
+    "ipatool-linux-experiment.patch": "07d17b5eb6f91362e5700a1596fae5325a14ccac34e574c6812e5fda224f46e9",
+    "multi-client-serialization.patch": "162cfc27b26977ef61485c26fc720a41d1904c12a7e3ecd0952ed4e338efb436"
+  },
+  "base_file_sha256": {
+    "internal/sap/deviceaes/client.go": "4491e28d6b25ebed5c9fc8d139704d76195c3ef8c435637f03ce1cb36e0511d0",
+    "internal/sap/deviceaes/client_test.go": "0a14f3e8032abf8ae24d39b01324a65a142ef2504a63d6c27fc7e072ab6a1743",
+    "internal/sap/deviceaes/device_linux_arm64.go": "69967f0e72bbbb86a9666a433910079fe238030de4d31ee5d793c31953ae80a7",
+    "internal/sap/deviceaes/device_unsupported.go": "070f68fabe08cffe18e837668ed70ff1dec06a2da543b355646c57181f0a728e",
+    "internal/sap/deviceaes/dsb.go": "201255f588d558b936300b3853e2fca6233b45030076b9248b48250b52b8efa6",
+    "internal/sap/deviceaes/transaction_test.go": null,
+    "internal/sap/deviceaes/transaction_linux_arm64_test.go": null,
+    "tools/omvm-fairplay-linux/README.md": "7bd9d17eb00e4497cdf3cac92e57d5c9f084e06023ee8b149c9a9fdd817f487e",
+    "tools/omvm-fairplay-linux/main.go": "cd4522f6cf766ba37a2cf3fd015fed23bbfc2e2b38fc20ec5c3b09e3e784a7a5",
+    "tools/omvm-fairplay-linux/capabilities_test.go": null,
+    "tools/omvm-uid1-diagnostic/main.go": "df0fb60dd062250163654452216d932901ed9194f95e27e1a69388279bcec0fd",
+    "tools/omvm-uid1-diagnostic/main_test.go": null
+  },
+  "result_file_sha256": {
+    "internal/sap/deviceaes/client.go": "fc094b5b8be2560d1755f4399f9ce30cd042690e35b9e850129c0bef2576b375",
+    "internal/sap/deviceaes/client_test.go": "296782ae0f8fd7ece54db7eaabfe77df00df9a64b33e42c4d974fc188a5516d0",
+    "internal/sap/deviceaes/device_linux_arm64.go": "7b9b6d99428cb9dddb0ab7955a96c7416129ec69e1661af20a0dc6df78cc1454",
+    "internal/sap/deviceaes/device_unsupported.go": "fd8413bdd1af5cb30f1f27a74d21e77e04b3daacadde37dc2c9ad0105735bd4c",
+    "internal/sap/deviceaes/dsb.go": "6c36d4cbe78e33cb8c66c7ab5728351db553c784ae4ffc268bcc6c2ffa9ce332",
+    "internal/sap/deviceaes/transaction_test.go": "68e96801d5940db096047349eb99aa606b40db6a9074f8dbb44701c145db7c42",
+    "internal/sap/deviceaes/transaction_linux_arm64_test.go": "f7eff3a134e4be428e79e13501ab92464f4fde115f01d9ef162f5c92d68fac5f",
+    "tools/omvm-fairplay-linux/README.md": "32f79c3e90e087d24cef69d2da0a8c10fada602f824a31afdfa271ac582e7e1a",
+    "tools/omvm-fairplay-linux/main.go": "adc739b6017f17250fb8769167c2ab4cccc642c84cb09bdaed74e4808ac22c65",
+    "tools/omvm-fairplay-linux/capabilities_test.go": "102a898ec0fdfcb4017d8ac32e667e9e7357c0fe15b616ca78ca0f71a3423018",
+    "tools/omvm-uid1-diagnostic/main.go": "2c29289ce79be5abb3e1bdc54f8e9f63a499ac50f4a279a5f6716bdbf295368c",
+    "tools/omvm-uid1-diagnostic/main_test.go": "1a9841cd62ec855cb17856a070c442cef582c74c771e70198fa5851dc6384030"
+  },
+  "build": {
+    "go": "go1.26.5",
+    "goos": "linux",
+    "goarch": "arm64",
+    "cgo_enabled": "0",
+    "flags": [
+      "-trimpath",
+      "-buildvcs=false"
+    ]
+  },
+  "artifacts": {
+    "omvm-fairplay-linux": {
+      "sha256": "fb88765c7ce1e95df73b021b11643237f05960b4ef6733978ea8a6f0150b1043",
+      "capabilities": {
+        "schema_version": 1,
+        "device_aes_arbitration": "transaction-flock-v1"
+      },
+      "stderr_empty": true,
+      "size": 13005793
+    },
+    "omvm-uid1-diagnostic": {
+      "sha256": "b6c0543eae149de5eb1c0e24c0cd0c39d9a33d0ab00c9a903eee1845179c5fcc",
+      "capabilities": {
+        "schema_version": 1,
+        "device_aes_arbitration": "transaction-flock-v1"
+      },
+      "stderr_empty": true,
+      "size": 11907542
+    }
+  }
+}

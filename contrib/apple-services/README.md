@@ -14,6 +14,18 @@ history is not required to reconstruct the included code. [provenance.json](prov
 records every source/output hash, the dependency revisions and the documentation
 changes made for publication.
 
+The separate
+[`multi-client-serialization.patch`](patches/standalone-fairplay/multi-client-serialization.patch)
+extends that preserved baseline with userspace transaction arbitration for
+experimental two-VM operation. Its
+[provenance](patches/standalone-fairplay/multi-client-provenance.json) records the
+incremental inputs and outputs. See the
+[concurrency guide](../../docs/apple-services-concurrency.md) for admission,
+upgrade and rollback requirements. Live concurrent authenticated-service
+validation is pending. The revised lifecycle gate passed live two-guest cold
+boots, correct process-bound slot accounting and third-slot refusal. See the
+concurrency guide for the remaining service checks.
+
 ## Reconstruct the source
 
 Use a fresh checkout of the upstream repository at the exact base. Set `OVERLAY`
@@ -33,13 +45,14 @@ is not copied wholesale. The scripts use the restore image's factory hardware
 model by default, make legacy compatibility explicit, and extract auxiliary
 flash while preserving the complete native file.
 
-The copied implementation files reconstruct the source checkpoint exactly.
-Five patch documents were generalized. The cumulative ipatool patch also has a
-generalized README paragraph; every resulting implementation and test file
-remains identical to the source checkpoint's patch output. The AES snapshot
-Makefile patch context was rebased onto the pinned clean kernel without changing
-the driver source. Additional prerequisite deltas are recorded separately. The source overlay
-does not recreate the omitted operational documents. Historical comments in
+The preserved implementation snapshots reconstruct the original source
+checkpoint exactly. Five patch documents were generalized. The cumulative
+ipatool patch also has a generalized README paragraph; every resulting
+implementation and test file remains identical to the source checkpoint's patch
+output. The AES snapshot Makefile patch context was rebased onto the pinned clean
+kernel without changing the driver source. Additional prerequisite deltas are
+recorded separately. The source overlay does not recreate the omitted
+operational documents. Historical comments in
 the exact source snapshots still name research notes outside this overlay;
 those references are intentionally unavailable and are not build inputs.
 
@@ -51,15 +64,28 @@ those references are intentionally unavailable and are not build inputs.
 | `prerequisites/` | Missing SEP and QEMU development deltas, public baseline reconstruction instructions and per-file provenance. |
 | `patches/identity-20261110/linux-sep-export/` | Incremental public attestation export; requires the exact input file hashes and earlier SEP work. |
 | `patches/standalone-fairplay/ipatool-linux-experiment.patch` | Complete cumulative Linux adapter through v23, device-provider client, durable-state implementation and tests. Applies to ipatool `3e84853e2e5d60540a5022b64895d496910144eb`. |
+| `patches/standalone-fairplay/multi-client-serialization.patch` | Incremental userspace transaction locking and pure backend/diagnostic capability probes. Apply after the unchanged cumulative ipatool patch. |
+| `patches/standalone-fairplay/multi-client-provenance.json` | Incremental patch order, source/result hashes and reviewed Linux ARM64 build artifacts. |
 | `patches/standalone-fairplay/qemu-ofr2-completion.patch` | Queue-0 completion semantics required by the Linux adapter; applies to the included `apple-fairplay.c` frontend. |
 | `patches/standalone-fairplay/uid1-provider/` | Board-specific kernel provider, fixed UAPI, build file and optional interrupt metadata patch. |
 | `patches/standalone-fairplay/aes-snapshot/` | Earlier, default-disabled powered-state diagnostics and board opt-in source. |
 | `scripts/debug/fairplay-relay.c` and `fairplay-relay-socket.py` | Historical macOS IOKit relay and private Unix transport. This backend requires macOS and restricted driver access; it is separate from the Linux adapter. |
 | `scripts/extract-aux.py` | Read-only auxiliary-storage parser used by the restore patch. |
 
-To reconstruct the Linux adapter, apply the cumulative patch to a clean
-checkout of the pinned ipatool revision using `git apply --check` followed by
-`git apply`. Build and protocol details are in the patch's
+To reconstruct the Linux adapter with two-VM support, apply the cumulative patch
+and then the incremental patch to a clean checkout of the pinned ipatool revision.
+Set `IPATOOL` to that fresh checkout:
+
+```sh
+git -C "$IPATOOL" checkout --detach 3e84853e2e5d60540a5022b64895d496910144eb
+git -C "$IPATOOL" apply --check "$OVERLAY/patches/standalone-fairplay/ipatool-linux-experiment.patch"
+git -C "$IPATOOL" apply "$OVERLAY/patches/standalone-fairplay/ipatool-linux-experiment.patch"
+git -C "$IPATOOL" apply --check "$OVERLAY/patches/standalone-fairplay/multi-client-serialization.patch"
+git -C "$IPATOOL" apply "$OVERLAY/patches/standalone-fairplay/multi-client-serialization.patch"
+```
+
+Omitting the incremental patch reconstructs the historical v23 baseline. Build
+and protocol details are in the resulting
 `tools/omvm-fairplay-linux/README.md`. The Linux runtime uses explicit Linux
 SEP/device-AES providers and the OFR2-capable QEMU frontend. Its Apple asset
 cache, per-VM identity and private provider inputs must be supplied separately;
@@ -79,7 +105,22 @@ V23 adds explicit, identity-bound ADI checkpoints with private-file validation,
 atomic replacement, commit-before-reply and crash markers. It does not persist
 every transient emulator or guest session. Missing, mismatched or uncertain
 state fails closed; integration must not silently enroll or roll back state.
-Complete guest/helper/host restart recovery still requires lifecycle testing.
+Recovery with newly rebuilt artifacts still requires lifecycle testing. The
+[review hub](../../docs/apple-services.md) records the earlier installed one-VM
+service and normal-host-reboot baseline; two-VM recovery remains untested.
+
+The incremental patch leaves those identities and checkpoints intact. Each
+device session holds its local mutex and a device-descriptor `flock` around a
+complete synchronous transaction. Advisory-lock contention waits at most two
+seconds; work ioctls are never retried, and no timeout releases the lock during
+an outstanding ioctl. Both backend and diagnostic offer a pure
+`-print-capabilities` query; Linux ARM64 reports schema `1` and
+`device_aes_arbitration: transaction-flock-v1`. These capabilities establish
+compiled coordination, not hardware or account acceptance. Older/unmanaged
+clients cannot safely participate because the lock is advisory. Two-VM helper
+admission therefore requires pinned compatible binaries, distinct identifier
+contents and verified managed processes. The shared SEP signer remains
+sequential; fake clients do not establish live latency.
 
 The kernel provider targets the documented T6001/J314c resources. After a
 hardware session it retains the module, power, DMA and IRQ ownership until a
@@ -121,3 +162,12 @@ dependency and differ only in the generalized README. Restored shell/Python
 syntax checks and strict compilation of the OFR2-patched QEMU frontend pass.
 The manifest records these checks. Kernel builds, Darwin compilation and
 runtime/hardware tests were not repeated during packaging.
+
+Fresh public-base reconstruction of both ipatool patches matched all 12 recorded
+incremental output files. The full Go SAP/backend/diagnostic test suite passed
+across eight packages. The incremental tests cover complete transaction locking,
+contention/failure handling and pure capability probes.
+Helper tests cover two-VM admission, pending/orphan reservations and incompatible
+clients; a fake two-client SEP test checks reply isolation. These checks use no
+live SEP/AES hardware or Apple account and do not replace the historical one-VM
+service evidence or the pending concurrent-service acceptance run.

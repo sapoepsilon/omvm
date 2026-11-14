@@ -1,0 +1,1210 @@
+diff --git c/internal/sap/deviceaes/client.go i/internal/sap/deviceaes/client.go
+index 733295b5ba1e73620bbb70575c6ae59b4564ff69..c14fb37b7f7abe360047dc4d55db25f8d10e8766 100644
+--- c/internal/sap/deviceaes/client.go
++++ i/internal/sap/deviceaes/client.go
+@@ -58,6 +58,8 @@ type Status struct {
+ }
+ 
+ type device interface {
++	lock() error
++	unlock() error
+ 	ioctl(uintptr, []byte) error
+ 	close() error
+ }
+@@ -69,6 +71,39 @@ type session struct {
+ 	failed bool
+ }
+ 
++// transaction holds both the local session mutex and the advisory lock on this
++// independently opened device file description. No deadline releases ownership
++// while a synchronous ioctl is still running. Kernel state remains authoritative:
++// acquiring a lock after another process exits does not establish hardware safety.
++func transaction[T any](s *session, operation func() (T, error)) (result T, err error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed || s.failed {
++		return result, errors.New("device-AES session cannot accept work")
++	}
++	if err = s.device.lock(); err != nil {
++		s.failed = true
++		return result, fmt.Errorf("device-AES transaction lock failed: %w", err)
++	}
++	defer func() {
++		if unlockErr := s.device.unlock(); unlockErr != nil {
++			s.failed = true
++			err = errors.Join(err, fmt.Errorf("device-AES transaction unlock failed: %w", unlockErr))
++		}
++		if err != nil {
++			// A completed ioctl is insufficient when the transaction's final
++			// validation or unlock failed. Wipe any copied payload before return.
++			if payload, ok := any(result).(machine.DeviceAESResult); ok {
++				clear(payload.Output)
++				clear(payload.IV)
++			}
++			var zero T
++			result = zero
++		}
++	}()
++	return operation()
++}
++
+ // Provider implements the existing synchronous machine provider API. It is
+ // opened only by an explicit device path and never runs SELFTEST or INIT.
+ type Provider struct{ session *session }
+@@ -91,10 +126,13 @@ func Open(path string) (*Provider, error) {
+ 
+ func newProvider(dev device) (*Provider, error) {
+ 	s := &session{device: dev}
+-	status, err := s.statusLocked()
+-	if err == nil {
+-		err = requireReady(status)
+-	}
++	_, err := transaction(s, func() (Status, error) {
++		status, err := s.statusLocked()
++		if err == nil {
++			err = requireReady(status)
++		}
++		return status, err
++	})
+ 	if err != nil {
+ 		_ = s.close()
+ 		return nil, fmt.Errorf("device-AES provider is not ready: %w", err)
+@@ -175,55 +213,52 @@ func (p *Provider) TransformDeviceAES(request machine.DeviceAESRequest) (machine
+ 		return machine.DeviceAESResult{}, err
+ 	}
+ 	s := p.session
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	if s.closed || s.failed {
+-		return machine.DeviceAESResult{}, errors.New("device-AES session cannot accept work")
+-	}
+-	fail := func(err error) (machine.DeviceAESResult, error) {
+-		s.failed = true
+-		return machine.DeviceAESResult{}, err
+-	}
+-	before, err := s.statusLocked()
+-	if err != nil {
+-		return fail(err)
+-	}
+-	if err := requireReady(before); err != nil {
+-		return fail(err)
+-	}
+-	var frame [transformSize]byte
+-	defer clear(frame[:])
+-	binary.LittleEndian.PutUint32(frame[0:4], ABIVersion)
+-	binary.LittleEndian.PutUint32(frame[4:8], request.Purpose)
+-	binary.LittleEndian.PutUint32(frame[8:12], request.Operation)
+-	if request.IVPresent {
+-		binary.LittleEndian.PutUint32(frame[12:16], 1)
+-	}
+-	binary.LittleEndian.PutUint32(frame[16:20], uint32(len(request.Input)))
+-	copy(frame[24:40], request.IV)
+-	copy(frame[transformDataOffset:], request.Input)
+-	var immutable [transformHeaderSize]byte
+-	copy(immutable[:], frame[:transformHeaderSize])
+-	if err := s.device.ioctl(ioctlTransform, frame[:]); err != nil {
+-		return fail(fmt.Errorf("device-AES TRANSFORM failed: %w", err))
+-	}
+-	if !bytes.Equal(frame[:transformHeaderSize], immutable[:]) || !allZero(frame[transformDataOffset+len(request.Input):]) || (!request.IVPresent && !allZero(frame[24:40])) {
+-		return fail(errors.New("device-AES TRANSFORM changed immutable fields, tail, or absent IV"))
+-	}
+-	after, err := s.statusLocked()
+-	if err != nil {
+-		return fail(err)
+-	}
+-	if err := requireReady(after); err != nil {
+-		return fail(err)
+-	}
+-	// The frozen ioctl copies output only after completed synchronous success.
+-	// The counter and last_errno are metadata, not completion proof.
+-	return machine.DeviceAESResult{
+-		Completed: true,
+-		Output:    bytes.Clone(frame[transformDataOffset : transformDataOffset+len(request.Input)]),
+-		IV:        bytes.Clone(frame[24:40]),
+-	}, nil
++	return transaction(s, func() (machine.DeviceAESResult, error) {
++		fail := func(err error) (machine.DeviceAESResult, error) {
++			s.failed = true
++			return machine.DeviceAESResult{}, err
++		}
++		before, err := s.statusLocked()
++		if err != nil {
++			return fail(err)
++		}
++		if err := requireReady(before); err != nil {
++			return fail(err)
++		}
++		var frame [transformSize]byte
++		defer clear(frame[:])
++		binary.LittleEndian.PutUint32(frame[0:4], ABIVersion)
++		binary.LittleEndian.PutUint32(frame[4:8], request.Purpose)
++		binary.LittleEndian.PutUint32(frame[8:12], request.Operation)
++		if request.IVPresent {
++			binary.LittleEndian.PutUint32(frame[12:16], 1)
++		}
++		binary.LittleEndian.PutUint32(frame[16:20], uint32(len(request.Input)))
++		copy(frame[24:40], request.IV)
++		copy(frame[transformDataOffset:], request.Input)
++		var immutable [transformHeaderSize]byte
++		copy(immutable[:], frame[:transformHeaderSize])
++		if err := s.device.ioctl(ioctlTransform, frame[:]); err != nil {
++			return fail(fmt.Errorf("device-AES TRANSFORM failed: %w", err))
++		}
++		if !bytes.Equal(frame[:transformHeaderSize], immutable[:]) || !allZero(frame[transformDataOffset+len(request.Input):]) || (!request.IVPresent && !allZero(frame[24:40])) {
++			return fail(errors.New("device-AES TRANSFORM changed immutable fields, tail, or absent IV"))
++		}
++		after, err := s.statusLocked()
++		if err != nil {
++			return fail(err)
++		}
++		if err := requireReady(after); err != nil {
++			return fail(err)
++		}
++		// The frozen ioctl copies output only after completed synchronous success.
++		// The counter and last_errno are metadata, not completion proof.
++		return machine.DeviceAESResult{
++			Completed: true,
++			Output:    bytes.Clone(frame[transformDataOffset : transformDataOffset+len(request.Input)]),
++			IV:        bytes.Clone(frame[24:40]),
++		}, nil
++	})
+ }
+ 
+ func (s *session) close() error {
+@@ -255,9 +290,7 @@ func (c *Controller) Status() (Status, error) {
+ 	if c == nil || c.session == nil {
+ 		return Status{}, errors.New("device-AES controller is unavailable")
+ 	}
+-	c.session.mu.Lock()
+-	defer c.session.mu.Unlock()
+-	return c.session.statusLocked()
++	return transaction(c.session, c.session.statusLocked)
+ }
+ 
+ func (c *Controller) SelfTest() (Status, error) {
+@@ -265,23 +298,20 @@ func (c *Controller) SelfTest() (Status, error) {
+ 		return Status{}, errors.New("device-AES controller is unavailable")
+ 	}
+ 	s := c.session
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	if s.closed || s.failed {
+-		return Status{}, errors.New("device-AES session cannot accept work")
+-	}
+-	if err := s.device.ioctl(ioctlSelfTest, nil); err != nil {
+-		s.failed = true
+-		return Status{}, fmt.Errorf("explicit device-AES SELFTEST failed: %w", err)
+-	}
+-	status, err := s.statusLocked()
+-	if err == nil && (status.State != SelfTestPassed || status.Flags&FlagBusy != 0) {
+-		err = errors.New("SELFTEST did not enter idle SELFTEST_PASSED")
+-	}
+-	if err != nil {
+-		s.failed = true
+-	}
+-	return status, err
++	return transaction(s, func() (Status, error) {
++		if err := s.device.ioctl(ioctlSelfTest, nil); err != nil {
++			s.failed = true
++			return Status{}, fmt.Errorf("explicit device-AES SELFTEST failed: %w", err)
++		}
++		status, err := s.statusLocked()
++		if err == nil && (status.State != SelfTestPassed || status.Flags&FlagBusy != 0) {
++			err = errors.New("SELFTEST did not enter idle SELFTEST_PASSED")
++		}
++		if err != nil {
++			s.failed = true
++		}
++		return status, err
++	})
+ }
+ 
+ // InitializeFromFile reads only the explicit root-owned, private, pinned seed
+@@ -291,33 +321,30 @@ func (c *Controller) InitializeFromFile(path string) (Status, error) {
+ 		return Status{}, errors.New("device-AES controller is unavailable")
+ 	}
+ 	s := c.session
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	if s.closed || s.failed {
+-		return Status{}, errors.New("device-AES session cannot accept work")
+-	}
+-	seeds, err := c.readSeedFile(path)
+-	if err != nil {
+-		return Status{}, err
+-	}
+-	defer clear(seeds)
+-	if len(seeds) != SeedBundleSize {
+-		return Status{}, errors.New("invalid private seed-bundle size")
+-	}
+-	var frame [initSize]byte
+-	defer clear(frame[:])
+-	binary.LittleEndian.PutUint32(frame[:4], ABIVersion)
+-	copy(frame[8:], seeds)
+-	if err := s.device.ioctl(ioctlInit, frame[:]); err != nil {
+-		s.failed = true
+-		return Status{}, fmt.Errorf("explicit device-AES INIT failed: %w", err)
+-	}
+-	status, err := s.statusLocked()
+-	if err == nil {
+-		err = requireReady(status)
+-	}
+-	if err != nil {
+-		s.failed = true
+-	}
+-	return status, err
++	return transaction(s, func() (Status, error) {
++		seeds, err := c.readSeedFile(path)
++		if err != nil {
++			return Status{}, err
++		}
++		defer clear(seeds)
++		if len(seeds) != SeedBundleSize {
++			return Status{}, errors.New("invalid private seed-bundle size")
++		}
++		var frame [initSize]byte
++		defer clear(frame[:])
++		binary.LittleEndian.PutUint32(frame[:4], ABIVersion)
++		copy(frame[8:], seeds)
++		if err := s.device.ioctl(ioctlInit, frame[:]); err != nil {
++			s.failed = true
++			return Status{}, fmt.Errorf("explicit device-AES INIT failed: %w", err)
++		}
++		status, err := s.statusLocked()
++		if err == nil {
++			err = requireReady(status)
++		}
++		if err != nil {
++			s.failed = true
++		}
++		return status, err
++	})
+ }
+diff --git c/internal/sap/deviceaes/client_test.go i/internal/sap/deviceaes/client_test.go
+index 008ecb3871391374cfb4d128cb6cc1c35cd0afb6..a903037044b85cf38c2a43a8127ca56cbd035e8a 100644
+--- c/internal/sap/deviceaes/client_test.go
++++ i/internal/sap/deviceaes/client_test.go
+@@ -15,8 +15,23 @@ import (
+ )
+ 
+ type fakeDevice struct {
+-	call    func(uintptr, []byte) error
+-	closing func() error
++	call      func(uintptr, []byte) error
++	closing   func() error
++	locking   func() error
++	unlocking func() error
++}
++
++func (f *fakeDevice) lock() error {
++	if f.locking != nil {
++		return f.locking()
++	}
++	return nil
++}
++func (f *fakeDevice) unlock() error {
++	if f.unlocking != nil {
++		return f.unlocking()
++	}
++	return nil
+ }
+ 
+ func (f *fakeDevice) ioctl(command uintptr, data []byte) error { return f.call(command, data) }
+@@ -246,7 +261,7 @@ func TestProviderRequiresReadyBeforeAccept(t *testing.T) {
+ 
+ func TestProviderCloseWaitsForSynchronousCall(t *testing.T) {
+ 	entered, release, finished, closed := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+-	var closeCalls atomic.Int32
++	var closeCalls, unlockCalls atomic.Int32
+ 	provider, err := newProvider(&fakeDevice{call: func(command uintptr, frame []byte) error {
+ 		if command == ioctlStatus {
+ 			putStatus(frame, Ready)
+@@ -255,7 +270,7 @@ func TestProviderCloseWaitsForSynchronousCall(t *testing.T) {
+ 		close(entered)
+ 		<-release
+ 		return nil
+-	}, closing: func() error { closeCalls.Add(1); close(closed); return syscall.EINTR }})
++	}, unlocking: func() error { unlockCalls.Add(1); return nil }, closing: func() error { closeCalls.Add(1); close(closed); return syscall.EINTR }})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -274,8 +289,14 @@ func TestProviderCloseWaitsForSynchronousCall(t *testing.T) {
+ 		t.Fatal("close raced outstanding ioctl")
+ 	case <-time.After(20 * time.Millisecond):
+ 	}
++	if unlockCalls.Load() != 1 {
++		t.Fatal("device lock released while synchronous ioctl was active")
++	}
+ 	close(release)
+ 	<-finished
++	if unlockCalls.Load() != 2 {
++		t.Fatal("completed transaction did not release device lock")
++	}
+ 	if err := <-closeDone; !errors.Is(err, syscall.EINTR) {
+ 		t.Fatal("close error lost")
+ 	}
+diff --git c/internal/sap/deviceaes/device_linux_arm64.go i/internal/sap/deviceaes/device_linux_arm64.go
+index 06f58ded11e4bb87f3b45d879002170a797a2828..b78c1772210cc7b89023f9487d92e4589430be72 100644
+--- c/internal/sap/deviceaes/device_linux_arm64.go
++++ i/internal/sap/deviceaes/device_linux_arm64.go
+@@ -12,11 +12,18 @@ import (
+ 	"runtime"
+ 	"strconv"
+ 	"strings"
++	"time"
+ 	"unsafe"
+ 
+ 	"golang.org/x/sys/unix"
+ )
+ 
++// ArbitrationCapability identifies the compiled provider's coordination protocol.
++func ArbitrationCapability() string { return "transaction-flock-v1" }
++
++const transactionLockWait = 2 * time.Second
++const transactionLockPoll = 10 * time.Millisecond
++
+ const sysfsDevicePath = "/sys/class/misc/omvm-uid1-provider/dev"
+ const pinnedSeedSHA256 = "1c6a5cc41f941e0788e436148f280dd5a875caf57929811b802aadca9e253c8d"
+ 
+@@ -27,11 +34,15 @@ type linuxCalls struct {
+ 	fstat     func(int, *unix.Stat_t) error
+ 	close     func(int) error
+ 	ioctl     func(int, uintptr, []byte) error
++	flock     func(int, int) error
++	now       func() time.Time
++	sleep     func(time.Duration)
+ 	readSysfs func() ([]byte, error)
+ }
+ 
+ func realLinuxCalls() linuxCalls {
+ 	return linuxCalls{
++		flock: unix.Flock, now: time.Now, sleep: time.Sleep,
+ 		geteuid: os.Geteuid, lstat: unix.Lstat, open: unix.Open, fstat: unix.Fstat, close: unix.Close,
+ 		ioctl: func(fd int, command uintptr, frame []byte) error {
+ 			var pointer unsafe.Pointer
+@@ -64,6 +75,31 @@ type linuxDevice struct {
+ 	calls linuxCalls
+ }
+ 
++// Wait only for advisory lock contention, never for/retry a work ioctl. An
++// unsupported flock or any other locking error fails closed without a fallback.
++func (d *linuxDevice) lock() error {
++	deadline := d.calls.now().Add(transactionLockWait)
++	for {
++		err := d.calls.flock(d.fd, unix.LOCK_EX|unix.LOCK_NB)
++		if err == nil {
++			return nil
++		}
++		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
++			return err
++		}
++		remaining := deadline.Sub(d.calls.now())
++		if remaining <= 0 {
++			return fmt.Errorf("device-AES transaction lock wait expired: %w", unix.ETIMEDOUT)
++		}
++		d.calls.sleep(min(remaining, transactionLockPoll))
++		if !d.calls.now().Before(deadline) {
++			return fmt.Errorf("device-AES transaction lock wait expired: %w", unix.ETIMEDOUT)
++		}
++	}
++}
++
++func (d *linuxDevice) unlock() error { return d.calls.flock(d.fd, unix.LOCK_UN) }
++
+ func (d *linuxDevice) ioctl(command uintptr, frame []byte) error {
+ 	return d.calls.ioctl(d.fd, command, frame)
+ }
+diff --git c/internal/sap/deviceaes/device_unsupported.go i/internal/sap/deviceaes/device_unsupported.go
+index 0a84e18b0d481fc24900678f002b048ba4561faf..8db36348364bec86559727f642ac3bea77780fd9 100644
+--- c/internal/sap/deviceaes/device_unsupported.go
++++ i/internal/sap/deviceaes/device_unsupported.go
+@@ -4,6 +4,8 @@ package deviceaes
+ 
+ import "errors"
+ 
++func ArbitrationCapability() string { return "unavailable" }
++
+ func openDevice(string) (device, error) {
+ 	return nil, errors.New("explicit device-AES provider requires Linux ARM64")
+ }
+diff --git c/internal/sap/deviceaes/dsb.go i/internal/sap/deviceaes/dsb.go
+index feb52d252b7cd08b1299f612747fdb1b0fb6a049..827a7677f788a945662a122235e25170b52850d9 100644
+--- c/internal/sap/deviceaes/dsb.go
++++ i/internal/sap/deviceaes/dsb.go
+@@ -31,21 +31,18 @@ func (c *Controller) Capability() (Capability, error) {
+ 		return Capability{}, errors.New("device-AES controller is unavailable")
+ 	}
+ 	s := c.session
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	if s.closed || s.failed {
+-		return Capability{}, errors.New("device-AES session cannot accept work")
+-	}
+-	fail := func(err error) (Capability, error) { s.failed = true; return Capability{}, err }
+-	var frame [capabilitySize]byte
+-	if err := s.device.ioctl(ioctlCapability, frame[:]); err != nil {
+-		return fail(fmt.Errorf("explicit device-AES CAPABILITY failed: %w", err))
+-	}
+-	abi, available := binary.LittleEndian.Uint32(frame[:4]), binary.LittleEndian.Uint32(frame[4:8])
+-	if abi != ABIVersion || available > 1 || !allZero(frame[12:]) {
+-		return fail(errors.New("device-AES CAPABILITY violated the frozen ABI"))
+-	}
+-	return Capability{ABIVersion: abi, DSBAvailable: available == 1, Readiness: binary.LittleEndian.Uint32(frame[8:12])}, nil
++	return transaction(s, func() (Capability, error) {
++		fail := func(err error) (Capability, error) { s.failed = true; return Capability{}, err }
++		var frame [capabilitySize]byte
++		if err := s.device.ioctl(ioctlCapability, frame[:]); err != nil {
++			return fail(fmt.Errorf("explicit device-AES CAPABILITY failed: %w", err))
++		}
++		abi, available := binary.LittleEndian.Uint32(frame[:4]), binary.LittleEndian.Uint32(frame[4:8])
++		if abi != ABIVersion || available > 1 || !allZero(frame[12:]) {
++			return fail(errors.New("device-AES CAPABILITY violated the frozen ABI"))
++		}
++		return Capability{ABIVersion: abi, DSBAvailable: available == 1, Readiness: binary.LittleEndian.Uint32(frame[8:12])}, nil
++	})
+ }
+ 
+ // TransformDeviceAESDSB is an explicit, distinct operation. It does not run
+@@ -62,46 +59,43 @@ func (p *Provider) TransformDeviceAESDSB(request machine.DeviceAESDSBRequest) (m
+ 		return machine.DeviceAESResult{}, errors.New("device-AES provider is unavailable")
+ 	}
+ 	s := p.session
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	if s.closed || s.failed {
+-		return machine.DeviceAESResult{}, errors.New("device-AES session cannot accept work")
+-	}
+-	fail := func(err error) (machine.DeviceAESResult, error) {
+-		s.failed = true
+-		return machine.DeviceAESResult{}, err
+-	}
+-	before, err := s.statusLocked()
+-	if err != nil {
+-		return fail(err)
+-	}
+-	if err := requireReady(before); err != nil {
+-		return fail(err)
+-	}
+-	var frame [dsbDecryptSize]byte
+-	defer clear(frame[:])
+-	binary.LittleEndian.PutUint32(frame[:4], ABIVersion)
+-	copy(frame[8:40], request.DSBContext[:])
+-	copy(frame[40:56], request.KeyField[:])
+-	copy(frame[56:72], request.IV[:])
+-	copy(frame[72:88], request.Input[:])
+-	var immutable [dsbOutputOffset]byte
+-	defer clear(immutable[:])
+-	copy(immutable[:], frame[:dsbOutputOffset])
+-	if err := s.device.ioctl(ioctlDSBDecrypt, frame[:]); err != nil {
+-		// Even EFAULT may follow a completed result's partial copy_to_user.
+-		// Discard the whole private frame and never retry any errno.
+-		return fail(fmt.Errorf("device-AES DSB_DECRYPT failed: %w", err))
+-	}
+-	if !bytes.Equal(frame[:dsbOutputOffset], immutable[:]) {
+-		return fail(errors.New("device-AES DSB_DECRYPT changed immutable fields"))
+-	}
+-	after, err := s.statusLocked()
+-	if err != nil {
+-		return fail(err)
+-	}
+-	if err := requireReady(after); err != nil {
+-		return fail(err)
+-	}
+-	return machine.DeviceAESResult{Completed: true, Output: bytes.Clone(frame[72:88]), IV: bytes.Clone(frame[56:72])}, nil
++	return transaction(s, func() (machine.DeviceAESResult, error) {
++		fail := func(err error) (machine.DeviceAESResult, error) {
++			s.failed = true
++			return machine.DeviceAESResult{}, err
++		}
++		before, err := s.statusLocked()
++		if err != nil {
++			return fail(err)
++		}
++		if err := requireReady(before); err != nil {
++			return fail(err)
++		}
++		var frame [dsbDecryptSize]byte
++		defer clear(frame[:])
++		binary.LittleEndian.PutUint32(frame[:4], ABIVersion)
++		copy(frame[8:40], request.DSBContext[:])
++		copy(frame[40:56], request.KeyField[:])
++		copy(frame[56:72], request.IV[:])
++		copy(frame[72:88], request.Input[:])
++		var immutable [dsbOutputOffset]byte
++		defer clear(immutable[:])
++		copy(immutable[:], frame[:dsbOutputOffset])
++		if err := s.device.ioctl(ioctlDSBDecrypt, frame[:]); err != nil {
++			// Even EFAULT may follow a completed result's partial copy_to_user.
++			// Discard the whole private frame and never retry any errno.
++			return fail(fmt.Errorf("device-AES DSB_DECRYPT failed: %w", err))
++		}
++		if !bytes.Equal(frame[:dsbOutputOffset], immutable[:]) {
++			return fail(errors.New("device-AES DSB_DECRYPT changed immutable fields"))
++		}
++		after, err := s.statusLocked()
++		if err != nil {
++			return fail(err)
++		}
++		if err := requireReady(after); err != nil {
++			return fail(err)
++		}
++		return machine.DeviceAESResult{Completed: true, Output: bytes.Clone(frame[72:88]), IV: bytes.Clone(frame[56:72])}, nil
++	})
+ }
+diff --git c/internal/sap/deviceaes/transaction_linux_arm64_test.go i/internal/sap/deviceaes/transaction_linux_arm64_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbea3bdd386d8ce5784bb76137454c949606e07d
+--- /dev/null
++++ i/internal/sap/deviceaes/transaction_linux_arm64_test.go
+@@ -0,0 +1,261 @@
++//go:build linux && arm64
++
++package deviceaes
++
++import (
++	"bufio"
++	"errors"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++func TestFlockWaitIsBoundedBeforeAnyIoctl(t *testing.T) {
++	for _, lockErr := range []error{unix.EWOULDBLOCK, unix.EOPNOTSUPP, unix.EINTR} {
++		now := time.Unix(0, 0)
++		attempts, closes := 0, 0
++		calls := realLinuxCalls()
++		calls.now = func() time.Time { return now }
++		calls.sleep = func(d time.Duration) { now = now.Add(d) }
++		calls.flock = func(fd, operation int) error {
++			if fd != 42 || operation != unix.LOCK_EX|unix.LOCK_NB {
++				t.Fatal("unexpected flock operation")
++			}
++			attempts++
++			return lockErr
++		}
++		calls.ioctl = func(int, uintptr, []byte) error { t.Fatal("lock wait issued an ioctl"); return nil }
++		calls.close = func(int) error { closes++; return nil }
++		p, err := newProvider(&linuxDevice{fd: 42, calls: calls})
++		want := lockErr
++		if errors.Is(lockErr, unix.EWOULDBLOCK) {
++			want = unix.ETIMEDOUT
++		}
++		if p != nil || !errors.Is(err, want) || closes != 1 {
++			t.Fatal("lock failure accepted or lost")
++		}
++		if errors.Is(lockErr, unix.EWOULDBLOCK) {
++			if now.Sub(time.Unix(0, 0)) != transactionLockWait || attempts < 2 {
++				t.Fatal("unbounded or absent contention wait")
++			}
++		} else if attempts != 1 {
++			t.Fatal("non-contention flock error retried")
++		}
++	}
++}
++
++// Synthetic files supply a common inode for real flock tests. The ioctl is
++// always replaced; production openDevice still accepts only the validated
++// fixed misc character device. These tests never open a hardware device.
++func TestFlockProcessHelper(t *testing.T) {
++	mode := os.Getenv("OMVM_FLOCK_TEST_MODE")
++	if mode == "" {
++		return
++	}
++	f, err := os.OpenFile(os.Getenv("OMVM_FLOCK_TEST_INODE"), os.O_RDWR, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer f.Close()
++	if mode == "hold" {
++		if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
++			t.Fatal(err)
++		}
++		fmt.Println("held")
++		var b [1]byte
++		_, _ = os.Stdin.Read(b[:])
++		return
++	}
++	log, err := os.OpenFile(os.Getenv("OMVM_FLOCK_TEST_LOG"), os.O_WRONLY|os.O_APPEND, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer log.Close()
++	id := os.Getenv("OMVM_FLOCK_TEST_ID")
++	record := func(event string) {
++		if _, err := fmt.Fprintln(log, id+" "+event); err != nil {
++			t.Fatal(err)
++		}
++	}
++	calls := realLinuxCalls()
++	calls.close = func(int) error { return nil } // f owns the synthetic descriptor.
++	calls.flock = func(fd, operation int) error {
++		if operation == unix.LOCK_UN {
++			record("unlock")
++		}
++		err := unix.Flock(fd, operation)
++		if err == nil && operation != unix.LOCK_UN {
++			record("lock")
++		}
++		return err
++	}
++	calls.ioctl = func(_ int, command uintptr, frame []byte) error {
++		if command == ioctlStatus {
++			record("status")
++			putStatus(frame, Ready)
++		} else if command == ioctlTransform || command == ioctlDSBDecrypt {
++			record("work")
++			// Give the competing process an opportunity to seek ownership.
++			time.Sleep(time.Millisecond)
++		} else {
++			t.Fatal("unexpected synthetic ioctl")
++		}
++		return nil
++	}
++	fmt.Println("ready")
++	p, err := newProvider(&linuxDevice{fd: int(f.Fd()), calls: calls})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer p.Close()
++	for i := 0; i < 5; i++ {
++		if _, err := p.TransformDeviceAES(testRequest(true)); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := p.TransformDeviceAESDSB(dsbFixture()); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++func TestIndependentProcessesSerializeWholeTransactions(t *testing.T) {
++	dir := t.TempDir()
++	inode, logPath := filepath.Join(dir, "device-inode"), filepath.Join(dir, "events")
++	if err := os.WriteFile(inode, nil, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(logPath, nil, 0600); err != nil {
++		t.Fatal(err)
++	}
++	owner, err := os.OpenFile(inode, os.O_RDWR, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer owner.Close()
++	if err := unix.Flock(int(owner.Fd()), unix.LOCK_EX); err != nil {
++		t.Fatal(err)
++	}
++	var children []*exec.Cmd
++	for _, id := range []string{"one", "two"} {
++		cmd := exec.Command(os.Args[0], "-test.run=^TestFlockProcessHelper$")
++		cmd.Env = append(os.Environ(), "OMVM_FLOCK_TEST_MODE=work", "OMVM_FLOCK_TEST_INODE="+inode,
++			"OMVM_FLOCK_TEST_LOG="+logPath, "OMVM_FLOCK_TEST_ID="+id)
++		stdout, err := cmd.StdoutPipe()
++		if err != nil {
++			t.Fatal(err)
++		}
++		cmd.Stderr = os.Stderr
++		if err := cmd.Start(); err != nil {
++			t.Fatal(err)
++		}
++		children = append(children, cmd)
++		t.Cleanup(func() { _ = cmd.Process.Kill() })
++		scanner := bufio.NewScanner(stdout)
++		if !scanner.Scan() || scanner.Text() != "ready" {
++			t.Fatal("child failed before arbitration")
++		}
++	}
++	if data, err := os.ReadFile(logPath); err != nil || len(data) != 0 {
++		t.Fatal("child operated before cross-process lock release")
++	}
++	if err := unix.Flock(int(owner.Fd()), unix.LOCK_UN); err != nil {
++		t.Fatal(err)
++	}
++	for _, cmd := range children {
++		if err := cmd.Wait(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	data, err := os.ReadFile(logPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	active := ""
++	var sequence []string
++	counts := map[string]int{}
++	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
++		fields := strings.Fields(line)
++		if len(fields) != 2 {
++			t.Fatal("malformed synthetic event")
++		}
++		id, event := fields[0], fields[1]
++		if event == "lock" {
++			if active != "" {
++				t.Fatal("independent process transactions overlapped")
++			}
++			active, sequence = id, nil
++		} else {
++			if active != id {
++				t.Fatal("ioctl escaped the owning process transaction")
++			}
++			if event == "unlock" {
++				joined := strings.Join(sequence, ",")
++				if joined != "status" && joined != "status,work,status" {
++					t.Fatalf("partial transaction: %s", joined)
++				}
++				counts[id]++
++				active = ""
++			} else {
++				sequence = append(sequence, event)
++			}
++		}
++	}
++	if active != "" || counts["one"] != 11 || counts["two"] != 11 {
++		t.Fatal("missing completed transactions")
++	}
++}
++
++func TestProcessDeathReleasesLockButDoesNotEstablishReady(t *testing.T) {
++	inode := filepath.Join(t.TempDir(), "device-inode")
++	if err := os.WriteFile(inode, nil, 0600); err != nil {
++		t.Fatal(err)
++	}
++	cmd := exec.Command(os.Args[0], "-test.run=^TestFlockProcessHelper$")
++	cmd.Env = append(os.Environ(), "OMVM_FLOCK_TEST_MODE=hold", "OMVM_FLOCK_TEST_INODE="+inode)
++	stdin, err := cmd.StdinPipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stdin.Close()
++	stdout, err := cmd.StdoutPipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = cmd.Process.Kill() })
++	scanner := bufio.NewScanner(stdout)
++	if !scanner.Scan() || scanner.Text() != "held" {
++		t.Fatal("child did not acquire lock")
++	}
++	if err := cmd.Process.Kill(); err != nil {
++		t.Fatal(err)
++	}
++	_ = cmd.Wait()
++	f, err := os.OpenFile(inode, os.O_RDWR, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer f.Close()
++	calls, statuses := realLinuxCalls(), 0
++	calls.close = func(int) error { return nil }
++	calls.ioctl = func(_ int, command uintptr, frame []byte) error {
++		if command != ioctlStatus {
++			t.Fatal("dead owner's lock authorized hardware work")
++		}
++		statuses++
++		putStatus(frame, Poisoned)
++		return nil
++	}
++	p, err := newProvider(&linuxDevice{fd: int(f.Fd()), calls: calls})
++	if p != nil || err == nil || statuses != 1 {
++		t.Fatal("lock release was mistaken for hardware recovery")
++	}
++}
+diff --git c/internal/sap/deviceaes/transaction_test.go i/internal/sap/deviceaes/transaction_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e55b25d9f156050bae2d4a7b313f087d34862b96
+--- /dev/null
++++ i/internal/sap/deviceaes/transaction_test.go
+@@ -0,0 +1,186 @@
++package deviceaes
++
++import (
++	"bytes"
++	"errors"
++	"reflect"
++	"syscall"
++	"testing"
++
++	"github.com/majd/ipatool/v2/internal/sap/machine"
++)
++
++func TestEveryProviderOperationOwnsTransaction(t *testing.T) {
++	var events []string
++	held := false
++	state := Ready
++	dev := &fakeDevice{
++		locking: func() error {
++			if held {
++				t.Fatal("nested device lock")
++			}
++			held = true
++			events = append(events, "lock")
++			return nil
++		},
++		unlocking: func() error {
++			if !held {
++				t.Fatal("unlock without ownership")
++			}
++			held = false
++			events = append(events, "unlock")
++			return nil
++		},
++		call: func(command uintptr, frame []byte) error {
++			if !held {
++				t.Fatal("ioctl outside transaction")
++			}
++			switch command {
++			case ioctlStatus:
++				events = append(events, "status")
++				putStatus(frame, state)
++			case ioctlTransform, ioctlDSBDecrypt:
++				events = append(events, "work")
++			case ioctlSelfTest:
++				events = append(events, "selftest")
++				state = SelfTestPassed
++			case ioctlInit:
++				events = append(events, "init")
++				state = Ready
++			case ioctlCapability:
++				events = append(events, "capability")
++				frame[0] = byte(ABIVersion)
++			default:
++				t.Fatal("unexpected ioctl")
++			}
++			return nil
++		},
++	}
++	check := func(want ...string) {
++		t.Helper()
++		if held || !reflect.DeepEqual(events, want) {
++			t.Fatalf("transaction events: %v, want %v", events, want)
++		}
++		events = nil
++	}
++	p, err := newProvider(dev)
++	if err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "status", "unlock")
++	if _, err := p.TransformDeviceAES(testRequest(true)); err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "status", "work", "status", "unlock")
++	if _, err := p.TransformDeviceAESDSB(dsbFixture()); err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "status", "work", "status", "unlock")
++	c := &Controller{session: p.session, readSeedFile: func(string) ([]byte, error) {
++		if !held {
++			t.Fatal("private seed read outside transaction")
++		}
++		return bytes.Repeat([]byte{1}, SeedBundleSize), nil
++	}}
++	if _, err := c.Status(); err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "status", "unlock")
++	if _, err := c.SelfTest(); err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "selftest", "status", "unlock")
++	if _, err := c.InitializeFromFile("synthetic"); err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "init", "status", "unlock")
++	if _, err := c.Capability(); err != nil {
++		t.Fatal(err)
++	}
++	check("lock", "capability", "unlock")
++}
++
++func TestTransactionUnlockFailureDiscardsAndWipesOutput(t *testing.T) {
++	output, iv := bytes.Repeat([]byte{3}, 16), bytes.Repeat([]byte{4}, 16)
++	locks, unlocks, calls := 0, 0, 0
++	s := &session{device: &fakeDevice{
++		locking:   func() error { locks++; return nil },
++		unlocking: func() error { unlocks++; return syscall.EIO },
++	}}
++	work := func() (machine.DeviceAESResult, error) {
++		calls++
++		return machine.DeviceAESResult{Completed: true, Output: output, IV: iv}, nil
++	}
++	result, err := transaction(s, work)
++	requireNoResult(t, result, err)
++	if !errors.Is(err, syscall.EIO) || !allZero(output) || !allZero(iv) {
++		t.Fatal("unlock failure retained completed bytes")
++	}
++	result, err = transaction(s, work)
++	requireNoResult(t, result, err)
++	if locks != 1 || unlocks != 1 || calls != 1 {
++		t.Fatal("failed transaction was retried")
++	}
++}
++
++func TestAdvisoryLockFailureDoesNotIssueAnIoctl(t *testing.T) {
++	for _, lockErr := range []error{syscall.ETIMEDOUT, syscall.EOPNOTSUPP, syscall.EINTR} {
++		closes, locks := 0, 0
++		dev := &fakeDevice{
++			locking:   func() error { locks++; return lockErr },
++			unlocking: func() error { t.Fatal("unowned lock released"); return nil },
++			call:      func(uintptr, []byte) error { t.Fatal("lock failure submitted an ioctl"); return nil },
++			closing:   func() error { closes++; return nil },
++		}
++		p, err := newProvider(dev)
++		if p != nil || !errors.Is(err, lockErr) || locks != 1 || closes != 1 {
++			t.Fatal("failed open retained or retried session")
++		}
++	}
++}
++
++func TestWorkBusyNeverRetriesAndPoisonedResultIsEmpty(t *testing.T) {
++	for _, dsb := range []bool{false, true} {
++		for _, busy := range []bool{false, true} {
++			workCalls, unlocks := 0, 0
++			dev := &fakeDevice{
++				unlocking: func() error { unlocks++; return nil },
++				call: func(command uintptr, frame []byte) error {
++					if command == ioctlStatus {
++						state := Ready
++						if workCalls > 0 {
++							state = Poisoned
++						}
++						putStatus(frame, state)
++						return nil
++					}
++					workCalls++
++					if busy {
++						return syscall.EBUSY
++					}
++					return nil
++				},
++			}
++			p, err := newProvider(dev)
++			if err != nil {
++				t.Fatal(err)
++			}
++			invoke := func() (machine.DeviceAESResult, error) {
++				if dsb {
++					return p.TransformDeviceAESDSB(dsbFixture())
++				}
++				return p.TransformDeviceAES(testRequest(true))
++			}
++			result, err := invoke()
++			requireNoResult(t, result, err)
++			if busy && !errors.Is(err, syscall.EBUSY) {
++				t.Fatal("work errno lost")
++			}
++			result, err = invoke()
++			requireNoResult(t, result, err)
++			if workCalls != 1 || unlocks != 2 {
++				t.Fatal("work retried or transaction not released")
++			}
++		}
++	}
++}
+diff --git c/tools/omvm-fairplay-linux/README.md i/tools/omvm-fairplay-linux/README.md
+index 1a0caabf9321e562287d67c08052f8d6dd86b922..85b60d2fc4d0b80aa417d9a881cadb1c775c36b5 100644
+--- c/tools/omvm-fairplay-linux/README.md
++++ i/tools/omvm-fairplay-linux/README.md
+@@ -189,6 +189,25 @@ before backend initialization and before/after each transform. It never performs
+ SELFTEST, loads seeds, initializes a device, discovers another node, or falls
+ back to another provider.
+ 
++Linux ARM64 clients serialize each complete provider transaction with `flock`
++on their independently opened, validated device descriptor. The local session
++mutex covers the same interval. Open/readiness, controller operations, and
++`STATUS`/transform/`STATUS` sequences all use this boundary. Advisory-lock
++contention waits at most two seconds before any ioctl is submitted; unsupported
++locking fails without a fallback. Work ioctls are never retried, including on
++`EBUSY`, which can also describe poisoned hardware. Unlock failure discards and
++clears any result and prevents further work on that client. The lock is never
++released by a userspace timeout while a synchronous ioctl is active. Process
++death releases its advisory lock, but the next client must still validate kernel
++READY/poison state. All participating clients must use this protocol; an older
++client does not become coordinated merely because another process holds a lock.
++
++`backend -print-capabilities` prints the compiled capability JSON and exits
++before accessing a device, cache, identifier or checkpoint. Linux ARM64 builds
++report `{"schema_version":1,"device_aes_arbitration":"transaction-flock-v1"}`.
++This establishes the compiled coordination protocol, not hardware/account
++acceptance. Each VM still needs its own helper process, identity and checkpoint.
++
+ The frozen ABI accepts purposes 0x899/0x89c, operations 0/1, AES-128, and one
+ 16–4096-byte block-aligned payload. Larger operations fail; they are not split
+ into guessed chunks. The client copies inline input and the 16-byte IV, preserves
+@@ -221,7 +240,8 @@ explicit `-action status`, `-action capability`, `-action selftest`, or
+ `-device /dev/omvm-uid1-provider`. Initialization additionally requires
+ `-seed-file PATH`: an explicit root-owned nonsymlink regular mode-0600 file,
+ exactly 32 bytes, matching the frozen pinned-bundle hash. The file supplies no
+-arbitrary key. The diagnostic prints cached status metadata and fixed errors,
++arbitrary key. `-print-capabilities` uses the same pure capability query as the
++backend and exits before opening the device or reading seeds. The diagnostic prints cached status metadata and fixed errors,
+ never seed, key, IV, or payload bytes. It does not perform a transform or chain
+ selftest/init automatically. Do not run hardware operations before the separate
+ kernel review and activation procedure is complete.
+diff --git c/tools/omvm-fairplay-linux/capabilities_test.go i/tools/omvm-fairplay-linux/capabilities_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..38c1343ae70c57adb5908669184c8c908143a069
+--- /dev/null
++++ i/tools/omvm-fairplay-linux/capabilities_test.go
+@@ -0,0 +1,51 @@
++package main
++
++import (
++	"encoding/json"
++	"flag"
++	"io"
++	"os"
++	"testing"
++
++	"github.com/majd/ipatool/v2/internal/sap/deviceaes"
++)
++
++func TestPrintCapabilitiesPrecedesAllRuntimeInputAccess(t *testing.T) {
++	oldFlags, oldArgs, oldStdout := flag.CommandLine, os.Args, os.Stdout
++	defer func() { flag.CommandLine, os.Args, os.Stdout = oldFlags, oldArgs, oldStdout }()
++	flag.CommandLine = flag.NewFlagSet("capabilities", flag.ContinueOnError)
++	// Every runtime path is unusable and the options are otherwise conflicting.
++	// The capability query must still exit before validation or state enrollment.
++	os.Args = []string{"backend", "-print-capabilities", "-initialize-state",
++		"-identifier-file", "/missing/identifier", "-state-file", "/missing/state",
++		"-device-aes", "/missing/device", "-device-aes-dsb", "-socket", "/missing/socket"}
++	t.Setenv("XDG_CACHE_HOME", "/missing/cache")
++	r, w, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer r.Close()
++	defer w.Close()
++	os.Stdout = w
++	if err := run(); err != nil {
++		t.Fatal(err)
++	}
++	if err := w.Close(); err != nil {
++		t.Fatal(err)
++	}
++	var got struct {
++		SchemaVersion int    `json:"schema_version"`
++		Arbitration   string `json:"device_aes_arbitration"`
++	}
++	decoder := json.NewDecoder(r)
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&got); err != nil {
++		t.Fatal(err)
++	}
++	if got.SchemaVersion != 1 || got.Arbitration != deviceaes.ArbitrationCapability() {
++		t.Fatal("capability differs from compiled client")
++	}
++	if err := decoder.Decode(&got); err != io.EOF {
++		t.Fatal("capability query emitted extra output")
++	}
++}
+diff --git c/tools/omvm-fairplay-linux/main.go i/tools/omvm-fairplay-linux/main.go
+index c853827f4e62017553078f58913fd87ee5e7016c..19e1bf16a628b1a06363b5ba6e5a4bb7f10a9efc 100644
+--- c/tools/omvm-fairplay-linux/main.go
++++ i/tools/omvm-fairplay-linux/main.go
+@@ -150,6 +150,7 @@ func serve(ctx context.Context, listener *net.UnixListener, b backend, timeout t
+ }
+ 
+ func run() error {
++	printCapabilities := flag.Bool("print-capabilities", false, "print compiled capabilities and exit without accessing runtime inputs")
+ 	socket := flag.String("socket", "", "private absolute Unix socket path")
+ 	synthetic := flag.Bool("diagnostic-synthetic", false, "explicit isolated test identity; never submit an account")
+ 	identifierFile := flag.String("identifier-file", "", "owned private 16-byte VM identifier file; experimental, not sign-in validated")
+@@ -159,6 +160,12 @@ func run() error {
+ 	deviceAESDSB := flag.Bool("device-aes-dsb", false, "explicit fixed one-block extended-descriptor decrypt; requires device-aes and v3 provider")
+ 	timeout := flag.Duration("timeout", 12*time.Second, "whole-request deadline, 1–12 seconds")
+ 	flag.Parse()
++	if *printCapabilities {
++		return json.NewEncoder(os.Stdout).Encode(struct {
++			SchemaVersion        int    `json:"schema_version"`
++			DeviceAESArbitration string `json:"device_aes_arbitration"`
++		}{1, deviceaes.ArbitrationCapability()})
++	}
+ 	if *initializeState {
+ 		if *identifierFile == "" || *stateFile == "" || *socket != "" || *synthetic || *deviceAESPath != "" || *deviceAESDSB || flag.NArg() != 0 {
+ 			return errors.New("state initialization requires only identifier-file and state-file")
+diff --git c/tools/omvm-uid1-diagnostic/main.go i/tools/omvm-uid1-diagnostic/main.go
+index 89b716210972ad725c51e119ae87a784aad1c886..714f2e92c1cc20de26f49d840aec55a8c684ef3d 100644
+--- c/tools/omvm-uid1-diagnostic/main.go
++++ i/tools/omvm-uid1-diagnostic/main.go
+@@ -12,10 +12,17 @@ import (
+ )
+ 
+ func run() error {
++	printCapabilities := flag.Bool("print-capabilities", false, "print compiled capabilities and exit without accessing device or seeds")
+ 	device := flag.String("device", "", "explicit /dev/omvm-uid1-provider path")
+ 	action := flag.String("action", "", "one explicit action: status, capability, selftest, or init")
+ 	seedFile := flag.String("seed-file", "", "private pinned 32-byte seed file; required only for init")
+ 	flag.Parse()
++	if *printCapabilities {
++		return json.NewEncoder(os.Stdout).Encode(struct {
++			SchemaVersion        int    `json:"schema_version"`
++			DeviceAESArbitration string `json:"device_aes_arbitration"`
++		}{1, deviceaes.ArbitrationCapability()})
++	}
+ 	if *device == "" || flag.NArg() != 0 || (*action != "status" && *action != "capability" && *action != "selftest" && *action != "init") || ((*action == "init") != (*seedFile != "")) {
+ 		return errors.New("require an explicit device/action and a seed file only for init")
+ 	}
+diff --git c/tools/omvm-uid1-diagnostic/main_test.go i/tools/omvm-uid1-diagnostic/main_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cff9d418b2c1a19e617af709afbfe4505acfd339
+--- /dev/null
++++ i/tools/omvm-uid1-diagnostic/main_test.go
+@@ -0,0 +1,48 @@
++package main
++
++import (
++	"encoding/json"
++	"flag"
++	"io"
++	"os"
++	"testing"
++
++	"github.com/majd/ipatool/v2/internal/sap/deviceaes"
++)
++
++func TestPrintCapabilitiesPrecedesDeviceAndSeedAccess(t *testing.T) {
++	oldFlags, oldArgs, oldStdout := flag.CommandLine, os.Args, os.Stdout
++	defer func() { flag.CommandLine, os.Args, os.Stdout = oldFlags, oldArgs, oldStdout }()
++	flag.CommandLine = flag.NewFlagSet("capabilities", flag.ContinueOnError)
++	// An invalid device and an init action must not open a node or read seeds.
++	os.Args = []string{"diagnostic", "-print-capabilities", "-device", "/missing/device",
++		"-action", "init", "-seed-file", "/missing/seeds"}
++	r, w, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer r.Close()
++	defer w.Close()
++	os.Stdout = w
++	if err := run(); err != nil {
++		t.Fatal(err)
++	}
++	if err := w.Close(); err != nil {
++		t.Fatal(err)
++	}
++	var got struct {
++		SchemaVersion int    `json:"schema_version"`
++		Arbitration   string `json:"device_aes_arbitration"`
++	}
++	decoder := json.NewDecoder(r)
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&got); err != nil {
++		t.Fatal(err)
++	}
++	if got.SchemaVersion != 1 || got.Arbitration != deviceaes.ArbitrationCapability() {
++		t.Fatal("capability differs from compiled client")
++	}
++	if err := decoder.Decode(&got); err != io.EOF {
++		t.Fatal("capability query emitted extra output")
++	}
++}
