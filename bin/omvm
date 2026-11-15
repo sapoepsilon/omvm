@@ -47,10 +47,12 @@ DATA="${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}"
 UPSTREAM="${OMVM_UPSTREAM:-$DATA/upstream}"
 IMAGES="${OMVM_IMAGES:-$DATA/images}"
 KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
-# The guest account omvm logs in as: OMVM_GUEST_USER, else the one saved in
-# ~/.config/omvm/gui.env (which services also read; `omvm setup` asks for it and
-# saves it there), and $IMAGES/vms/NAME/guest_user overrides both for one VM.
-# There is no built-in default: a guessed account name only fails later.
+# The guest account omvm logs in as (vm_user NAME): the VM's own guest_user file
+# ($IMAGES/vms/NAME/ or the run directory), else OMVM_GUEST_USER (environment or
+# ~/.config/omvm/gui.env, which services also read; `omvm setup` asks for it and
+# saves it there), else, for a VM that already exists from before any of this
+# was configured, the account upstream's create-account.sh made by default.
+# omvm writes guest_user for each VM it creates, so new VMs never guess.
 CFG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env"
 cfg_env() { sed -n "s/^$1=//p" "$CFG_FILE" 2>/dev/null | tail -1 || true; }
 cfg() { local v="${!1:-}"; [ -n "$v" ] || v="$(cfg_env "$1")"; echo "${v:-${2:-}}"; }  # VAR [DEFAULT]: env, gui.env, default
@@ -60,6 +62,7 @@ cfg_save() { # VAR VALUE: set VAR in gui.env, keeping every other line
     { grep -v "^$1=" "$CFG_FILE" || true; echo "$1=$2"; } > "$tmp" && mv "$tmp" "$CFG_FILE"
 }
 GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"
+LEGACY_GUEST_USER=aquarat   # upstream create-account.sh's default; existing VMs only
 OMVM_VM="${OMVM_VM:-$(cfg_env OMVM_VM)}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
@@ -84,6 +87,22 @@ need() { command -v "$1" >/dev/null || die "missing '$1' (sudo pacman -S --neede
 valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
 need_guest_user() {
     [ -n "$GUEST_USER" ] || die "no guest account configured: set OMVM_GUEST_USER=NAME in $CFG_FILE (or put NAME in $IMAGES/vms/VM/guest_user)"
+}
+vm_user() { # NAME -> its guest account (fails when there is none to be had)
+    local n="$1" f u
+    for f in "$IMAGES/vms/$n/guest_user" "$UPSTREAM/artifacts/runs/$n/guest_user"; do
+        [ -s "$f" ] || continue
+        u="$(head -1 "$f" | tr -d '[:space:]')"
+        [[ $u =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,31}$ ]] || die "$f: invalid account name"
+        echo "$u"; return 0
+    done
+    [ -n "$GUEST_USER" ] && { echo "$GUEST_USER"; return 0; }
+    # An existing VM with nothing configured predates the setting.
+    { [ -d "$IMAGES/vms/$n" ] || [ -d "$UPSTREAM/artifacts/runs/$n" ]; } && { echo "$LEGACY_GUEST_USER"; return 0; }
+    return 1
+}
+need_vm_user() { # NAME -> its guest account, or stop with the fix
+    vm_user "$1" || die "no guest account for $1: set OMVM_GUEST_USER=NAME in $CFG_FILE (or put NAME in $IMAGES/vms/$1/guest_user)"
 }
 need_name() { valid_name "${1:-}" || die "invalid VM name '${1:-}' (letters, digits, '_' and '-', at most 32)"; }
 valid_busport() { [[ $1 =~ ^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$ ]]; }   # a USB device's sysfs name, e.g. 3-1.2
@@ -384,7 +403,10 @@ cmd_setup() {
     local src="$IMAGES/$BUNDLE-restore" v0="$IMAGES/$BUNDLE-v0" v1="$IMAGES/$BUNDLE-v1" v2="$IMAGES/$BUNDLE-v2"
     test -d "$src" || die "no restored bundle: run 'omvm ingest' first"
     test -e /sys/module/kvm/parameters/emulate_nisv_ldst || die "boot the patched kernel first (omvm doctor)"
-    if [ -z "$GUEST_USER" ]; then
+    if [ -z "$GUEST_USER" ] && test -d "$v0"; then
+        GUEST_USER="$LEGACY_GUEST_USER"   # made before the account was configurable
+        warn "no OMVM_GUEST_USER: assuming the existing image's account is '$GUEST_USER'"
+    elif [ -z "$GUEST_USER" ]; then
         [ -t 0 ] && command -v gum >/dev/null || die "set OMVM_GUEST_USER=NAME (the macOS account omvm creates and logs in as)"
         GUEST_USER="$(gum input --prompt "macOS account name: " --placeholder "$(id -un)" --value "$(id -un)")"
         [[ $GUEST_USER =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || die "invalid account name '$GUEST_USER'"
@@ -431,18 +453,20 @@ cmd_start() {
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-run.sh start "$name")
     echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
+    echo "$GUEST_USER" > "$UPSTREAM/artifacts/runs/$name/guest_user"
     for _ in $(seq 1 90); do timeout 5 ssh -n "${ssh_opts[@]}" -p "$port" "$GUEST_USER@127.0.0.1" true 2>/dev/null && break; sleep 2; done
     ok "$name is up: omvm ssh $name   (stop: omvm stop $name; changes are discarded on stop)"
 }
 
-cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; need_name "$n"; need_guest_user; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" "$@"; }
+cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}" u; need_name "$n"; u="$(need_vm_user "$n")"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$u@127.0.0.1" "$@"; }
 
 cmd_stop() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power stop "$1"; return; fi
     local n="${1:?usage: omvm stop NAME}"; need_name "$n"
     local run="$UPSTREAM/artifacts/runs/$n"
     clip_stop "$n"
-    [ -z "$GUEST_USER" ] || ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+    local u; u="$(vm_user "$n")" || u=""
+    [ -z "$u" ] || ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$u@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
     (cd "$UPSTREAM" && scripts/vm-run.sh quit "$n") >/dev/null 2>&1 || true
     rm -rf "$run"; ok "stopped $n"
@@ -544,8 +568,9 @@ run_dir() {
 }
 
 follow_start() {
-    [ "${OMVM_DISPLAY_FOLLOW:-1}" = 1 ] && [ -n "$GUEST_USER" ] || return 0
-    local n="$1" run port; run="$(run_dir "$1")"; port="$(port_of "$1")"
+    local n="$1" run port u
+    [ "${OMVM_DISPLAY_FOLLOW:-1}" = 1 ] && u="$(vm_user "$n")" || return 0
+    run="$(run_dir "$1")"; port="$(port_of "$1")"
     setsid nohup bash -c '
         ssh=(ssh "${@:4}" -p "$1" "$3@127.0.0.1")
         for _ in $(seq 120); do "${ssh[@]}" true 2>/dev/null && break; sleep 5; done
@@ -555,18 +580,18 @@ follow_start() {
               mv ~/Library/omvm/omvm-display-follow.swift.new ~/Library/omvm/omvm-display-follow.swift; }" \
             < "$2/omvm-display-follow.swift" &&
         "${ssh[@]}" bash -s < "$2/omvm-display-follow.sh"
-    ' _ "$port" "$SHARE" "$GUEST_USER" "${ssh_opts[@]}" >"$run/logs/display-follow.log" 2>&1 </dev/null &
+    ' _ "$port" "$SHARE" "$u" "${ssh_opts[@]}" >"$run/logs/display-follow.log" 2>&1 </dev/null &
 }
 
 # Two-way text clipboard with the host (Wayland), over SSH; runs until the VM stops.
 clip_start() {
     local n="$1" run; run="$(run_dir "$1")"
     command -v wl-paste >/dev/null || { warn "no wl-clipboard: clipboard sharing off"; return 0; }
-    [ -n "$GUEST_USER" ] || { warn "no guest account configured (OMVM_GUEST_USER): clipboard sharing off"; return 0; }
+    local u; u="$(vm_user "$n")" || { warn "no guest account configured (OMVM_GUEST_USER): clipboard sharing off"; return 0; }
     clip_stop "$n"
     [ -n "${WAYLAND_DISPLAY:-}" ] || { WAYLAND_DISPLAY="$(wl_display)" && export WAYLAND_DISPLAY; } ||
         { warn "no Wayland session: clipboard sharing off"; return 0; }
-    setsid nohup python3 "$SHARE/omvm-clip.py" "$(port_of "$n")" "$KEY" "$GUEST_USER" >"$run/logs/clip.log" 2>&1 </dev/null &
+    setsid nohup python3 "$SHARE/omvm-clip.py" "$(port_of "$n")" "$KEY" "$u" >"$run/logs/clip.log" 2>&1 </dev/null &
     echo $! > "$run/clip.pid"
 }
 clip_stop() {
@@ -618,6 +643,7 @@ cmd_virt() {
     if [ ! -f "$dir/disk.img" ]; then
         mkdir -p "$dir"
         for f in disk.img aux.img.trimmed vm.json; do cp --reflink=auto "$img/guest/$f" "$dir/$f"; chmod u+w "$dir/$f"; done
+        [ -z "$GUEST_USER" ] || [ -e "$dir/guest_user" ] || echo "$GUEST_USER" > "$dir/guest_user"
         ok "$name: disk cloned from $(basename "$img")"
     fi
     # What the current definition (if any) has, to carry over on a redefine.
@@ -710,10 +736,17 @@ virt_rm() { # NAME YES(0|1)
             echo "Removal cancelled by user"; exit 1
         fi
     fi
-    # The watchdog would start it again within a minute.
-    systemctl --user disable --now "omvm-vm@$n.timer" "omvm-vm@$n.service" >/dev/null 2>&1 || true
+    # The watchdog would start it again within a minute: hold it off, and only
+    # disable it once the guest is really off.
+    local watchdog=0
+    systemctl --user is-active -q "omvm-vm@$n.timer" 2>/dev/null && watchdog=1
+    systemctl --user stop "omvm-vm@$n.timer" "omvm-vm@$n.service" >/dev/null 2>&1 || true
     [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = paused ] && "${VIRSH[@]}" resume "$n" >/dev/null  # paused guests can't shut down
-    vm_shutdown "$n"
+    if ! vm_try_shutdown "$n"; then
+        [ "$watchdog" = 0 ] || systemctl --user start "omvm-vm@$n.timer" >/dev/null 2>&1 || true
+        die "$n is still running after 4 min: nothing removed$([ "$watchdog" = 0 ] || echo ", watchdog back on") (shut macOS down, then retry)"
+    fi
+    systemctl --user disable --now "omvm-vm@$n.timer" "omvm-vm@$n.service" >/dev/null 2>&1 || true
     "${VIRSH[@]}" undefine "$n" >/dev/null && ok "removed $n from libvirt (disk kept in $IMAGES/vms/$n)"
 }
 
@@ -869,7 +902,11 @@ define_mode() { # NAME local|remote
 }
 
 vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
-    local n="$1" i
+    vm_try_shutdown "$1" || die "$1 still running after 4 min (force it with: virsh -c qemu:///session destroy $1)"
+}
+vm_try_shutdown() { # NAME: the same, but returns 1 when the guest is still up
+    local n="$1" i u
+    u="$(vm_user "$n")" || u=""
     vm_on() { case "$("${VIRSH[@]}" domstate "$1" 2>&1)" in "shut off"|crashed) return 1 ;; esac; }
     vm_on "$n" || return 0
     say "shutting $n down"
@@ -877,12 +914,12 @@ vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
     for i in $(seq 1 120); do
         vm_on "$n" || { ok "$n is off ($((2 * i - 2))s)"; return 0; }
         # vmapple ignores libvirt's power button: ask macOS itself after 10 s
-        if [ "$i" = 6 ] && [ -n "$GUEST_USER" ]; then
-            ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+        if [ "$i" = 6 ] && [ -n "$u" ]; then
+            ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$u@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
         fi
         sleep 2
     done
-    die "$n still running after 4 min (force it with: virsh -c qemu:///session destroy $n)"
+    return 1
 }
 
 cmd_mode() {
@@ -1015,9 +1052,7 @@ usb_unaccess() { # BUS-PORT: drop the ACL usb_access granted, if it did
     priv usb_revoke "$1" || true; rm -f "$USB_GRANTS/$1"
 }
 usb_guest() { # VM CMD...: run in the guest (its guest_user, its SSH port)
-    local n="$1" u="$GUEST_USER"; shift
-    [ -f "$IMAGES/vms/$n/guest_user" ] && u="$(cat "$IMAGES/vms/$n/guest_user")"
-    [ -n "$u" ] || need_guest_user
+    local n="$1" u; u="$(need_vm_user "$1")"; shift
     ssh "${ssh_opts[@]}" -o ConnectTimeout=10 -p "$(port_of "$n")" "$u@127.0.0.1" "$@"
 }
 usb_ios_state() { # VM -> per wired iOS device: PAIRING-STATE UDID MODEL IOS NAME (CoreDevice's view)
@@ -1182,8 +1217,6 @@ cmd_usb() {
 cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
 cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
 
-# Per-VM guest account: IMAGES/vms/NAME/guest_user overrides OMVM_GUEST_USER.
-case "${1:-}" in ssh|clip|res|stop|virt-hook|show|gui|start) valid_name "${2:-}" && [ -f "$IMAGES/vms/$2/guest_user" ] && GUEST_USER="$(cat "$IMAGES/vms/$2/guest_user")" ;; esac
 case "${1:-help}" in
 __priv)
     ((EUID == 0)) || die "omvm __priv must run as root"
