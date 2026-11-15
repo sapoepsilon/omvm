@@ -2,14 +2,40 @@
 pkgname=omvm-git
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Run macOS guest VMs under KVM on Omarchy (Apple Silicon); ships no Apple software"
-arch=('any')
+pkgdesc="Run macOS guest VMs under KVM on Omarchy (Apple Silicon M1/M2); ships no Apple software"
+# The guests run under KVM on the host's own Apple Silicon CPU, so aarch64 only
+# (and only M1/M2 SoCs: omvm checks the device tree at run time).
+arch=('aarch64')
 url="https://github.com/sapoepsilon/omvm"
 license=('GPL-2.0-or-later')
-depends=('bash' 'git' 'python' 'openssh' 'gdb' 'socat' 'zstd' 'exfatprogs' 'qemu-img')
+depends=(
+  'bash' 'coreutils' 'util-linux' 'iproute2' 'acl' 'systemd' 'polkit'  # setsid/lsblk, ss, setfacl, systemd-run, pkexec
+  'git' 'openssh' 'python' 'jq' 'gum'
+  'libvirt'                    # qemu:///session domains (omvm virt), virsh
+  'qemu-img' 'gdb' 'socat' 'zstd' 'exfatprogs'   # upstream's image scripts; ingest mounts VMXFER (exFAT)
+  'libusb'                     # usb-apple-mode.py (iPhone USB mode switch)
+  'vulkan-icd-loader' 'vulkan-driver'   # the paravirtual GPU renders through the host's Vulkan (Asahi) driver
+  'tigervnc'                   # vncviewer for remote-mode VMs (omvm show)
+  'wl-clipboard'               # clipboard sharing
+  'hyprland'                   # hyprctl: screen size, focusing the VM window
+)
+optdepends=(
+  'virt-manager: start, stop and view the VMs in a GUI'
+  'glib2: gsettings, to add the user session to virt-manager'
+  'python-gobject: omvm-gui'
+  'gtk4: omvm-gui'
+  'libadwaita: omvm-gui'
+  'pipewire-audio: guest sound and the "tap Trust" alert'
+  'wireplumber: wpctl, volume for the "tap Trust" alert'
+  'libnotify: desktop notifications'
+  'usbutils: lsusb in omvm-gui'
+  'sunshine: omvm remote (Moonlight streaming)'
+  'base-devel: omvm kernel build'
+)
 makedepends=('git')
 provides=('omvm')
 conflicts=('omvm')
+backup=('etc/libvirt/hooks/qemu.d/50-omvm')
 source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')
 
@@ -20,10 +46,39 @@ pkgver() {
 
 package() {
   cd "$pkgname"
-  install -Dm755 bin/omvm "$pkgdir/usr/lib/omvm/bin/omvm"
-  install -Dm644 -t "$pkgdir/usr/lib/omvm/share" share/*.sh
+
+  # Commands. bin/omvm finds its share/ directory beside its real path, and the
+  # privileged re-exec (omvm __priv) only ever elevates /usr/lib/omvm/bin/omvm.
+  install -Dm755 -t "$pkgdir/usr/lib/omvm/bin" bin/omvm bin/omvm-gui bin/omac
   install -d "$pkgdir/usr/bin"
-  ln -s /usr/lib/omvm/bin/omvm "$pkgdir/usr/bin/omvm"
-  install -Dm644 -t "$pkgdir/usr/share/doc/omvm" README.md AGENTS.md
+  local cmd
+  for cmd in omvm omvm-gui omac; do
+    ln -s "/usr/lib/omvm/bin/$cmd" "$pkgdir/usr/bin/$cmd"
+  done
+
+  # Everything bin/* reads from share/: the guest-side scripts and Swift
+  # sources, the libvirt XML generators, clipboard/USB/VNC helpers, the Hyprland
+  # bindings, launcher entry, streaming host, the opt-in Apple helpers and their
+  # units, and the omac/bench/latency/ios-hello tools. Modes as in git.
+  cp -r --no-preserve=ownership share "$pkgdir/usr/lib/omvm/share"
+  find "$pkgdir/usr/lib/omvm/share" -type d -exec chmod 755 {} +
+  find "$pkgdir/usr/lib/omvm/share" -type f ! -perm -u+x -exec chmod 644 {} +
+  find "$pkgdir/usr/lib/omvm/share" -type f -perm -u+x -exec chmod 755 {} +
+
+  # libvirt: forwards QEMU events to the user's own hook. A qemu.d script, so
+  # any /etc/libvirt/hooks/qemu the host has stays as it is.
+  install -Dm755 packaging/libvirt/50-omvm "$pkgdir/etc/libvirt/hooks/qemu.d/50-omvm"
+
+  # Static udev rules (omvm never writes /etc/udev at run time), the power
+  # change helper they run, its user unit, and the omvm group.
+  install -Dm644 -t "$pkgdir/usr/lib/udev/rules.d" \
+    packaging/udev/70-omvm-apple-usb.rules packaging/udev/90-omvm-power.rules
+  install -Dm755 packaging/omvm-power-changed "$pkgdir/usr/lib/omvm/omvm-power-changed"
+  install -Dm644 packaging/systemd/omvm-power.service "$pkgdir/usr/lib/systemd/user/omvm-power.service"
+  install -Dm644 packaging/sysusers-omvm.conf "$pkgdir/usr/lib/sysusers.d/omvm.conf"
+
+  install -Dm644 -t "$pkgdir/usr/share/doc/omvm" README.md AGENTS.md LICENSING.md
+  cp -r --no-preserve=ownership docs "$pkgdir/usr/share/doc/omvm/docs"
+  find "$pkgdir/usr/share/doc/omvm/docs" -type d -exec chmod 755 {} + -o -type f -exec chmod 644 {} +
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
