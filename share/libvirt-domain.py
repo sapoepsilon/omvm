@@ -58,14 +58,29 @@ for prop, fname in (("serial", "serial"), ("mlb", "mlb")):
         if value:
             identity_args += f",{prop}={value}"
 
+# These are the VM's only copy of its disks, so no cache=unsafe here (that one
+# drops guest flushes and belongs to throwaway vm-run overlays): writeback
+# honours the guest's flushes. OMVM_DISK_CACHE overrides it (none, writethrough,
+# directsync; unsafe only if you accept losing the disk on a host crash).
+cache = os.environ.get("OMVM_DISK_CACHE", "writeback")
+if cache not in ("writeback", "none", "writethrough", "directsync", "unsafe"):
+    sys.exit(f"libvirt-domain.py: OMVM_DISK_CACHE={cache!r} is not a QEMU cache mode")
+# vmapple opens each image twice: once as a pflash unit (the boot path and the
+# backdoor disk interface read it there) and once behind virtio-blk. Two opens
+# of one file in one QEMU conflict on QEMU's image locks, so locking stays off
+# on the pflash opens only. The virtio-blk opens keep locking, which stops a
+# second QEMU or a qemu-img from writing a disk this VM has open.
+# OMVM_DISK_LOCKING=0 turns it off there too (the behaviour before 2026-11).
+lock = "" if os.environ.get("OMVM_DISK_LOCKING", "1") != "0" else ",file.locking=off"
+apple_machine = ",identity=on"
 args = [
-    "-machine", f"uuid={ecid},aux-ram-share=on,identity=on{identity_args}",
+    "-machine", f"uuid={ecid},aux-ram-share=on{apple_machine}{identity_args}",
     "-L", f"{qdir}/qemu-bundle/usr/local/share/qemu",
     "-drive", f"if=pflash,format=raw,file.filename={aux},file.locking=off",
     "-drive", f"if=pflash,format=raw,file.filename={disk},file.locking=off",
-    "-drive", f"if=none,format=raw,file.filename={aux},file.locking=off,cache=unsafe,id=aux",
+    "-drive", f"if=none,format=raw,file.filename={aux}{lock},cache={cache},id=aux",
     "-device", f"vmapple-virtio-blk-pci,variant=aux,drive=aux,share-rw=on{blk}",
-    "-drive", f"if=none,format=raw,file.filename={disk},file.locking=off,cache=unsafe,id=root",
+    "-drive", f"if=none,format=raw,file.filename={disk}{lock},cache={cache},id=root",
     "-device", f"vmapple-virtio-blk-pci,variant=root,drive=root,share-rw=on{blk}",
     "-netdev", f"user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
     "-device", f"virtio-net-pci,netdev=net0,mac={mac}{virtio_asc}",
