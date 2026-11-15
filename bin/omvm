@@ -6,7 +6,7 @@
 #
 #   omvm helpers status NAME | install-hook  Linux Apple Account helper readiness
 #   omvm doctor                 check this host
-#   omvm kernel build|install|default|revert
+#   omvm kernel build|install|default|revert  (default: interim, pins a locally built kernel)
 #   omvm qemu build             build the vmapple QEMU fork
 #   omvm macos-step             stage the one-time macOS script on the ESP
 #   omvm ingest                 import the VM restored in macOS (VMXFER)
@@ -87,6 +87,36 @@ need_guest_user() {
 }
 need_name() { valid_name "${1:-}" || die "invalid VM name '${1:-}' (letters, digits, '_' and '-', at most 32)"; }
 valid_busport() { [[ $1 =~ ^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$ ]]; }   # a USB device's sysfs name, e.g. 3-1.2
+
+# ---------------------------------------------------------------- supported hardware
+# macOS guests run under KVM on the vmapple machine with omvm's KVM patches,
+# which are made and tested for the M1 and M2 families only: t8103 (M1),
+# t6000/t6001/t6002 (M1 Pro/Max/Ultra), t8112 (M2), t6020/t6021/t6022 (M2
+# Pro/Max/Ultra). Matched against the device tree's top-level compatible strings
+# like omarchy-hw-match-device-tree (which is used when present).
+# OMVM_UNSUPPORTED_HW=1 goes ahead anyway, for porting work.
+OMVM_SOCS=(apple,t8103 apple,t6000 apple,t6001 apple,t6002 apple,t8112 apple,t6020 apple,t6021 apple,t6022)
+hw_supported() {
+    if command -v omarchy-hw-match-device-tree >/dev/null; then
+        omarchy-hw-match-device-tree "${OMVM_SOCS[@]}"; return
+    fi
+    local f src="" entry wanted LC_ALL=C
+    for f in /proc/device-tree/compatible /sys/firmware/devicetree/base/compatible; do
+        [ -z "$src" ] && [ -r "$f" ] && src="$f"
+    done
+    [ -n "$src" ] || return 1
+    while IFS= read -r -d '' entry; do
+        for wanted in "${OMVM_SOCS[@]}"; do
+            [[ ${entry,,} == "$wanted" ]] && return 0
+        done
+    done < "$src"
+    return 1
+}
+need_hw() {
+    hw_supported && return 0
+    if [ "${OMVM_UNSUPPORTED_HW:-}" = 1 ]; then warn "not an M1/M2 Mac: going ahead (OMVM_UNSUPPORTED_HW=1)"; return 0; fi
+    die "omvm needs an Apple M1 or M2 Mac running Omarchy (macOS guests run under KVM on the vmapple machine)"
+}
 
 # ---------------------------------------------------------------- privileged actions
 # What omvm needs root for at run time (CPU governor, access to one USB device)
@@ -195,8 +225,11 @@ guest_env() {
 cmd_doctor() {
     local fails=0
     say "omvm $VERSION host check"
-    if [ "$(uname -m)" = aarch64 ] && grep -qs 'apple,arm-platform' /proc/device-tree/compatible; then
-        ok "Apple Silicon: $(tr '\0' ' ' </proc/device-tree/compatible | awk '{print $2}')"
+    local soc; soc="$(tr '\0' ' ' </proc/device-tree/compatible 2>/dev/null | awk '{print $2}')"
+    if [ "$(uname -m)" = aarch64 ] && hw_supported; then
+        ok "supported Apple Silicon: $soc"
+    elif [ "$(uname -m)" = aarch64 ] && grep -qs 'apple,arm-platform' /proc/device-tree/compatible; then
+        bad "Apple Silicon ${soc:-?} is not supported (M1 and M2 only)"; fails=1
     else bad "not an Apple Silicon Mac running Linux"; fails=1; fi
     if pacman -Q linux-aurora >/dev/null 2>&1; then ok "Omarchy kernel: $(pacman -Q linux-aurora)"
     else warn "linux-aurora not installed (non-Omarchy hosts: build the kernel yourself)"; fi
@@ -231,6 +264,7 @@ aurora_commit_for() {   # $1 = installed linux-aurora version, e.g. 7.2.11.auror
 }
 
 cmd_kernel() {
+    [ "${1:-}" = revert ] || need_hw
     case "${1:-}" in
     build)
         need makepkg base-devel; need git git
@@ -285,6 +319,15 @@ EOF
         ;;
     default)
         grep -q "^BOOT_ORDER=\"$KPKG," /etc/default/limine && { ok "already default"; return; }
+        # Interim, for development: the patched kernel is built here, outside
+        # Omarchy's packages, so `omarchy update` never updates it, and its boot
+        # check expects linux-aurora. Kept opt-in behind a confirmation.
+        warn "interim/developer setup: $KPKG is a locally built kernel that 'omarchy update' does not update"
+        warn "after each 'omarchy update' (run it from the stock kernel) rebuild it: omvm kernel build && omvm kernel install"
+        if [ "${2:-}" != --yes ]; then
+            [ -t 0 ] && command -v gum >/dev/null || die "not a terminal: confirm with omvm kernel default --yes"
+            gum confirm --default=false "Boot $KPKG by default instead of the stock kernel?" || { echo "Cancelled"; exit 1; }
+        fi
         sudo cp /etc/default/limine /etc/default/limine.pre-omvm
         sudo sed -i "s/^BOOT_ORDER=\"/BOOT_ORDER=\"$KPKG, /" /etc/default/limine
         sudo limine-update >/dev/null && ok "$KPKG is now the default Limine entry (stock kernel stays in the menu)"
@@ -301,6 +344,7 @@ EOF
 # ---------------------------------------------------------------- qemu
 cmd_qemu() {
     [ "${1:-}" = build ] || die "usage: omvm qemu build"
+    need_hw
     upstream
     sudo pacman -S --needed --noconfirm git rustup ninja meson glib2 pixman gtk3 vulkan-icd-loader vulkan-headers \
         libslirp dtc zlib libepoxy wayland libxkbcommon gnutls nettle gdb socat python-distlib qemu-img zstd
@@ -310,6 +354,7 @@ cmd_qemu() {
 
 # ---------------------------------------------------------------- macOS step
 cmd_macos_step() {
+    need_hw
     sudo mkdir -p /boot/efi/omvm
     sudo cp "$SHARE/run-on-macos.sh" /boot/efi/omvm/run-on-macos.sh
     local label; label="$(lsblk -rno LABEL "$(findmnt -no SOURCE /boot/efi)" | sed 's/\\x20/ /g')"
@@ -328,13 +373,13 @@ EOF
 
 # ---------------------------------------------------------------- ingest
 cmd_ingest() {
-    upstream
+    need_hw; upstream
     OMVM_ART="$IMAGES" OMVM_REPO="$UPSTREAM" OMVM_ENVF="$DATA/vm.env" OMVM_KEY="$KEY" bash "$SHARE/ingest-vmxfer.sh"
 }
 
 # ---------------------------------------------------------------- setup
 cmd_setup() {
-    upstream; guest_env
+    need_hw; upstream; guest_env
     test -f "$KEY" || ssh-keygen -q -t ed25519 -N '' -C omvm -f "$KEY"
     local src="$IMAGES/$BUNDLE-restore" v0="$IMAGES/$BUNDLE-v0" v1="$IMAGES/$BUNDLE-v1" v2="$IMAGES/$BUNDLE-v2"
     test -d "$src" || die "no restored bundle: run 'omvm ingest' first"
@@ -554,6 +599,7 @@ cmd_virt() {
         esac
     done
     set -- "${pos[@]}"
+    [ "${1:-}" = rm ] || need_hw
     local name="${1:?usage: omvm virt NAME [IMAGE] [--[no-]experimental-apple-services] | omvm virt rm [--yes] NAME}" img
     if [ "$name" = rm ]; then
         name="${2:?usage: omvm virt rm [--yes] NAME}"; need_name "$name"
