@@ -38,15 +38,29 @@ DATA="${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}"
 UPSTREAM="${OMVM_UPSTREAM:-$DATA/upstream}"
 IMAGES="${OMVM_IMAGES:-$DATA/images}"
 KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
-# The guest account omvm logs in as. Upstream's create-account.sh names it aquarat
-# unless told otherwise; set OMVM_GUEST_USER before `omvm setup` (or after renaming
-# the account) and keep it in ~/.config/omvm/gui.env, which services also read.
-cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1 || true; }
-GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"; GUEST_USER="${GUEST_USER:-aquarat}"
+# The guest account omvm logs in as: OMVM_GUEST_USER, else the one saved in
+# ~/.config/omvm/gui.env (which services also read; `omvm setup` asks for it and
+# saves it there), and $IMAGES/vms/NAME/guest_user overrides both for one VM.
+# There is no built-in default: a guessed account name only fails later.
+CFG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env"
+cfg_env() { sed -n "s/^$1=//p" "$CFG_FILE" 2>/dev/null | tail -1 || true; }
+cfg() { local v="${!1:-}"; [ -n "$v" ] || v="$(cfg_env "$1")"; echo "${v:-${2:-}}"; }  # VAR [DEFAULT]: env, gui.env, default
+cfg_save() { # VAR VALUE: set VAR in gui.env, keeping every other line
+    mkdir -p "$(dirname "$CFG_FILE")"; touch "$CFG_FILE"
+    local tmp; tmp="$(mktemp "$CFG_FILE.XXXXXX")"
+    { grep -v "^$1=" "$CFG_FILE" || true; echo "$1=$2"; } > "$tmp" && mv "$tmp" "$CFG_FILE"
+}
+GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"
 OMVM_VM="${OMVM_VM:-$(cfg_env OMVM_VM)}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
 KPKG=linux-aurora-vmapple
+
+# The Vulkan driver (ICD) the paravirtual GPU renders with: the packaged Mesa's
+# Asahi driver unless OMVM_VK_ICD (headless/VNC and `omvm gui`) or OMVM_LOCAL_ICD
+# (local mode's window, needs Wayland WSI) name another build, e.g. a patched
+# Honeykrisp (docs/graphics.md). Both are read from gui.env too.
+SYS_ICD=/usr/share/vulkan/icd.d/asahi_icd.aarch64.json
 
 c_b=$'\e[1m'; c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
 [ -t 1 ] || { c_b=; c_g=; c_r=; c_y=; c_0=; }
@@ -59,6 +73,9 @@ need() { command -v "$1" >/dev/null || die "missing '$1' (sudo pacman -S --neede
 # VM names end up in paths (rm -rf of a run directory), systemd unit names and
 # libvirt XML, so every command that takes one checks it first.
 valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+need_guest_user() {
+    [ -n "$GUEST_USER" ] || die "no guest account configured: set OMVM_GUEST_USER=NAME in $CFG_FILE (or put NAME in $IMAGES/vms/VM/guest_user)"
+}
 need_name() { valid_name "${1:-}" || die "invalid VM name '${1:-}' (letters, digits, '_' and '-', at most 32)"; }
 valid_busport() { [[ $1 =~ ^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$ ]]; }   # a USB device's sysfs name, e.g. 3-1.2
 
@@ -222,7 +239,7 @@ EOF
 # ---------------------------------------------------------------- ingest
 cmd_ingest() {
     upstream
-    OMVM_ART="$IMAGES" OMVM_REPO="$UPSTREAM" OMVM_ENVF="$DATA/vm.env" bash "$SHARE/ingest-vmxfer.sh"
+    OMVM_ART="$IMAGES" OMVM_REPO="$UPSTREAM" OMVM_ENVF="$DATA/vm.env" OMVM_KEY="$KEY" bash "$SHARE/ingest-vmxfer.sh"
 }
 
 # ---------------------------------------------------------------- setup
@@ -232,6 +249,12 @@ cmd_setup() {
     local src="$IMAGES/$BUNDLE-restore" v0="$IMAGES/$BUNDLE-v0" v1="$IMAGES/$BUNDLE-v1" v2="$IMAGES/$BUNDLE-v2"
     test -d "$src" || die "no restored bundle: run 'omvm ingest' first"
     test -e /sys/module/kvm/parameters/emulate_nisv_ldst || die "boot the patched kernel first (omvm doctor)"
+    if [ -z "$GUEST_USER" ]; then
+        [ -t 0 ] && command -v gum >/dev/null || die "set OMVM_GUEST_USER=NAME (the macOS account omvm creates and logs in as)"
+        GUEST_USER="$(gum input --prompt "macOS account name: " --placeholder "$(id -un)" --value "$(id -un)")"
+        [[ $GUEST_USER =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || die "invalid account name '$GUEST_USER'"
+        cfg_save OMVM_GUEST_USER "$GUEST_USER"; ok "guest account '$GUEST_USER' saved in $CFG_FILE"
+    fi
     if ! test -d "$v0"; then
         local pwf="$DATA/guest-password"
         (umask 077; test -f "$pwf" || python3 -c 'import secrets;print(secrets.token_urlsafe(18))' > "$pwf")
@@ -269,6 +292,7 @@ cmd_start() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power start "$1"; return; fi
     upstream; guest_env
     local name="${1:?usage: omvm start NAME [IMAGE]}" img; need_name "$name"; img="$(resolve_image "${2:-}")"
+    need_guest_user
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-run.sh start "$name")
     echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
@@ -276,14 +300,14 @@ cmd_start() {
     ok "$name is up: omvm ssh $name   (stop: omvm stop $name; changes are discarded on stop)"
 }
 
-cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; need_name "$n"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" "$@"; }
+cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; need_name "$n"; need_guest_user; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" "$@"; }
 
 cmd_stop() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power stop "$1"; return; fi
     local n="${1:?usage: omvm stop NAME}"; need_name "$n"
     local run="$UPSTREAM/artifacts/runs/$n"
     clip_stop "$n"
-    ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
+    [ -z "$GUEST_USER" ] || ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
     (cd "$UPSTREAM" && scripts/vm-run.sh quit "$n") >/dev/null 2>&1 || true
     rm -rf "$run"; ok "stopped $n"
@@ -333,18 +357,14 @@ cmd_gui() {
         say "building the GPU-path QEMU + Reims backend (once, ~15 min)"
         (cd "$UPSTREAM" && MODE=oop scripts/build-qemu.sh) >/dev/null
     fi
-    local icd="${VK_DRIVER_FILES:-}"
-    if [ -z "$icd" ]; then
-        icd="$HOME/opt/mesa-honeykrisp/share/vulkan/icd.d/asahi_icd.aarch64.json"   # patched Mesa (best)
-        [ -f "$icd" ] || icd=/usr/share/vulkan/icd.d/asahi_icd.aarch64.json       # Omarchy's Mesa
-    fi
+    local icd="${VK_DRIVER_FILES:-$(cfg OMVM_OOP_VK_ICD "$SYS_ICD")}"   # the out-of-process stack's Mesa
     local disp="${VNC_DISPLAY:-}"
     if [ -z "$disp" ]; then for disp in $(seq 10 40); do ss -ltn | grep -q ":$((5900+disp)) " || break; done; fi
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     export GFX=reims; guest_env
     # Upstream reims-vgpu stack (in-process apple-gfx-mmio + interlock-patched Honeykrisp):
     # renders the desktop without artifacts. See docs/graphics.md.
-    local sb="$UPSTREAM/build/qemu-sb/build" sbicd="$HOME/opt/mesa-honeykrisp-sb/share/vulkan/icd.d/asahi_icd.aarch64.json"
+    local sb="$UPSTREAM/build/qemu-sb/build" sbicd; sbicd="$(cfg OMVM_VK_ICD "$SYS_ICD")"
     if [ "${OMVM_GFX_STACK:-sb}" = sb ] && [ -x "$sb/qemu-system-aarch64" ] && [ -f "$sbicd" ]; then
         # OMVM_MODE=local: reims-vgpu's own window on this screen instead of VNC (see omvm mode)
         local window=0 view="-vnc 127.0.0.1:$disp" res="${RESOLUTION:-}"
@@ -389,7 +409,7 @@ run_dir() {
 }
 
 follow_start() {
-    [ "${OMVM_DISPLAY_FOLLOW:-1}" = 1 ] || return 0
+    [ "${OMVM_DISPLAY_FOLLOW:-1}" = 1 ] && [ -n "$GUEST_USER" ] || return 0
     local n="$1" run port; run="$(run_dir "$1")"; port="$(port_of "$1")"
     setsid nohup bash -c '
         ssh=(ssh "${@:4}" -p "$1" "$3@127.0.0.1")
@@ -407,7 +427,10 @@ follow_start() {
 clip_start() {
     local n="$1" run; run="$(run_dir "$1")"
     command -v wl-paste >/dev/null || { warn "no wl-clipboard: clipboard sharing off"; return 0; }
+    [ -n "$GUEST_USER" ] || { warn "no guest account configured (OMVM_GUEST_USER): clipboard sharing off"; return 0; }
     clip_stop "$n"
+    [ -n "${WAYLAND_DISPLAY:-}" ] || { WAYLAND_DISPLAY="$(wl_display)" && export WAYLAND_DISPLAY; } ||
+        { warn "no Wayland session: clipboard sharing off"; return 0; }
     setsid nohup python3 "$SHARE/omvm-clip.py" "$(port_of "$n")" "$KEY" "$GUEST_USER" >"$run/logs/clip.log" 2>&1 </dev/null &
     echo $! > "$run/clip.pid"
 }
@@ -462,10 +485,13 @@ cmd_virt() {
         for f in disk.img aux.img.trimmed vm.json; do cp --reflink=auto "$img/guest/$f" "$dir/$f"; chmod u+w "$dir/$f"; done
         ok "$name: disk cloned from $(basename "$img")"
     fi
+    # What the current definition (if any) has, to carry over on a redefine.
+    local old_xml icd
+    old_xml="$("${VIRSH[@]}" dumpxml --inactive "$name" 2>/dev/null || true)"
     case "$apple" in
     on) touch "$dir/apple_services"; warn "$name: experimental Apple services on" ;;
     off) rm -f "$dir/apple_services" ;;
-    *) if [ ! -e "$dir/apple_services" ] && "${VIRSH[@]}" dumpxml --inactive "$name" 2>/dev/null | grep -q 'identity=on'; then
+    *) if [ ! -e "$dir/apple_services" ] && grep -q 'identity=on' <<<"$old_xml"; then
            touch "$dir/apple_services"
            warn "$name: kept its experimental Apple services (turn off: omvm virt $name --no-experimental-apple-services)"
        fi ;;
@@ -478,7 +504,18 @@ cmd_virt() {
         [ -f "$AVPBOOTER" ] || die "macOS $major guest needs the 27-era AVPBooter: no $AVPBOOTER"
     fi
     local was; was="$(vm_mode "$name" 2>/dev/null || echo remote)"
-    python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
+    # The Vulkan driver: VK_DRIVER_FILES or OMVM_VK_ICD, else the one this VM
+    # already uses (a redefine keeps it), else the packaged Mesa. In local mode
+    # the remote one is saved as OMVM_REMOTE_VK_DRIVER_FILES (libvirt-mode.py).
+    icd="${VK_DRIVER_FILES:-$(cfg OMVM_VK_ICD)}"
+    if [ -z "$icd" ] && [ -n "$old_xml" ]; then
+        icd="$(python3 "$SHARE/libvirt-mode.py" getenv OMVM_REMOTE_VK_DRIVER_FILES <<<"$old_xml")"
+        [ -n "$icd" ] || icd="$(python3 "$SHARE/libvirt-mode.py" getenv VK_DRIVER_FILES <<<"$old_xml")"
+    fi
+    if [ "$was" = local ] && [ -z "$(cfg OMVM_LOCAL_ICD)" ]; then
+        OMVM_LOCAL_ICD="$(python3 "$SHARE/libvirt-mode.py" getenv VK_DRIVER_FILES <<<"$old_xml")"; export OMVM_LOCAL_ICD
+    fi
+    VK_DRIVER_FILES="${icd:-$SYS_ICD}" python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
         "$("$UPSTREAM/scripts/extract-ecid.py" "$dir/vm.json")" "$port" "${CPUS:-8}" "${RAM_GIB:-16}" > "$dir/domain.xml"
     virsh -q -c qemu:///session define "$dir/domain.xml" >/dev/null
     [ "$was" = local ] && define_mode "$name" local
@@ -489,7 +526,7 @@ cmd_virt() {
         echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
         echo "case \"\$2/\$3\" in prepare/begin|started/begin|release/end) ;; *) [ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0 ;; esac"
         echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY' OMVM_GUEST_USER='$GUEST_USER'"
-        echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-wayland-1}'"
+        echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}'"
         echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" \"\$3\""
     } > "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
     chmod +x "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
@@ -520,15 +557,28 @@ HOOK
 VIRSH=(virsh -q -c qemu:///session)
 vm_mode() { "${VIRSH[@]}" dumpxml --inactive "$1" 2>/dev/null | python3 "$SHARE/libvirt-mode.py" get; }
 
-# "WxH@PPI HZ" of the laptop's built-in screen, for the guest's mode.
+# "WxH@PPI HZ" of the laptop's built-in screen (else the first one), for the
+# guest's mode, from Hyprland. OMVM_LOCAL_RESOLUTION=WxH@PPI and
+# OMVM_LOCAL_REFRESH=HZ override it (and are needed outside a Hyprland session).
 local_screen() {
-    local j
-    j="$(hyprctl monitors -j 2>/dev/null | jq -c '[.[] | select(.name | test("^eDP"))][0] // .[0]' 2>/dev/null || true)"
-    if [ -n "$j" ] && [ "$j" != null ]; then
-        jq -r '"\(.width)x\(.height)@\((.width * 25.4 / .physicalWidth) | floor) \(.refreshRate | round)"' <<<"$j"
-    else
-        echo "3024x1964@254 120"   # MacBook Pro 14"
+    local j res="${OMVM_LOCAL_RESOLUTION:-}" hz="${OMVM_LOCAL_REFRESH:-}"
+    if [ -z "$res" ] || [ -z "$hz" ]; then
+        j="$(hyprctl monitors -j 2>/dev/null | jq -c '[.[] | select(.name | test("^eDP"))][0] // .[0]' 2>/dev/null || true)"
+        [ -n "$j" ] && [ "$j" != null ] ||
+            die "can't read the screen from hyprctl: set OMVM_LOCAL_RESOLUTION=WxH@PPI and OMVM_LOCAL_REFRESH=HZ"
+        [ -n "$res" ] || res="$(jq -r 'if .physicalWidth > 0 then "\(.width)x\(.height)@\((.width * 25.4 / .physicalWidth) | floor)"
+                                    else "\(.width)x\(.height)@\((110 * .scale) | floor)" end' <<<"$j")"
+        [ -n "$hz" ] || hz="$(jq -r '.refreshRate | round' <<<"$j")"
     fi
+    echo "$res $hz"
+}
+# The Wayland socket to open windows on: $WAYLAND_DISPLAY, else the newest
+# wayland-N socket in XDG_RUNTIME_DIR (libvirt hooks and units have no session env).
+wl_display() {
+    local xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" s
+    [ -n "${WAYLAND_DISPLAY:-}" ] && { echo "$WAYLAND_DISPLAY"; return; }
+    s="$(ls -t "$xdg" 2>/dev/null | grep -E '^wayland-[0-9]+$' | head -1 || true)"
+    [ -n "$s" ] && [ -S "$xdg/$s" ] && echo "$s"
 }
 
 # CPU governor while a local-mode VM runs (omvm perf). With schedutil the cores idle at
@@ -635,19 +685,20 @@ cmd_perf() {
     esac
 }
 
-# The window needs a Vulkan driver with Wayland WSI: the graphics stack's Mesa is
-# built with -Dplatforms= (docs/graphics.md), so local mode uses a second build of
-# the same tree with -Dplatforms=wayland.
-local_icd() { echo "${OMVM_LOCAL_ICD:-$HOME/opt/mesa-honeykrisp-sb-wl/share/vulkan/icd.d/asahi_icd.aarch64.json}"; }
+# The window needs a Vulkan driver with Wayland WSI. The packaged Mesa has it; a
+# patched graphics-stack Mesa built with -Dplatforms= (docs/graphics.md) does not,
+# so with one of those set OMVM_LOCAL_ICD to a second build with -Dplatforms=wayland.
+local_icd() { cfg OMVM_LOCAL_ICD "$SYS_ICD"; }
 
 define_mode() { # NAME local|remote
-    local n="$1" m="$2" xml new wl="${WAYLAND_DISPLAY:-wayland-1}" xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" scr
+    local n="$1" m="$2" xml new wl xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" scr
     xml="$(mktemp)"; new="$(mktemp)"
     "${VIRSH[@]}" dumpxml --inactive "$n" > "$xml"
     if [ "$m" = local ]; then
         scr="$(local_screen)"
-        python3 "$SHARE/libvirt-mode.py" local "${OMVM_LOCAL_RESOLUTION:-${scr% *}}" \
-            "${OMVM_LOCAL_REFRESH:-${scr#* }}" "$wl" "$xdg" "$(local_icd)" "${OMVM_STATS:-0}" < "$xml" > "$new"
+        wl="$(wl_display)" || die "no Wayland session in $xdg: log in to Hyprland first (or set WAYLAND_DISPLAY)"
+        python3 "$SHARE/libvirt-mode.py" local "${scr% *}" \
+            "${scr#* }" "$wl" "$xdg" "$(local_icd)" "${OMVM_STATS:-0}" < "$xml" > "$new"
     else
         python3 "$SHARE/libvirt-mode.py" remote < "$xml" > "$new"
     fi
@@ -668,7 +719,7 @@ vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
     for i in $(seq 1 120); do
         vm_on "$n" || { ok "$n is off ($((2 * i - 2))s)"; return 0; }
         # vmapple ignores libvirt's power button: ask macOS itself after 10 s
-        if [ "$i" = 6 ]; then
+        if [ "$i" = 6 ] && [ -n "$GUEST_USER" ]; then
             ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
         fi
         sleep 2
@@ -685,8 +736,8 @@ cmd_mode() {
     if [ -z "$m" ]; then echo "$cur"; return; fi
     if [ "$m" = "$cur" ]; then ok "$n is already in $m mode"; return; fi
     if [ "$m" = local ]; then
-        local wl="${WAYLAND_DISPLAY:-wayland-1}" xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-        [ -S "$xdg/$wl" ] || die "no Wayland session at $xdg/$wl: log in to Hyprland first"
+        local wl xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        wl="$(wl_display)" && [ -S "$xdg/$wl" ] || die "no Wayland session in $xdg: log in to Hyprland first"
         [ -f "$(local_icd)" ] || die "no Mesa with Wayland WSI at $(local_icd) (docs/graphics.md, \"Local window\")"
         export WAYLAND_DISPLAY="$wl" XDG_RUNTIME_DIR="$xdg"
         export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "$xdg/hypr" 2>/dev/null | head -1)}"
@@ -804,6 +855,7 @@ usb_rule() { # VID PID: the user owns the node; QEMU (this user) opens it in any
 usb_guest() { # VM CMD...: run in the guest (its guest_user, its SSH port)
     local n="$1" u="$GUEST_USER"; shift
     [ -f "$IMAGES/vms/$n/guest_user" ] && u="$(cat "$IMAGES/vms/$n/guest_user")"
+    [ -n "$u" ] || need_guest_user
     ssh "${ssh_opts[@]}" -o ConnectTimeout=10 -p "$(port_of "$n")" "$u@127.0.0.1" "$@"
 }
 usb_ios_state() { # VM -> per wired iOS device: PAIRING-STATE UDID MODEL IOS NAME (CoreDevice's view)

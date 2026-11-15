@@ -16,7 +16,7 @@ set -euo pipefail
 repo_root="${OMVM_REPO:?set OMVM_REPO}"
 src="$1"; dst="$2"; xip="$3"; ios="${4:-}"
 key="${RUNNER_KEY:?set RUNNER_KEY}"
-user="${GUEST_USER:-aquarat}"   # the guest account (omvm: OMVM_GUEST_USER)
+user="${GUEST_USER:?set GUEST_USER}"   # the guest account (omvm: OMVM_GUEST_USER)
 test -f "$xip" || { echo "no such .dmg: $xip" >&2; exit 1; }
 
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"

@@ -13,7 +13,9 @@ remembered, so a copy never bounces back. Text only.
 import base64, hashlib, os, subprocess, sys, threading, time
 
 port, key = sys.argv[1], sys.argv[2]
-user = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("OMVM_GUEST_USER") or "aquarat"
+user = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("OMVM_GUEST_USER")
+if not user:
+    sys.exit("omvm-clip: no guest account (pass GUEST_USER or set OMVM_GUEST_USER)")
 SSH = ["ssh", "-i", key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
        "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=15", "-p", port, f"{user}@127.0.0.1"]

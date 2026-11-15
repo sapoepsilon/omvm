@@ -3,6 +3,7 @@
 """Show or switch the display mode of an omvm libvirt domain (omvm mode).
 
     libvirt-mode.py get   < domain.xml            prints local or remote
+    libvirt-mode.py getenv VAR < domain.xml       prints a <qemu:env> value (empty if none)
     libvirt-mode.py local RES REFRESH WAYLAND_DISPLAY XDG_RUNTIME_DIR ICD [STATS] < domain.xml > new.xml
     libvirt-mode.py remote < domain.xml > new.xml
     libvirt-mode.py sound < domain.xml > new.xml   (only the sound upgrade below)
@@ -32,8 +33,13 @@ import xml.etree.ElementTree as ET
 
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ET.register_namespace("qemu", QEMU_NS)
-OMVM_NS = "https://github.com/sapoepsilon/omvm"
-ET.register_namespace("omvm", OMVM_NS)
+# omvm's <metadata> element. Domains defined before 2026-11 carry the old
+# namespace; both are read and each is written back as it was found.
+OMVM_NS = "urn:omvm:domain:1"
+OMVM_NS_OLD = "https://github.com/sapoepsilon/omvm"
+OMVM_NAMESPACES = {"omvm": OMVM_NS, "omvmold": OMVM_NS_OLD}
+for _prefix, _ns in OMVM_NAMESPACES.items():
+    ET.register_namespace(_prefix, _ns)
 Q = "{%s}" % QEMU_NS
 # Environment that local mode adds (and remote mode removes).
 LOCAL_ENV = ("REIMS_VGPU_WINDOW_REFRESH", "REIMS_VGPU_WINDOW_BORDERLESS",
@@ -119,6 +125,10 @@ def main():
     if what == "get":
         print(mode_of(dom))
         return
+    if what == "getenv":
+        c = dom.find(Q + "commandline")
+        print((get_env(c, sys.argv[2]) if c is not None and len(sys.argv) > 2 else None) or "")
+        return
     devices = dom.find("devices")
     c = cmdline(dom)
     upgrade_sound(dom, c)
@@ -172,9 +182,12 @@ def write(dom):
     out = ET.tostring(dom, encoding="unicode")
     # ElementTree prefixes omvm's metadata (omvm:omvm); give it back its default
     # namespace, as `omvm virt` wrote it, so a round trip leaves the XML as it was
-    out = (out.replace(' xmlns:omvm="%s"' % OMVM_NS, "")
-              .replace("<omvm:omvm>", '<omvm xmlns="%s">' % OMVM_NS)
-              .replace("<omvm:", "<").replace("</omvm:", "</"))
+    for prefix, ns in OMVM_NAMESPACES.items():
+        if ' xmlns:%s="%s"' % (prefix, ns) not in out:
+            continue
+        out = (out.replace(' xmlns:%s="%s"' % (prefix, ns), "")
+                  .replace("<%s:omvm>" % prefix, '<omvm xmlns="%s">' % ns)
+                  .replace("<%s:" % prefix, "<").replace("</%s:" % prefix, "</"))
     sys.stdout.write(out + "\n")
 
 

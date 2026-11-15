@@ -51,7 +51,7 @@ cat > "$ENVF" <<EOF
 # source this before running repo scripts
 export AVPBOOTER="$booter"
 export GFX=none
-export RUNNER_KEY="$HOME/.ssh/vmapple_runner"
+export RUNNER_KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
 export G="$ART"
 EOF
 echo "== wrote $ENVF"; cat "$ENVF"

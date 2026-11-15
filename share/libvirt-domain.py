@@ -40,7 +40,9 @@ asc = major >= 27
 vcap = ",apple-vendor-cap=on" if os.path.exists(f"{vmdir}/apple_vendor_cap") else ""
 blk = vcap or (",ascending-capabilities=on" if asc else "")
 virtio_asc = ",x-ascending-capabilities=on" if asc else ""
-icd = os.environ.get("VK_DRIVER_FILES", f"{home}/opt/mesa-honeykrisp-sb/share/vulkan/icd.d/asahi_icd.aarch64.json")
+# The Vulkan driver reims-vgpu renders with: omvm passes the configured one
+# (OMVM_VK_ICD, or the VM's current one); the packaged Mesa otherwise.
+icd = os.environ.get("VK_DRIVER_FILES") or "/usr/share/vulkan/icd.d/asahi_icd.aarch64.json"
 aux, disk = f"{vmdir}/aux.img.trimmed", f"{vmdir}/disk.img"
 # Stable libvirt UUID per VM name.
 dom_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"omvm:{name}")
@@ -111,8 +113,8 @@ args = [
 # so nothing binds it there (docs/graphics.md, "The M2 scaler").
 if os.environ.get("OMVM_M2SCALER", "0") == "1":
     args += ["-device", "apple-m2scaler-pci"]
-# Second NIC on a UDP socket, for kdp. A userspace terminator
-# (/tmp/w/kdpbridge.py) bridges it to a TUN peer: kdp's LLDB transport is
+# Second NIC on a UDP socket, for kdp. A userspace UDP <-> TUN terminator (not
+# shipped with omvm) bridges it to a TUN peer: kdp's LLDB transport is
 # guest-initiated and the user-mode net0 cannot carry it. Opt-in (OMVM_KDP=1).
 # The guest UART (0x20010000) is wired to serial_hd(0). Capturing it gives the
 # AVPBooter and XNU panic text, which is otherwise only on a console we do not
@@ -179,7 +181,7 @@ print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/
   <uuid>{dom_uuid}</uuid>
   <title>macOS ({t(name)})</title>
   <description>omvm macOS guest. SSH: omvm ssh {t(name)} (port {t(ssh_port)}).</description>
-  <metadata><omvm xmlns='https://github.com/sapoepsilon/omvm'><vmdir>{t(vmdir)}</vmdir><ssh>{t(ssh_port)}</ssh></omvm></metadata>
+  <metadata><omvm xmlns='urn:omvm:domain:1'><vmdir>{t(vmdir)}</vmdir><ssh>{t(ssh_port)}</ssh></omvm></metadata>
   <memory unit='GiB'>{t(ram)}</memory>
   <memoryBacking><source type='memfd'/><access mode='shared'/></memoryBacking>
   <vcpu>{t(cpus)}</vcpu>
