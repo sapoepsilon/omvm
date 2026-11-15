@@ -758,15 +758,21 @@ class HookTests(unittest.TestCase):
                 functions='\n'.join(name+'() { echo '+value+' >> "$TRACE"; }' for name,value in
                                     [('clip_start','clip'),('follow_start','follow'),('governor_start','governor'),
                                      ('clip_stop','clip-stop'),('governor_stop','governor-stop')])
+                # The real name check, which the case arm runs first.
+                functions+='\n'+next(l for l in source.splitlines() if l.startswith('valid_name() {'))
                 script.write_text('#!/bin/bash\nset -euo pipefail\n'+functions+'\ncase "$1" in\nvirt-hook) shift\n'+
                                   case.replace('/usr/local/libexec/omvm-apple-helpers',shlex.quote(str(helper)))+'\nesac\n')
                 script.chmod(0o700)
                 env={**os.environ,'PATH':d+':'+os.environ.get('PATH',''),'TRACE':str(trace),'IMAGES':d,'FAIL':'7' if fail else '0'}
                 result=subprocess.run([str(script),'virt-hook','one','started','begin'],input=XML,env=env,capture_output=True)
                 self.assertEqual(result.returncode,7 if fail else 0,result.stderr)
-                lines=trace.read_text().splitlines()
+                lines=trace.read_text().splitlines() if trace.exists() else []
+                if not managed:
+                    # Only omvm's own VMs (IMAGES/vms/NAME/ssh_port) reach the gate.
+                    self.assertEqual(lines,[])
+                    continue
                 self.assertEqual(json.loads(lines[0]),['gate',['gate','one','started','begin'],XML.decode()])
-                self.assertEqual(lines[1:],['clip','follow','governor'] if managed and not fail else [])
+                self.assertEqual(lines[1:],['clip','follow','governor'] if not fail else [])
 
 
 class ProcessIdentityTests(unittest.TestCase):
