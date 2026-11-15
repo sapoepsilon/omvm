@@ -68,11 +68,26 @@ SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../sh
 BUNDLE=tahoe-26.4-25E246
 KPKG=linux-aurora-vmapple
 
-# The Vulkan driver (ICD) the paravirtual GPU renders with: the packaged Mesa's
-# Asahi driver unless OMVM_VK_ICD (headless/VNC and `omvm gui`) or OMVM_LOCAL_ICD
-# (local mode's window, needs Wayland WSI) name another build, e.g. a patched
-# Honeykrisp (docs/graphics.md). Both are read from gui.env too.
+# The Vulkan driver (ICD) the paravirtual GPU renders with (icd_for KIND):
+#   sb     OMVM_VK_ICD      headless/VNC VMs and `omvm gui`
+#   oop    OMVM_OOP_VK_ICD  `omvm gui`'s out-of-process stack
+#   local  OMVM_LOCAL_ICD   local mode's window (needs Wayland WSI)
+# from the environment or gui.env; else the patched Honeykrisp build that
+# docs/graphics.md puts in ~/opt, if it is there; else the packaged Mesa.
 SYS_ICD=/usr/share/vulkan/icd.d/asahi_icd.aarch64.json
+icd_for() { # sb|oop|local -> ICD path
+    local var build v legacy
+    case "$1" in
+    sb) var=OMVM_VK_ICD build=mesa-honeykrisp-sb ;;
+    oop) var=OMVM_OOP_VK_ICD build=mesa-honeykrisp ;;
+    local) var=OMVM_LOCAL_ICD build=mesa-honeykrisp-sb-wl ;;
+    *) return 1 ;;
+    esac
+    v="$(cfg "$var")"
+    [ -n "$v" ] && { echo "$v"; return; }
+    legacy="$HOME/opt/$build/share/vulkan/icd.d/asahi_icd.aarch64.json"
+    if [ -f "$legacy" ]; then echo "$legacy"; else echo "$SYS_ICD"; fi
+}
 
 c_b=$'\e[1m'; c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
 [ -t 1 ] || { c_b=; c_g=; c_r=; c_y=; c_0=; }
@@ -516,14 +531,14 @@ cmd_gui() {
         say "building the GPU-path QEMU + Reims backend (once, ~15 min)"
         (cd "$UPSTREAM" && MODE=oop scripts/build-qemu.sh) >/dev/null
     fi
-    local icd="${VK_DRIVER_FILES:-$(cfg OMVM_OOP_VK_ICD "$SYS_ICD")}"   # the out-of-process stack's Mesa
+    local icd="${VK_DRIVER_FILES:-$(icd_for oop)}"   # the out-of-process stack's Mesa
     local disp="${VNC_DISPLAY:-}"
     if [ -z "$disp" ]; then for disp in $(seq 10 40); do ss -ltn | grep -q ":$((5900+disp)) " || break; done; fi
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     export GFX=reims; guest_env
     # Upstream reims-vgpu stack (in-process apple-gfx-mmio + interlock-patched Honeykrisp):
     # renders the desktop without artifacts. See docs/graphics.md.
-    local sb="$UPSTREAM/build/qemu-sb/build" sbicd; sbicd="$(cfg OMVM_VK_ICD "$SYS_ICD")"
+    local sb="$UPSTREAM/build/qemu-sb/build" sbicd; sbicd="$(icd_for sb)"
     if [ "${OMVM_GFX_STACK:-sb}" = sb ] && [ -x "$sb/qemu-system-aarch64" ] && [ -f "$sbicd" ]; then
         # OMVM_MODE=local: reims-vgpu's own window on this screen instead of VNC (see omvm mode)
         local window=0 view="-vnc 127.0.0.1:$disp" res="${RESOLUTION:-}"
@@ -666,7 +681,7 @@ cmd_virt() {
     fi
     local was; was="$(vm_mode "$name" 2>/dev/null || echo remote)"
     # The Vulkan driver: VK_DRIVER_FILES or OMVM_VK_ICD, else the one this VM
-    # already uses (a redefine keeps it), else the packaged Mesa. In local mode
+    # already uses (a redefine keeps it), else icd_for sb. In local mode
     # the remote one is saved as OMVM_REMOTE_VK_DRIVER_FILES (libvirt-mode.py).
     icd="${VK_DRIVER_FILES:-$(cfg OMVM_VK_ICD)}"
     if [ -z "$icd" ] && [ -n "$old_xml" ]; then
@@ -676,7 +691,8 @@ cmd_virt() {
     if [ "$was" = local ] && [ -z "$(cfg OMVM_LOCAL_ICD)" ]; then
         OMVM_LOCAL_ICD="$(python3 "$SHARE/libvirt-mode.py" getenv VK_DRIVER_FILES <<<"$old_xml")"; export OMVM_LOCAL_ICD
     fi
-    VK_DRIVER_FILES="${icd:-$SYS_ICD}" python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
+    [ -n "$icd" ] || icd="$(icd_for sb)"
+    VK_DRIVER_FILES="$icd" python3 "$SHARE/libvirt-domain.py" "$name" "$dir" "$qemu" "$AVPBOOTER" \
         "$("$UPSTREAM/scripts/extract-ecid.py" "$dir/vm.json")" "$port" "${CPUS:-8}" "${RAM_GIB:-16}" > "$dir/domain.xml"
     virsh -q -c qemu:///session define "$dir/domain.xml" >/dev/null
     [ "$was" = local ] && define_mode "$name" local
@@ -879,7 +895,7 @@ cmd_perf() {
 # The window needs a Vulkan driver with Wayland WSI. The packaged Mesa has it; a
 # patched graphics-stack Mesa built with -Dplatforms= (docs/graphics.md) does not,
 # so with one of those set OMVM_LOCAL_ICD to a second build with -Dplatforms=wayland.
-local_icd() { cfg OMVM_LOCAL_ICD "$SYS_ICD"; }
+local_icd() { icd_for local; }
 
 define_mode() { # NAME local|remote
     local n="$1" m="$2" xml new wl xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" scr
