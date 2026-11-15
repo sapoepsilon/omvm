@@ -1,5 +1,5 @@
 #!/bin/bash
-# omvm: run from 90-omvm-power.rules (as root) on a Mains change. Starts the user
+# omvm: run from 90-omvm-power-ac.rules (as root) on a Mains change. Starts the user
 # unit omvm-power.service (`omvm perf apply`) for each user that has a local-mode
 # VM running, which omvm marks in /run/user/UID/omvm-governor. Nothing else.
 export PATH=/usr/bin:/usr/sbin LC_ALL=C.UTF-8

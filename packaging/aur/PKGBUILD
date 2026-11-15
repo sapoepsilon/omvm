@@ -10,6 +10,7 @@ url="https://github.com/sapoepsilon/omvm"
 license=('GPL-2.0-or-later')
 depends=(
   'bash' 'coreutils' 'util-linux' 'iproute2' 'acl' 'systemd' 'polkit'  # setsid/lsblk, ss, setfacl, systemd-run, pkexec
+  'sudo'                       # setup steps, and privileged actions from libvirt hooks/units (sudo -n)
   'git' 'openssh' 'python' 'jq' 'gum'
   'libvirt'                    # qemu:///session domains (omvm virt), virsh
   'qemu-img' 'gdb' 'socat' 'zstd' 'exfatprogs'   # upstream's image scripts; ingest mounts VMXFER (exFAT)
@@ -36,6 +37,7 @@ makedepends=('git')
 provides=('omvm')
 conflicts=('omvm')
 backup=('etc/libvirt/hooks/qemu.d/50-omvm')
+install=omvm.install
 source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')
 
@@ -59,8 +61,10 @@ package() {
   # Everything bin/* reads from share/: the guest-side scripts and Swift
   # sources, the libvirt XML generators, clipboard/USB/VNC helpers, the Hyprland
   # bindings, launcher entry, streaming host, the opt-in Apple helpers and their
-  # units, and the omac/bench/latency/ios-hello tools. Modes as in git.
+  # units, and the omac/ios-hello tools. Modes as in git. share/bench and
+  # share/latency are development measurements, not shipped.
   cp -r --no-preserve=ownership share "$pkgdir/usr/lib/omvm/share"
+  rm -rf "$pkgdir/usr/lib/omvm/share/bench" "$pkgdir/usr/lib/omvm/share/latency"
   find "$pkgdir/usr/lib/omvm/share" -type d -exec chmod 755 {} +
   find "$pkgdir/usr/lib/omvm/share" -type f ! -perm -u+x -exec chmod 644 {} +
   find "$pkgdir/usr/lib/omvm/share" -type f -perm -u+x -exec chmod 755 {} +
@@ -72,7 +76,7 @@ package() {
   # Static udev rules (omvm never writes /etc/udev at run time), the power
   # change helper they run, its user unit, and the omvm group.
   install -Dm644 -t "$pkgdir/usr/lib/udev/rules.d" \
-    packaging/udev/70-omvm-apple-usb.rules packaging/udev/90-omvm-power.rules
+    packaging/udev/70-omvm-apple-usb.rules packaging/udev/90-omvm-power-ac.rules
   install -Dm755 packaging/omvm-power-changed "$pkgdir/usr/lib/omvm/omvm-power-changed"
   install -Dm644 packaging/systemd/omvm-power.service "$pkgdir/usr/lib/systemd/user/omvm-power.service"
   install -Dm644 packaging/sysusers-omvm.conf "$pkgdir/usr/lib/sysusers.d/omvm.conf"

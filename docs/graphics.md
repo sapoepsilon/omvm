@@ -142,7 +142,7 @@ omvm perf ac       # only on AC power: back to the saved governor on battery
 omvm perf off      # never touch the governor
 ```
 
-The omvm package ships `90-omvm-power.rules`: a change of the Mains supply
+The omvm package ships `90-omvm-power-ac.rules`: a change of the Mains supply
 (`macsmc-ac`) starts the user unit `omvm-power.service` (for users with a local-mode VM
 running), which runs `omvm perf apply`; no polling. Changing the governor is a privileged
 action: `omvm perf` asks through polkit; from the libvirt hook and that unit nobody can

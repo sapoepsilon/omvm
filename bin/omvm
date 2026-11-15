@@ -826,10 +826,12 @@ wl_display() {
 # name = always with that governor). Changing the governor is a privileged action (priv).
 GOV_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omvm-governor"
 PERF_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omvm/perf"
-# The plug/unplug trigger ships in the package: 90-omvm-power.rules runs
+# The plug/unplug trigger ships in the package: 90-omvm-power-ac.rules runs
 # omvm-power-changed, which starts the user unit omvm-power.service (`omvm perf
 # apply`) for each user with a local-mode VM running.
-PERF_RULES=(/usr/lib/udev/rules.d/90-omvm-power.rules /etc/udev/rules.d/90-omvm-power.rules)
+# (An older omvm's /etc/udev/rules.d/90-omvm-power.rules has another name, so it
+# never masks the packaged one; it only starts the same oneshot unit again.)
+PERF_RULES=(/usr/lib/udev/rules.d/90-omvm-power-ac.rules /etc/udev/rules.d/90-omvm-power.rules)
 perf_setting() { # always|ac|off
     case "${OMVM_LOCAL_GOVERNOR:-}" in keep) echo off; return ;; ?*) echo always; return ;; esac
     local v; v="$(cat "$PERF_FILE" 2>/dev/null || true)"
@@ -888,7 +890,7 @@ governor_stop() { rm -f "$GOV_DIR/vm.$1"; governor_apply; }  # NAME (libvirt hoo
 perf_install_ac() { # the plug/unplug trigger is packaged: just say when it is missing
     local r
     for r in "${PERF_RULES[@]}"; do [ -f "$r" ] && return 0; done
-    warn "no 90-omvm-power.rules (shipped by the omvm package): plug/unplug won't switch the governor"
+    warn "no 90-omvm-power-ac.rules (shipped by the omvm package): plug/unplug won't switch the governor"
 }
 cmd_perf() {
     local v="${1:-}" vms

@@ -1,0 +1,30 @@
+# omvm: what to do after installing or upgrading the package.
+
+_omvm_notes() {
+  cat <<'NOTES'
+==> omvm: libvirt picks up the new hook (/etc/libvirt/hooks/qemu.d/50-omvm)
+    when its daemon starts. Restart your session daemon once, with no VM running:
+      systemctl --user restart virtqemud.service
+==> omvm: to use an iPhone/iPad in a VM with no one at this seat (remote mode,
+    lid closed), join the omvm group and log in again:
+      sudo gpasswd -a "$USER" omvm
+==> omvm: files an older omvm wrote outside the package can go:
+    - /etc/libvirt/hooks/qemu, if it only holds omvm's forwarder (its second
+      line reads "# omvm: hand libvirt QEMU events to the per-user hook"):
+        sudo rm /etc/libvirt/hooks/qemu      (then restart virtqemud, as above)
+      While it is there the packaged hook stays idle, so nothing runs twice.
+    - /etc/udev/rules.d/70-omvm-usb.rules (gave your user every device it ever
+      attached) and /etc/udev/rules.d/90-omvm-power.rules (replaced by
+      /usr/lib/udev/rules.d/90-omvm-power-ac.rules):
+        sudo rm /etc/udev/rules.d/70-omvm-usb.rules /etc/udev/rules.d/90-omvm-power.rules
+        sudo udevadm control --reload
+NOTES
+}
+
+post_install() {
+  _omvm_notes
+}
+
+post_upgrade() {
+  _omvm_notes
+}
