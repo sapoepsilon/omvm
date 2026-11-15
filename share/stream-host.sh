@@ -169,6 +169,8 @@ GUEST_KEY="${OMVM_STREAM_GUEST_KEY:-$HOME/.ssh/vmapple_runner}"
 GUEST_SSH="${OMVM_STREAM_GUEST_SSH:-5900=42541}"
 # The guest account (Sunshine/systemd don't read ~/.bashrc: fall back to gui.env).
 GUEST_USER="${OMVM_STREAM_GUEST_USER:-${OMVM_GUEST_USER:-$(sed -n 's/^OMVM_GUEST_USER=//p' "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1)}}"
+# Known gap: not omvm's per-VM resolver (vm_user); a VM with its own
+# guest_user file needs OMVM_STREAM_GUEST_USER here.
 GUEST_USER="${GUEST_USER:-aquarat}"
 guest_ssh_port() { local kv; for kv in $GUEST_SSH; do [[ ${kv%%=*} == "$1" ]] && echo "${kv#*=}"; done; return 0; }
 gssh() { # VNCPORT CMD...

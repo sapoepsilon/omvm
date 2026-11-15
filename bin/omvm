@@ -53,6 +53,10 @@ KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
 # saves it there), else, for a VM that already exists from before any of this
 # was configured, the account upstream's create-account.sh made by default.
 # omvm writes guest_user for each VM it creates, so new VMs never guess.
+# Note: an existing VM without a guest_user file follows OMVM_GUEST_USER when that
+# is set; give such a VM its own guest_user file if its account differs.
+# Known gap: share/stream-host.sh resolves the account on its own
+# (OMVM_STREAM_GUEST_USER, OMVM_GUEST_USER/gui.env, then the legacy name).
 CFG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env"
 cfg_env() { sed -n "s/^$1=//p" "$CFG_FILE" 2>/dev/null | tail -1 || true; }
 cfg() { local v="${!1:-}"; [ -n "$v" ] || v="$(cfg_env "$1")"; echo "${v:-${2:-}}"; }  # VAR [DEFAULT]: env, gui.env, default
@@ -239,8 +243,13 @@ __priv_usb_revoke() { # BUS-PORT
 }
 
 # Temporary files, removed however omvm exits (die included).
-OMVM_TMPS=()
-trap 'rm -f -- "${OMVM_TMPS[@]}"' EXIT
+# Also starts a watchdog timer again that an interrupted `virt rm` had stopped.
+OMVM_TMPS=() OMVM_RESTORE_TIMER=""
+omvm_exit() {
+    rm -f -- "${OMVM_TMPS[@]}"
+    [ -z "$OMVM_RESTORE_TIMER" ] || systemctl --user start "$OMVM_RESTORE_TIMER" >/dev/null 2>&1 || true
+}
+trap omvm_exit EXIT
 mktemp_var() { # VAR: a new temporary file in VAR, cleaned up on exit
     local f; f="$(mktemp)"; OMVM_TMPS+=("$f"); printf -v "$1" '%s' "$f"
 }
@@ -432,7 +441,8 @@ cmd_setup() {
     test -e /sys/module/kvm/parameters/emulate_nisv_ldst || die "boot the patched kernel first (omvm doctor)"
     if [ -z "$GUEST_USER" ] && test -d "$v0"; then
         GUEST_USER="$LEGACY_GUEST_USER"   # made before the account was configurable
-        warn "no OMVM_GUEST_USER: assuming the existing image's account is '$GUEST_USER'"
+        cfg_save OMVM_GUEST_USER "$GUEST_USER"
+        warn "no OMVM_GUEST_USER: assuming the existing image's account is '$GUEST_USER' (saved in $CFG_FILE)"
     elif [ -z "$GUEST_USER" ]; then
         [ -t 0 ] && command -v gum >/dev/null || die "set OMVM_GUEST_USER=NAME (the macOS account omvm creates and logs in as)"
         GUEST_USER="$(gum input --prompt "macOS account name: " --placeholder "$(id -un)" --value "$(id -un)")"
@@ -668,9 +678,11 @@ cmd_virt() {
     [ "${major:-0}" -ge 27 ] 2>/dev/null && qemu="${OMVM_QEMU27:-$UPSTREAM/build/qemu-sb-bdifw/build/qemu-system-aarch64}"
     [ -x "$qemu" ] || die "build the graphics stack first (docs/graphics.md): no $qemu"
     if [ ! -f "$dir/disk.img" ]; then
+        # A new VM records its account now, so it never takes the legacy fallback.
+        [ -s "$dir/guest_user" ] || need_guest_user
         mkdir -p "$dir"
         for f in disk.img aux.img.trimmed vm.json; do cp --reflink=auto "$img/guest/$f" "$dir/$f"; chmod u+w "$dir/$f"; done
-        [ -z "$GUEST_USER" ] || [ -e "$dir/guest_user" ] || echo "$GUEST_USER" > "$dir/guest_user"
+        [ -e "$dir/guest_user" ] || echo "$GUEST_USER" > "$dir/guest_user"
         ok "$name: disk cloned from $(basename "$img")"
     fi
     # What the current definition (if any) has, to carry over on a redefine.
@@ -691,8 +703,9 @@ cmd_virt() {
         AVPBOOTER="${OMVM_AVPBOOTER27:-$UPSTREAM/artifacts/firmware/AVPBooter.vmapple2.macos27.2-26B123.bin}"
         [ -f "$AVPBOOTER" ] || die "macOS $major guest needs the 27-era AVPBooter: no $AVPBOOTER"
     fi
-    local was lscr="" lwl="" base final
+    local was lscr="" lwl="" base final auto
     was="$(vm_mode "$name" 2>/dev/null || echo remote)"
+    auto="$(vm_autostart "$name")"   # enable, disable, or empty for a new domain
     # A local-mode VM is redefined in local mode: work out its screen and Wayland
     # socket first, so a failure leaves the current definition untouched.
     if [ "$was" = local ]; then
@@ -717,7 +730,12 @@ cmd_virt() {
     if [ "$was" = local ]; then mode_xml local "$lscr" "$lwl" < "$base" > "$final"; else cp "$base" "$final"; fi
     "${VIRSH[@]}" define "$final" >/dev/null   # the one libvirt change, after everything above worked
     cp "$base" "$dir/domain.xml"
-    mode_autostart "$name" "$was"
+    # libvirt keeps a domain's autostart flag across a redefine; say so anyway,
+    # so `omvm virt` never turns autostart on (only `omvm remote keepalive`
+    # does). Local mode keeps it off (no Wayland at boot).
+    if [ "$was" = local ]; then "${VIRSH[@]}" autostart --disable "$name" >/dev/null
+    elif [ "$auto" = enable ]; then "${VIRSH[@]}" autostart "$name" >/dev/null
+    elif [ "$auto" = disable ]; then "${VIRSH[@]}" autostart --disable "$name" >/dev/null; fi
     # Clipboard + display-follow start/stop with the VM, however it is started:
     # the per-user hook (omvm's own file; one that omvm did not write is kept).
     local uhook="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu" tmp
@@ -776,14 +794,19 @@ virt_rm() { # NAME YES(0|1)
     fi
     # The watchdog would start it again within a minute: hold it off, and only
     # disable it once the guest is really off.
+    # Whatever ends this early (Ctrl-C, a failed resume, die), the exit trap
+    # starts the watchdog again (omvm_exit, OMVM_RESTORE_TIMER).
     local watchdog=0
     systemctl --user is-active -q "omvm-vm@$n.timer" 2>/dev/null && watchdog=1
+    [ "$watchdog" = 0 ] || OMVM_RESTORE_TIMER="omvm-vm@$n.timer"
+    trap 'exit 130' INT; trap 'exit 143' TERM
     systemctl --user stop "omvm-vm@$n.timer" "omvm-vm@$n.service" >/dev/null 2>&1 || true
-    [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = paused ] && "${VIRSH[@]}" resume "$n" >/dev/null  # paused guests can't shut down
-    if ! vm_try_shutdown "$n"; then
-        [ "$watchdog" = 0 ] || systemctl --user start "omvm-vm@$n.timer" >/dev/null 2>&1 || true
-        die "$n is still running after 4 min: nothing removed$([ "$watchdog" = 0 ] || echo ", watchdog back on") (shut macOS down, then retry)"
+    if [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = paused ]; then   # paused guests can't shut down
+        "${VIRSH[@]}" resume "$n" >/dev/null || die "could not resume $n: nothing removed"
     fi
+    vm_try_shutdown "$n" ||
+        die "$n is still running after 4 min: nothing removed$([ "$watchdog" = 0 ] || echo ", watchdog back on") (shut macOS down, then retry)"
+    OMVM_RESTORE_TIMER=""; trap - INT TERM
     systemctl --user disable --now "omvm-vm@$n.timer" "omvm-vm@$n.service" >/dev/null 2>&1 || true
     "${VIRSH[@]}" undefine "$n" >/dev/null && ok "removed $n from libvirt (disk kept in $IMAGES/vms/$n)"
 }
@@ -805,10 +828,19 @@ local_screen() {
         j="$(hyprctl monitors -j 2>/dev/null | jq -c '[.[] | select(.name | test("^eDP"))][0] // .[0]' 2>/dev/null || true)"
         [ -n "$j" ] && [ "$j" != null ] ||
             die "can't read the screen from hyprctl: set OMVM_LOCAL_RESOLUTION=WxH@PPI and OMVM_LOCAL_REFRESH=HZ"
-        [ -n "$res" ] || res="$(jq -r 'if .physicalWidth > 0 then "\(.width)x\(.height)@\((.width * 25.4 / .physicalWidth) | floor)"
-                                    else "\(.width)x\(.height)@\((110 * .scale) | floor)" end' <<<"$j")"
-        [ -n "$hz" ] || hz="$(jq -r '.refreshRate | round' <<<"$j")"
+        # Callers run this as `x=$(local_screen) || die`, where set -e is off:
+        # every step checks its own result.
+        if [ -z "$res" ]; then
+            res="$(jq -r 'if .physicalWidth > 0 then "\(.width)x\(.height)@\((.width * 25.4 / .physicalWidth) | floor)"
+                          else "\(.width)x\(.height)@\((110 * .scale) | floor)" end' <<<"$j")" ||
+                die "can't read the screen size from hyprctl"
+        fi
+        if [ -z "$hz" ]; then
+            hz="$(jq -r '.refreshRate | round' <<<"$j")" || die "can't read the refresh rate from hyprctl"
+        fi
     fi
+    [[ $res =~ ^[0-9]+x[0-9]+@[0-9]+$ ]] || die "bad screen size '$res' (OMVM_LOCAL_RESOLUTION is WxH@PPI)"
+    [[ $hz =~ ^[0-9]+$ ]] && ((hz > 0)) || die "bad refresh rate '$hz' (OMVM_LOCAL_REFRESH is HZ)"
     echo "$res $hz"
 }
 # The Wayland socket to open windows on: $WAYLAND_DISPLAY, else the newest
@@ -929,11 +961,16 @@ mode_xml() { # local SCREEN WAYLAND | remote: domain XML on stdin -> that mode's
         python3 "$SHARE/libvirt-mode.py" remote
     fi
 }
-# libvirt autostart runs at boot, before any Wayland session: local leaves
-# starting to omvm-vm@NAME (which waits for the session).
+vm_autostart() { # NAME -> enable|disable (libvirt's flag), empty if no such domain
+    "${VIRSH[@]}" dominfo "$1" 2>/dev/null | awk -F': *' '$1 == "Autostart" { print $2 }'
+}
+# libvirt autostart runs at boot, before any Wayland session: local mode turns it
+# off and leaves starting to omvm-vm@NAME (which waits for the session). Back in
+# remote mode it comes on again only for a VM `omvm remote keepalive` set up
+# (its omvm-vm@NAME.timer is enabled); otherwise it stays as it is.
 mode_autostart() { # NAME local|remote
     if [ "$2" = local ]; then "${VIRSH[@]}" autostart --disable "$1" >/dev/null
-    else "${VIRSH[@]}" autostart "$1" >/dev/null; fi
+    elif systemctl --user is-enabled -q "omvm-vm@$1.timer" 2>/dev/null; then "${VIRSH[@]}" autostart "$1" >/dev/null; fi
 }
 define_mode() { # NAME local|remote [SCREEN WAYLAND]: redefine NAME in that mode
     local n="$1" m="$2" scr="${3:-}" wl="${4:-}" xml new
@@ -1150,7 +1187,7 @@ usb_trust() { # VM [SECONDS]: ask the wired iPhone to pair, make noise until the
         XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk '{print $2}' <<<"$vol")"
         case "$vol" in *MUTED*) XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 ;; esac
     }
-    trap 'restore_vol; rm -f -- "${OMVM_TMPS[@]}"' EXIT
+    trap 'restore_vol; omvm_exit' EXIT
     XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null || true
     XDG_RUNTIME_DIR="/run/user/$(id -u)" wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.9 2>/dev/null || true
     end=$((SECONDS + limit))
@@ -1160,7 +1197,7 @@ usb_trust() { # VM [SECONDS]: ask the wired iPhone to pair, make noise until the
         st="$(usb_ios_state "$n" | head -1 | cut -f1)"
         [ "$st" = paired ] && break
     done
-    restore_vol; trap 'rm -f -- "${OMVM_TMPS[@]}"' EXIT
+    restore_vol; trap omvm_exit EXIT
     [ "$st" = paired ] && sleep 90   # passcode entry and the phone's re-enumeration after it
     for bp in "${watched[@]}"; do usb_watch_start "$n" "$bp"; done
     if [ "$st" = paired ]; then
@@ -1306,10 +1343,17 @@ virt-hook) shift
     # also ones outside IMAGES: the root gate counts them toward the guest limit
     # and refuses unmanaged ones that use the helpers' sockets. It ignores
     # domains that are not vmapple.
+    # Only vmapple domains are sent: the test is a plain substring, looser than
+    # the root gate's own (machine='vmapple' or a vmapple -machine type), so no
+    # vmapple guest skips it, while other session VMs never depend on the
+    # helpers' sudoers/manifest being intact.
     if [ -x /usr/local/libexec/omvm-apple-helpers ]; then
         case "${2:-}/${3:-}" in
         prepare/begin|started/begin|release/end)
-            sudo -n /usr/local/libexec/omvm-apple-helpers gate "$1" "$2" "$3" ;;
+            xml="$(cat)"
+            case "$xml" in
+            *vmapple*) printf '%s' "$xml" | sudo -n /usr/local/libexec/omvm-apple-helpers gate "$1" "$2" "$3" ;;
+            esac ;;
         esac
     fi
     if [ -f "$IMAGES/vms/$1/ssh_port" ]; then
