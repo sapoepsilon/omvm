@@ -11,6 +11,6 @@ omvm virt rm macos         # unregister; the disk stays
 ```
 
 - **The machine itself:** libvirt doesn't model the vmapple machine, so its devices (disks, network, sound) are passed through `<qemu:commandline>` (`share/libvirt-domain.py`). libvirt still owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
-- **Clipboard and display:** when the VM starts, a hook turns on clipboard sharing and display-follow, so the guest resizes with the viewer window. libvirt only reads hooks from `/etc/libvirt/hooks/qemu`, so `omvm virt` installs a three-line hook there once (with sudo). That hook hands the event to `~/.config/libvirt/hooks/qemu`.
+- **Clipboard and display:** when the VM starts, a hook turns on clipboard sharing and display-follow, so the guest resizes with the viewer window. libvirt only reads hooks from `/etc/libvirt/hooks`, so the omvm package ships `/etc/libvirt/hooks/qemu.d/50-omvm` (libvirt runs every script in `qemu.d`, leaving any other hook alone). It hands the event to `~/.config/libvirt/hooks/qemu`, which `omvm virt` writes. An older install's omvm forwarder in `/etc/libvirt/hooks/qemu` keeps working, and the packaged one does nothing while it is there.
 - **Graphics:** this needs the GPU stack from [graphics.md](graphics.md).
 - **VM limit:** macOS allows two VMs per host. VMs started by libvirt count toward it too.

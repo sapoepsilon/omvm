@@ -1,0 +1,15 @@
+#!/bin/sh
+# omvm: hand libvirt QEMU events to the per-user hook (session daemons run hooks
+# as the user, and libvirt reads hooks only from /etc/libvirt/hooks).
+#
+# Shipped by the omvm package as /etc/libvirt/hooks/qemu.d/50-omvm: libvirt
+# (6.5 and newer) runs every executable in qemu.d after /etc/libvirt/hooks/qemu,
+# so other hooks are left alone. libvirt looks for hooks when its daemon
+# starts; a running session daemon picks this up on its next start.
+[ "$(id -u)" != 0 ] || exit 0
+# omvm before this file was packaged wrote the same forwarder to
+# /etc/libvirt/hooks/qemu: while that one is there, it does the forwarding.
+grep -qs '^# omvm: hand libvirt QEMU events to the per-user hook' /etc/libvirt/hooks/qemu && exit 0
+h="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
+[ -x "$h" ] && exec "$h" "$@"
+exit 0

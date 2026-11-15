@@ -519,34 +519,49 @@ cmd_virt() {
         "$("$UPSTREAM/scripts/extract-ecid.py" "$dir/vm.json")" "$port" "${CPUS:-8}" "${RAM_GIB:-16}" > "$dir/domain.xml"
     virsh -q -c qemu:///session define "$dir/domain.xml" >/dev/null
     [ "$was" = local ] && define_mode "$name" local
-    # Clipboard + display-follow start/stop with the VM, however it is started.
-    mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks"
-    {
-        echo '#!/bin/sh'
-        echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
-        echo "case \"\$2/\$3\" in prepare/begin|started/begin|release/end) ;; *) [ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0 ;; esac"
-        echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY' OMVM_GUEST_USER='$GUEST_USER'"
-        echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}'"
-        echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" \"\$3\""
-    } > "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
-    chmod +x "${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
-    # libvirt reads hooks only from /etc/libvirt/hooks, also for per-user daemons:
-    # a system hook that hands the event to the user's own hook (once, needs sudo).
-    if ! grep -qs omvm /etc/libvirt/hooks/qemu; then
-        say "installing /etc/libvirt/hooks/qemu (hands VM start/stop to your own hook)"
-        sudo install -Dm755 /dev/stdin /etc/libvirt/hooks/qemu <<'HOOK'
-#!/bin/sh
-# omvm: hand libvirt QEMU events to the per-user hook (session daemons run as the user).
-h="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
-[ "$(id -u)" != 0 ] && [ -x "$h" ] && exec "$h" "$@"
-exit 0
-HOOK
+    # Clipboard + display-follow start/stop with the VM, however it is started:
+    # the per-user hook (omvm's own file; one that omvm did not write is kept).
+    local uhook="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu" tmp
+    if [ -e "$uhook" ] && ! grep -qs '^# omvm: ' "$uhook"; then
+        warn "$uhook is not omvm's: left as is (clipboard/display follow won't start with the VM)"
+    else
+        mkdir -p "$(dirname "$uhook")"; tmp="$(mktemp "$uhook.XXXXXX")"
+        {
+            echo '#!/bin/sh'
+            echo '# omvm: clipboard + display follow for omvm VMs started by libvirt (virt-manager)'
+            echo "case \"\$2/\$3\" in prepare/begin|started/begin|release/end) ;; *) [ -f \"$IMAGES/vms/\$1/ssh_port\" ] || exit 0 ;; esac"
+            echo "export OMVM_UPSTREAM='$UPSTREAM' OMVM_IMAGES='$IMAGES' OMVM_KEY='$KEY' OMVM_GUEST_USER='$GUEST_USER'"
+            echo "export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/run/user/$(id -u)}'"
+            echo "exec '$(readlink -f "$0")' virt-hook \"\$1\" \"\$2\" \"\$3\""
+        } > "$tmp"
+        chmod 755 "$tmp"; mv "$tmp" "$uhook"
     fi
-    # Let virt-manager show the per-user connection.
-    gsettings set org.virt-manager.virt-manager.connections uris "['qemu:///session']" 2>/dev/null || true
-    gsettings set org.virt-manager.virt-manager.connections autoconnect "['qemu:///session']" 2>/dev/null || true
+    # libvirt reads hooks only from /etc/libvirt/hooks, also for per-user daemons.
+    # The omvm package ships the system side, a forwarder to the per-user hook in
+    # /etc/libvirt/hooks/qemu.d/ (libvirt >= 6.5), so omvm never writes /etc and
+    # never replaces another hook. An older omvm's /etc/libvirt/hooks/qemu
+    # forwarder also works.
+    if [ ! -x /etc/libvirt/hooks/qemu.d/50-omvm ] &&
+       ! grep -qs '^# omvm: hand libvirt QEMU events to the per-user hook' /etc/libvirt/hooks/qemu; then
+        warn "no omvm libvirt hook: install the omvm package (/etc/libvirt/hooks/qemu.d/50-omvm), then restart virtqemud"
+    fi
+    # Let virt-manager show the per-user connection, keeping the ones it has.
+    gsettings_append org.virt-manager.virt-manager.connections uris qemu:///session
+    gsettings_append org.virt-manager.virt-manager.connections autoconnect qemu:///session
     ok "$name: in virt-manager (QEMU/KVM User session). Start it there or: virsh -c qemu:///session start $name"
     echo "    SSH: omvm ssh $name   clipboard: omvm clip $name"
+}
+
+gsettings_append() { # SCHEMA KEY VALUE: add VALUE to a string-list setting unless it is there
+    local cur new
+    cur="$(gsettings get "$1" "$2" 2>/dev/null)" || return 0
+    new="$(python3 -I -c 'import ast, sys
+cur, v = sys.argv[1].strip(), sys.argv[2]
+cur = cur[len("@as "):] if cur.startswith("@as ") else cur
+items = ast.literal_eval(cur)
+if isinstance(items, list) and v not in items:
+    print(repr([str(i) for i in items] + [v]))' "$cur" "$3" 2>/dev/null)" || return 0
+    [ -z "$new" ] || gsettings set "$1" "$2" "$new" 2>/dev/null || true
 }
 
 # Remove a VM from libvirt: asks first, holds off the watchdog, shuts macOS down
