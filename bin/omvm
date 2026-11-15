@@ -1220,8 +1220,11 @@ virt-hook) shift
     # prepare/started/begin and release/end need the original XML on stdin. No libvirt
     # calls (including upstream checkout) may occur inside this hook.
     # The experimental Apple helpers' admission gate (installed only by their own
-    # opt-in installer, docs/apple-helpers.md) applies to omvm's own VMs only.
-    if [ -x /usr/local/libexec/omvm-apple-helpers ] && [ -f "$IMAGES/vms/$1/ssh_port" ]; then
+    # opt-in installer, docs/apple-helpers.md). Every vmapple guest reaches it,
+    # also ones outside IMAGES: the root gate counts them toward the guest limit
+    # and refuses unmanaged ones that use the helpers' sockets. It ignores
+    # domains that are not vmapple.
+    if [ -x /usr/local/libexec/omvm-apple-helpers ]; then
         case "${2:-}/${3:-}" in
         prepare/begin|started/begin|release/end)
             sudo -n /usr/local/libexec/omvm-apple-helpers gate "$1" "$2" "$3" ;;

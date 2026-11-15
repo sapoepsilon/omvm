@@ -766,13 +766,9 @@ class HookTests(unittest.TestCase):
                 env={**os.environ,'PATH':d+':'+os.environ.get('PATH',''),'TRACE':str(trace),'IMAGES':d,'FAIL':'7' if fail else '0'}
                 result=subprocess.run([str(script),'virt-hook','one','started','begin'],input=XML,env=env,capture_output=True)
                 self.assertEqual(result.returncode,7 if fail else 0,result.stderr)
-                lines=trace.read_text().splitlines() if trace.exists() else []
-                if not managed:
-                    # Only omvm's own VMs (IMAGES/vms/NAME/ssh_port) reach the gate.
-                    self.assertEqual(lines,[])
-                    continue
+                lines=trace.read_text().splitlines()
                 self.assertEqual(json.loads(lines[0]),['gate',['gate','one','started','begin'],XML.decode()])
-                self.assertEqual(lines[1:],['clip','follow','governor'] if not fail else [])
+                self.assertEqual(lines[1:],['clip','follow','governor'] if managed and not fail else [])
 
 
 class ProcessIdentityTests(unittest.TestCase):

@@ -30,7 +30,8 @@ in, and redefine it, with:
 A VM whose libvirt definition already has `identity=on` (defined before this
 was opt-in) keeps it: its next `omvm virt NAME` writes the flag file for it. The
 root admission gate of the [Linux helpers](apple-helpers.md) runs only once those
-helpers are installed, and only for omvm's own VMs (`$OMVM_IMAGES/vms/NAME`).
+helpers are installed; it sees every vmapple guest, so the guest limit also
+covers VMs outside `$OMVM_IMAGES`.
 
 ## Next steps
 
