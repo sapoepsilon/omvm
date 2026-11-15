@@ -142,9 +142,12 @@ omvm perf ac       # only on AC power: back to the saved governor on battery
 omvm perf off      # never touch the governor
 ```
 
-`ac` installs `/etc/udev/rules.d/90-omvm-power.rules`: a change of the Mains supply
-(`macsmc-ac`) starts the user unit `omvm-power.service`, which runs `omvm perf apply`; no
-polling. `OMVM_LOCAL_GOVERNOR` overrides the file (`keep` = off, a governor name = always with
+The omvm package ships `90-omvm-power.rules`: a change of the Mains supply
+(`macsmc-ac`) starts the user unit `omvm-power.service` (for users with a local-mode VM
+running), which runs `omvm perf apply`; no polling. Changing the governor is a privileged
+action: `omvm perf` asks through polkit; from the libvirt hook and that unit nobody can
+answer a prompt, so there it uses `sudo -n /usr/lib/omvm/bin/omvm __priv governors ...`,
+which works only if sudoers allows it, and otherwise leaves the governor alone. `OMVM_LOCAL_GOVERNOR` overrides the file (`keep` = off, a governor name = always with
 that governor). The GUI has the same switch (Display, "CPU performance"). With `schedutil` a pointer
 move took 51 ms to show in the guest's image (10 ms to reach the guest); with `performance`
 20 ms (1.4 ms). The cursor itself is the host's: SDL's colour cursor with the guest's glyph,

@@ -1,0 +1,2 @@
+# omvm perf ac: re-apply the CPU governor for local-mode VMs when AC power comes or goes.
+SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ACTION=="change", RUN+="/usr/lib/omvm/omvm-power-changed"

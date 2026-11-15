@@ -1,0 +1,8 @@
+# omvm: re-apply the CPU governor setting (omvm perf) when AC power comes or goes.
+# Started by /usr/lib/omvm/omvm-power-changed (90-omvm-power.rules).
+[Unit]
+Description=omvm: CPU governor for local-mode VMs after a power change
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omvm perf apply

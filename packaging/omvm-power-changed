@@ -1,0 +1,15 @@
+#!/bin/bash
+# omvm: run from 90-omvm-power.rules (as root) on a Mains change. Starts the user
+# unit omvm-power.service (`omvm perf apply`) for each user that has a local-mode
+# VM running, which omvm marks in /run/user/UID/omvm-governor. Nothing else.
+export PATH=/usr/bin:/usr/sbin LC_ALL=C.UTF-8
+for d in /run/user/*/omvm-governor; do
+  [[ -d $d && ! -L $d ]] || continue
+  uid=${d#/run/user/}; uid=${uid%%/*}
+  [[ $uid =~ ^[0-9]{1,10}$ ]] && ((uid > 0)) || continue
+  [[ $(stat -c %u -- "$d") == "$uid" ]] || continue
+  compgen -G "$d/vm.*" >/dev/null || continue
+  user=$(getent passwd "$uid" | cut -d: -f1) || continue
+  [[ -n $user ]] && systemctl --no-block --user -M "$user@" start omvm-power.service || true
+done
+exit 0

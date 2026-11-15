@@ -1,0 +1,10 @@
+# omvm: iPhones and iPads (Apple 05ac:12aX/12bX) for `omvm usb attach`.
+# QEMU runs as the user (qemu:///session) and opens the phone again every time
+# it re-enumerates (each USB mode switch), so the access has to come from a rule,
+# not from a one-off grant. Scoped to these Apple devices only:
+#   uaccess     the user at the active local seat
+#   group omvm  members of the omvm group (sysusers.d/omvm.conf), for VMs that
+#               run with no one at the seat (remote mode, lid closed); opt in with
+#               `sudo gpasswd -a USER omvm`
+# Numbered below 73-seat-late.rules, which applies uaccess.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05ac", ATTR{idProduct}=="12[ab][0-9a-f]", GROUP="omvm", MODE="0660", TAG+="uaccess"

@@ -26,10 +26,14 @@ the manufacturer + product string (`iphone`), `BUS-PORT` the sysfs name (`2-1`,
   re-enumerates on the same port (iPhones do that whenever their USB mode changes).
 - The attachment is live only: it ends on detach, unplug-for-good or VM stop.
   Re-run `omvm usb attach` after a VM restart.
-- QEMU runs as the user (`qemu:///session`). `attach` appends a line to
-  `/etc/udev/rules.d/70-omvm-usb.rules` giving the user the device node
-  (`OWNER=<user>, MODE=0660` for that VID:PID) and re-triggers it, so it also works
-  without a local seat (remote mode, lid closed). Needs passwordless sudo.
+- QEMU runs as the user (`qemu:///session`), so the user needs the device node.
+  iPhones and iPads: the packaged `/usr/lib/udev/rules.d/70-omvm-apple-usb.rules`
+  gives it to the user at the seat (`uaccess`) and to the `omvm` group (join it with
+  `sudo gpasswd -a $USER omvm` for VMs used with no one at the seat: remote mode, lid
+  closed). Other devices: `attach` asks (polkit) for an ACL on that one device node and
+  `detach` removes it; unplugging removes it too. omvm no longer writes
+  `/etc/udev/rules.d`; a `70-omvm-usb.rules` an older omvm wrote there still applies
+  until you delete it.
 - Host drivers on the device (Linux binds `apple-mfi-fastcharge`, `ipheth` and
   `cdc_ncm` to an iPhone) are detached by QEMU's libusb when it claims the
   interfaces. Nothing else on the host may hold the phone: no `usbmuxd`, no
