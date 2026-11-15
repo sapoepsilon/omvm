@@ -15,7 +15,9 @@
 #   omvm start|stop|restart|pause|resume NAME (virt) | start NAME IMAGE | ssh NAME | list | images
 #   omvm gui NAME [IMAGE]       desktop over VNC (paravirtual GPU on the host GPU);
 #                               RESOLUTION=WxH[@PPI] picks the first mode
-#   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt)
+#   omvm virt NAME [IMAGE]      persistent VM managed in virt-manager (libvirt);
+#                               --experimental-apple-services opts it in (docs/apple-services.md)
+#   omvm virt rm [--yes] NAME   shut it down cleanly and remove it from libvirt (disk kept)
 #   omvm mode [local|remote] [NAME]  show or switch a virt VM's display: a window on
 #                               this screen (local) or VNC + Sunshine (remote, default)
 #   omvm perf [always|ac|off]   show or set the CPU governor for local-mode VMs: performance
@@ -454,24 +456,22 @@ cmd_clip() {
 # definition already has them (identity=on, from before they were opt-in) keeps
 # them: the flag file is written for it on its next `omvm virt`.
 cmd_virt() {
-    local apple="" a pos=()
+    local apple="" yes=0 a pos=()
     for a in "$@"; do
         case "$a" in
+        --yes|-y) yes=1 ;;
         --experimental-apple-services) apple=on ;;
         --no-experimental-apple-services) apple=off ;;
         *) pos+=("$a") ;;
         esac
     done
     set -- "${pos[@]}"
-    upstream
-    local name="${1:?usage: omvm virt NAME [IMAGE] [--[no-]experimental-apple-services] | omvm virt rm NAME}" img
+    local name="${1:?usage: omvm virt NAME [IMAGE] [--[no-]experimental-apple-services] | omvm virt rm [--yes] NAME}" img
     if [ "$name" = rm ]; then
-        name="${2:?usage: omvm virt rm NAME}"; need_name "$name"
-        virsh -q -c qemu:///session destroy "$name" >/dev/null 2>&1 || true
-        virsh -q -c qemu:///session undefine "$name" >/dev/null && ok "removed $name from libvirt (disk kept in $IMAGES/vms/$name)"
-        return
+        name="${2:?usage: omvm virt rm [--yes] NAME}"; need_name "$name"
+        virt_rm "$name" "$yes"; return
     fi
-    need_name "$name"
+    upstream    need_name "$name"
     command -v virsh >/dev/null || die "install libvirt and virt-manager first: omarchy pkg add libvirt virt-manager"
     img="$(resolve_image "${2:-}")"
     local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port major
@@ -547,6 +547,24 @@ HOOK
     gsettings set org.virt-manager.virt-manager.connections autoconnect "['qemu:///session']" 2>/dev/null || true
     ok "$name: in virt-manager (QEMU/KVM User session). Start it there or: virsh -c qemu:///session start $name"
     echo "    SSH: omvm ssh $name   clipboard: omvm clip $name"
+}
+
+# Remove a VM from libvirt: asks first, holds off the watchdog, shuts macOS down
+# cleanly (vm_shutdown; it never forces), then undefines. The disk stays.
+virt_rm() { # NAME YES(0|1)
+    local n="$1"
+    "${VIRSH[@]}" dominfo "$n" >/dev/null 2>&1 || die "no libvirt VM '$n'"
+    if [ "$2" != 1 ]; then
+        [ -t 0 ] && command -v gum >/dev/null || die "not a terminal: confirm with omvm virt rm --yes $n"
+        if ! gum confirm --default=false "Remove $n from libvirt? It is shut down first; its disk stays in $IMAGES/vms/$n."; then
+            echo "Removal cancelled by user"; exit 1
+        fi
+    fi
+    # The watchdog would start it again within a minute.
+    systemctl --user disable --now "omvm-vm@$n.timer" "omvm-vm@$n.service" >/dev/null 2>&1 || true
+    [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = paused ] && "${VIRSH[@]}" resume "$n" >/dev/null  # paused guests can't shut down
+    vm_shutdown "$n"
+    "${VIRSH[@]}" undefine "$n" >/dev/null && ok "removed $n from libvirt (disk kept in $IMAGES/vms/$n)"
 }
 
 # ---------------------------------------------------------------- mode
