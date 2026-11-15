@@ -56,6 +56,11 @@ bad()  { printf '  %s✗%s %s\n' "$c_r" "$c_0" "$*"; }
 warn() { printf '  %s!%s %s\n' "$c_y" "$c_0" "$*"; }
 die()  { printf '%serror:%s %s\n' "$c_r" "$c_0" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "missing '$1' (sudo pacman -S --needed $2)"; }
+# VM names end up in paths (rm -rf of a run directory), systemd unit names and
+# libvirt XML, so every command that takes one checks it first.
+valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+need_name() { valid_name "${1:-}" || die "invalid VM name '${1:-}' (letters, digits, '_' and '-', at most 32)"; }
+valid_busport() { [[ $1 =~ ^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$ ]]; }   # a USB device's sysfs name, e.g. 3-1.2
 
 ssh_opts=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
@@ -258,12 +263,12 @@ cmd_run() {
     (cd "$UPSTREAM" && GOLDEN="$img" CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-job.sh "$*")
 }
 
-port_of() { cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/null || cat "$IMAGES/vms/$1/ssh_port" 2>/dev/null || die "no VM '$1'"; }
+port_of() { need_name "$1"; cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/null || cat "$IMAGES/vms/$1/ssh_port" 2>/dev/null || die "no VM '$1'"; }
 
 cmd_start() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power start "$1"; return; fi
     upstream; guest_env
-    local name="${1:?usage: omvm start NAME [IMAGE]}" img; img="$(resolve_image "${2:-}")"
+    local name="${1:?usage: omvm start NAME [IMAGE]}" img; need_name "$name"; img="$(resolve_image "${2:-}")"
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     (cd "$UPSTREAM" && GOLDEN="$img" SSH_PORT="$port" INJECT=0 CPUS="${CPUS:-8}" RAM="${RAM:-16G}" scripts/vm-run.sh start "$name")
     echo "$port" > "$UPSTREAM/artifacts/runs/$name/ssh_port"
@@ -271,11 +276,12 @@ cmd_start() {
     ok "$name is up: omvm ssh $name   (stop: omvm stop $name; changes are discarded on stop)"
 }
 
-cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" "$@"; }
+cmd_ssh()  { local n="${1:?usage: omvm ssh NAME}"; need_name "$n"; shift; exec ssh "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" "$@"; }
 
 cmd_stop() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power stop "$1"; return; fi
-    local n="${1:?usage: omvm stop NAME}" run="$UPSTREAM/artifacts/runs/$1"
+    local n="${1:?usage: omvm stop NAME}"; need_name "$n"
+    local run="$UPSTREAM/artifacts/runs/$n"
     clip_stop "$n"
     ssh -n "${ssh_opts[@]}" -p "$(port_of "$n")" "$GUEST_USER@127.0.0.1" 'sudo -n shutdown -h now' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do kill -0 "$(cat "$run/launcher.pid" 2>/dev/null)" 2>/dev/null || break; sleep 1; done
@@ -287,10 +293,11 @@ cmd_stop() {
 # start|stop|restart|pause|resume for libvirt VMs (omvm virt). Stop holds off the
 # watchdog (omvm-vm@NAME.timer), which would start the VM again within a minute;
 # start turns it back on. Pause keeps the guest in memory (virsh suspend).
-is_virt() { [ ! -d "$UPSTREAM/artifacts/runs/$1" ] && command -v virsh >/dev/null &&
+is_virt() { valid_name "$1" && [ ! -d "$UPSTREAM/artifacts/runs/$1" ] && command -v virsh >/dev/null &&
             virsh -q -c qemu:///session dominfo "$1" >/dev/null 2>&1; }
 cmd_power() { # start|stop|restart|pause|resume NAME
     local verb="$1" n="${2:-${OMVM_VM:-macos}}" s
+    need_name "$n"
     is_virt "$n" || die "no libvirt VM '$n' (omvm virt $n)"
     s="$("${VIRSH[@]}" domstate "$n")"
     case "$verb" in
@@ -320,7 +327,7 @@ cmd_power() { # start|stop|restart|pause|resume NAME
 cmd_gui() {
     # Paravirtual GPU (Reims, out of process) on the host GPU + QEMU VNC.
     upstream
-    local name="${1:?usage: omvm gui NAME [IMAGE]}" img; img="$(resolve_image "${2:-}")"
+    local name="${1:?usage: omvm gui NAME [IMAGE]}" img; need_name "$name"; img="$(resolve_image "${2:-}")"
     local oop="$UPSTREAM/build/qemu-oop"
     if ! test -x "$oop/qemu/build/qemu-system-aarch64" || ! test -x "$oop/reims/target/release/reims-vgpu-backend"; then
         say "building the GPU-path QEMU + Reims backend (once, ~15 min)"
@@ -375,6 +382,7 @@ cmd_gui() {
 # (share/omvm-display-follow.*): installed over SSH once the guest is up, in the background.
 # A VM's state directory: a throwaway run, or a persistent (virt) VM.
 run_dir() {
+    need_name "$1"
     local d="$UPSTREAM/artifacts/runs/$1"
     [ -d "$d" ] || d="$IMAGES/vms/$1"
     mkdir -p "$d/logs"; echo "$d"
@@ -411,7 +419,7 @@ clip_stop() {
     rm -f "$f"
 }
 cmd_clip() {
-    local n="${1:?usage: omvm clip NAME [off]}"
+    local n="${1:?usage: omvm clip NAME [off]}"; need_name "$n"
     if [ "${2:-}" = off ]; then clip_stop "$n"; ok "$n: clipboard sharing off"; else clip_start "$n"; ok "$n: clipboard shared with the host"; fi
 }
 
@@ -421,11 +429,12 @@ cmd_virt() {
     upstream
     local name="${1:?usage: omvm virt NAME [IMAGE] | omvm virt rm NAME}" img
     if [ "$name" = rm ]; then
-        name="${2:?usage: omvm virt rm NAME}"
+        name="${2:?usage: omvm virt rm NAME}"; need_name "$name"
         virsh -q -c qemu:///session destroy "$name" >/dev/null 2>&1 || true
         virsh -q -c qemu:///session undefine "$name" >/dev/null && ok "removed $name from libvirt (disk kept in $IMAGES/vms/$name)"
         return
     fi
+    need_name "$name"
     command -v virsh >/dev/null || die "install libvirt and virt-manager first: omarchy pkg add libvirt virt-manager"
     img="$(resolve_image "${2:-}")"
     local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port major
@@ -648,6 +657,7 @@ vm_shutdown() { # NAME: clean guest shutdown, at most ~4 minutes
 cmd_mode() {
     local m="" n="${OMVM_VM:-macos}" cur
     case "${1:-}" in local|remote) m="$1"; n="${2:-$n}" ;; "") ;; *) n="$1" ;; esac
+    need_name "$n"
     command -v virsh >/dev/null || die "no libvirt (omvm virt first)"
     cur="$(vm_mode "$n")" || die "no libvirt VM '$n' (omvm virt $n)"
     if [ -z "$m" ]; then echo "$cur"; return; fi
@@ -689,6 +699,7 @@ window_of() { # CLASS-REGEX -> address of the first window whose class matches
 }
 cmd_show() {
     local n="${1:-${OMVM_VM:-macos}}" m a="" port="" i
+    need_name "$n"
     command -v virsh >/dev/null || die "no libvirt (omvm virt first)"
     hypr_env
     m="$(vm_mode "$n")" || die "no libvirt VM '$n' (omvm virt $n)"
@@ -713,6 +724,7 @@ cmd_show() {
 }
 
 vnc_port_of() { # NAME -> QEMU VNC port (omvm gui run or libvirt domain)
+    need_name "$1"
     local n="$1" f="$UPSTREAM/artifacts/runs/$1/vnc_display" d
     if [[ -f $f ]]; then echo $((5900 + $(cat "$f"))); return; fi
     d=$(virsh -c qemu:///session vncdisplay "$n" 2>/dev/null | head -1) || true
@@ -890,7 +902,7 @@ cmd_usb() {
     local verb="${1:-list}" n line bp vp id
     case "$verb" in
     list)
-        n="${2:-${OMVM_VM:-macos}}"
+        n="${2:-${OMVM_VM:-macos}}"; need_name "$n"
         local att=""; [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = running ] && att="$(usb_attached "$n")"
         usb_host_devices | while IFS=$'\t' read -r bp vp sp desc; do
             printf '%-8s %s %7s  %-40s %s\n' "$bp" "$vp" "$sp" "$desc" \
@@ -901,7 +913,7 @@ cmd_usb() {
             [ -e "/sys/bus/usb/devices/${id#omvm-usb-}/idVendor" ] || echo "${id#omvm-usb-}  (not on the host now) -> $n"
         done ;;
     attach|detach)
-        n="${3:-${OMVM_VM:-macos}}"
+        n="${3:-${OMVM_VM:-macos}}"; need_name "$n"
         [ "$("${VIRSH[@]}" domstate "$n" 2>/dev/null)" = running ] || die "VM '$n' is not running"
         if [ "$verb" = detach ] && grep -qx "omvm-usb-${2:-}" <<<"$(usb_attached "$n")"; then
             bp="$2"   # by BUS-PORT even when the device is already unplugged
@@ -925,8 +937,8 @@ cmd_usb() {
         ok "attached $bp ($vp) to $n"
         case "$vp" in 05ac:12[ab]?) usb_watch_start "$n" "$bp" && ok "watching $bp (journalctl --user -u omvm-usb-watch-$n-$bp)" ;; esac
         case "$vp" in 05ac:12[ab]?) say "iPhone/iPad: run 'omvm usb trust $n' to pair it (tap Trust on the phone)" ;; esac ;;
-    trust) usb_trust "${2:-${OMVM_VM:-macos}}" "${3:-300}" ;;
-    watch) usb_watch "${2:?BUS-PORT}" "${3:-${OMVM_VM:-macos}}" ;;
+    trust) need_name "${2:-${OMVM_VM:-macos}}"; usb_trust "${2:-${OMVM_VM:-macos}}" "${3:-300}" ;;
+    watch) need_name "${3:-${OMVM_VM:-macos}}"; valid_busport "${2:-}" || die "invalid BUS-PORT '${2:-}'"; usb_watch "${2:?BUS-PORT}" "${3:-${OMVM_VM:-macos}}" ;;
     *) die "usage: omvm usb list [VM] | attach|detach BUS-PORT|VID:PID|NAME [VM] | trust [VM] [SECONDS]" ;;
     esac
 }
@@ -935,7 +947,7 @@ cmd_list()   { ls "$UPSTREAM/artifacts/runs" 2>/dev/null || true; }
 cmd_images() { ls -d "$IMAGES"/*/ 2>/dev/null | xargs -rn1 basename; }
 
 # Per-VM guest account: IMAGES/vms/NAME/guest_user overrides OMVM_GUEST_USER.
-case "${1:-}" in ssh|clip|res|stop|virt-hook|show|gui|start) [ -n "${2:-}" ] && [ -f "$IMAGES/vms/$2/guest_user" ] && GUEST_USER="$(cat "$IMAGES/vms/$2/guest_user")" ;; esac
+case "${1:-}" in ssh|clip|res|stop|virt-hook|show|gui|start) valid_name "${2:-}" && [ -f "$IMAGES/vms/$2/guest_user" ] && GUEST_USER="$(cat "$IMAGES/vms/$2/guest_user")" ;; esac
 case "${1:-help}" in
 doctor) shift; cmd_doctor "$@" ;;
 kernel) shift; cmd_kernel "$@" ;;
@@ -956,11 +968,13 @@ perf) shift; cmd_perf "$@" ;;
 usb) shift; cmd_usb "$@" ;;
 show) shift; cmd_show "$@" ;;
 helpers) shift; case "${1:-}" in
-    status) sudo -n /usr/local/libexec/omvm-apple-helpers status "${2:?usage: omvm helpers status NAME}" ;;
+    status) need_name "${2:?usage: omvm helpers status NAME}"; sudo -n /usr/local/libexec/omvm-apple-helpers status "$2" ;;
     install-hook) python3 "$SHARE/apple-helpers-hook.py" ;;
     *) die "usage: omvm helpers status NAME | install-hook" ;;
     esac ;;
 virt-hook) shift
+    # libvirt runs the hook for every session domain: ignore names omvm never makes.
+    valid_name "${1:-}" || exit 0
     # prepare/started/begin and release/end need the original XML on stdin. No libvirt
     # calls (including upstream checkout) may occur inside this hook.
     if [ -x /usr/local/libexec/omvm-apple-helpers ]; then

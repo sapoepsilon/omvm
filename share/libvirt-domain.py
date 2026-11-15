@@ -10,12 +10,19 @@ guest_major (e.g. 27; docs/graphics.md "macOS 27 updates") and apple_vendor_cap.
 The vmapple machine and its devices are not modelled by libvirt, so they are
 passed as QEMU arguments; libvirt owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
 """
-import json, os, sys, uuid
-from xml.sax.saxutils import quoteattr
+import json, os, re, sys, uuid
+from xml.sax.saxutils import escape, quoteattr
 
 name, vmdir, qemu, fw, ecid, ssh_port = sys.argv[1:7]
 cpus = sys.argv[7] if len(sys.argv) > 7 else "8"
 ram = sys.argv[8] if len(sys.argv) > 8 else "16"
+# The same rule as omvm's valid_name: the name is also a path component, a
+# systemd instance and a QEMU stream name, so refuse anything else outright.
+if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
+    sys.exit(f"libvirt-domain.py: invalid VM name {name!r} (letters, digits, '_' and '-', at most 32)")
+for label, value in (("SSH_PORT", ssh_port), ("CPUS", cpus), ("RAM_GIB", ram)):
+    if not re.fullmatch(r"[0-9]{1,5}", value):
+        sys.exit(f"libvirt-domain.py: {label} must be a number, not {value!r}")
 qdir = os.path.dirname(qemu)
 home = os.path.expanduser("~")
 # macOS 27 guests (VMDIR/guest_major holds 27 or more): their virtio transport
@@ -141,23 +148,24 @@ if os.path.exists(provider_file):
     env["OMVM_IDENTITY_SIGNER"] = endpoint
 
 x = lambda s: quoteattr(str(s))
+t = lambda s: escape(str(s))   # element text
 print(f"""<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
-  <name>{name}</name>
+  <name>{t(name)}</name>
   <uuid>{dom_uuid}</uuid>
-  <title>macOS ({name})</title>
-  <description>omvm macOS guest. SSH: omvm ssh {name} (port {ssh_port}).</description>
-  <metadata><omvm xmlns='https://github.com/sapoepsilon/omvm'><vmdir>{vmdir}</vmdir><ssh>{ssh_port}</ssh></omvm></metadata>
-  <memory unit='GiB'>{ram}</memory>
+  <title>macOS ({t(name)})</title>
+  <description>omvm macOS guest. SSH: omvm ssh {t(name)} (port {t(ssh_port)}).</description>
+  <metadata><omvm xmlns='https://github.com/sapoepsilon/omvm'><vmdir>{t(vmdir)}</vmdir><ssh>{t(ssh_port)}</ssh></omvm></metadata>
+  <memory unit='GiB'>{t(ram)}</memory>
   <memoryBacking><source type='memfd'/><access mode='shared'/></memoryBacking>
-  <vcpu>{cpus}</vcpu>
+  <vcpu>{t(cpus)}</vcpu>
   <os>
     <type arch='aarch64' machine='vmapple'>hvm</type>
-    <loader type='rom' readonly='yes'>{fw}</loader>
+    <loader type='rom' readonly='yes'>{t(fw)}</loader>
   </os>
   <cpu mode='host-passthrough'/>
   <on_reboot>restart</on_reboot>
   <devices>
-    <emulator>{qemu}</emulator>
+    <emulator>{t(qemu)}</emulator>
     <graphics type='vnc' autoport='yes' listen='127.0.0.1'><listen type='address' address='127.0.0.1'/></graphics>
     <video><model type='none'/></video>
     <memballoon model='none'/>
