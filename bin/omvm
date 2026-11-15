@@ -605,7 +605,8 @@ cmd_virt() {
         name="${2:?usage: omvm virt rm [--yes] NAME}"; need_name "$name"
         virt_rm "$name" "$yes"; return
     fi
-    upstream    need_name "$name"
+    need_name "$name"
+    upstream
     command -v virsh >/dev/null || die "install libvirt and virt-manager first: omarchy pkg add libvirt virt-manager"
     img="$(resolve_image "${2:-}")"
     local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port major
