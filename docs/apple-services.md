@@ -17,6 +17,21 @@ a running sibling passed. Overlapping fresh Apple Account requests also passed
 in both guests, each with HTTP 200 and `cache_hit=false`. Messaging in both
 guests and two-VM host-reboot recovery remain untested.
 
+## Turning it on for a VM
+
+The guest-side pieces (QEMU's identity device, `identity=on`, the AVP config
+mailbox `OMVM_MAILBOX=1`, the `ID_*` payload switches and an
+`identity-provider.json` SEP provider) are off for every VM by default. Opt a VM
+in, and redefine it, with:
+
+    omvm virt NAME --experimental-apple-services      # writes $OMVM_IMAGES/vms/NAME/apple_services
+    omvm virt NAME --no-experimental-apple-services   # back to a plain macOS guest
+
+A VM whose libvirt definition already has `identity=on` (defined before this
+was opt-in) keeps it: its next `omvm virt NAME` writes the flag file for it. The
+root admission gate of the [Linux helpers](apple-helpers.md) runs only once those
+helpers are installed, and only for omvm's own VMs (`$OMVM_IMAGES/vms/NAME`).
+
 ## Next steps
 
 1. Run the [manual checklist](apple-services-testing.md) on the existing lab.

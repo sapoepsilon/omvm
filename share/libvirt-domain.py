@@ -6,7 +6,8 @@ started, stopped and viewed from virt-manager / virsh.
     libvirt-domain.py NAME VMDIR QEMU_BIN FIRMWARE ECID SSH_PORT [CPUS] [RAM_GIB]
 
 VMDIR holds disk.img, aux.img.trimmed (and vm.json), plus optional switch files:
-guest_major (e.g. 27; docs/graphics.md "macOS 27 updates") and apple_vendor_cap.
+guest_major (e.g. 27; docs/graphics.md "macOS 27 updates"), apple_vendor_cap and
+apple_services (the experimental Apple services below; off without it).
 The vmapple machine and its devices are not modelled by libvirt, so they are
 passed as QEMU arguments; libvirt owns the lifecycle, memory (memfd, shared), vCPUs, the VNC console and the monitor.
 """
@@ -47,6 +48,15 @@ mac = "52:54:00:%02x:%02x:%02x" % tuple(dom_uuid.bytes[:3])
 xdg = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 AUDIODEV = f"pipewire,id=snd0,out.stream-name={name},in.stream-name={name}"
 
+# Experimental Apple services (Apple Account, iMessage; docs/apple-services.md):
+# QEMU's identity device, the AVP config mailbox it needs, the identity-payload
+# switches and the optional SEP identity provider. Off unless the VM opted in:
+# VMDIR/apple_services exists (`omvm virt NAME --experimental-apple-services`
+# writes it) or OMVM_APPLE_SERVICES=1; OMVM_APPLE_SERVICES=0 forces it off.
+_apple_env = os.environ.get("OMVM_APPLE_SERVICES", "")
+apple = _apple_env == "1" or (_apple_env != "0" and os.path.exists(f"{vmdir}/apple_services"))
+apple_machine = ",identity=on" if apple else ""
+
 # The SysCfg serial and MLB Apple personalised this VM with, if known. Both are
 # plain files beside the image so the values stay out of this script; without
 # them QEMU falls back to its placeholders (serial 1234, no MLB).
@@ -72,7 +82,6 @@ if cache not in ("writeback", "none", "writethrough", "directsync", "unsafe"):
 # second QEMU or a qemu-img from writing a disk this VM has open.
 # OMVM_DISK_LOCKING=0 turns it off there too (the behaviour before 2026-11).
 lock = "" if os.environ.get("OMVM_DISK_LOCKING", "1") != "0" else ",file.locking=off"
-apple_machine = ",identity=on"
 args = [
     "-machine", f"uuid={ecid},aux-ram-share=on{apple_machine}{identity_args}",
     "-L", f"{qdir}/qemu-bundle/usr/local/share/qemu",
@@ -123,24 +132,25 @@ env = {
     "REIMS_VGPU_LOG": "error",
     "TMPDIR": f"{home}/.cache/reims-vgpu",
     "XDG_RUNTIME_DIR": xdg,   # the user's PipeWire socket, for sound
+}
+if apple:
     # Maps the AVP config DMA mailbox at 0x4ffff8. The identity device is
     # useless without it: the platform expert fetches the host key (the UDID)
     # through that mailbox, and IdentityService asserts on it and never queues.
-    "OMVM_MAILBOX": "1",
-}
-# Identity-payload experiments (see research/identity/STATE-2026-11-11.md).
-# ID_SELFDESC serves the 4/4 and 4/6 payload as a serialised message; the 4/3
-# shape and 32-byte body are what the guest accepts.
-env.setdefault("ID_SELFDESC", "1")
-env.setdefault("ID_S3", "1")
-env.setdefault("ID_BLEN64", "1")
-env.setdefault("ID_BO4", "1")
-for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
-    if os.environ.get(_k):
-        env[_k] = os.environ[_k]
+    env["OMVM_MAILBOX"] = "1"
+    # Identity-payload experiments (docs/identity-issuance.md). ID_SELFDESC
+    # serves the 4/4 and 4/6 payload as a serialised message; the 4/3 shape and
+    # 32-byte body are what the guest accepts.
+    env.update({"ID_SELFDESC": "1", "ID_S3": "1", "ID_BLEN64": "1", "ID_BO4": "1"})
+    for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
+        if os.environ.get(_k):
+            env[_k] = os.environ[_k]
 # Experimental real-SEP identity bridge, explicitly enabled per VM. Keep this
 # beside the VM artifacts so `omvm virt` preserves the operator's provider.
 provider_file = os.path.join(vmdir, "identity-provider.json")
+if os.path.exists(provider_file) and not apple:
+    sys.exit("libvirt-domain.py: VMDIR/identity-provider.json needs the experimental Apple services: "
+             "omvm virt NAME --experimental-apple-services (or remove the provider file)")
 if os.path.exists(provider_file):
     with open(provider_file) as provider_stream:
         provider = json.load(provider_stream)

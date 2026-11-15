@@ -425,9 +425,23 @@ cmd_clip() {
 
 # A persistent VM managed by libvirt (qemu:///session): shows up in virt-manager,
 # which starts/stops it and shows its screen. Disk lives in $IMAGES/vms/NAME.
+# Experimental Apple services (docs/apple-services.md) are per VM and off by
+# default: --experimental-apple-services writes $IMAGES/vms/NAME/apple_services,
+# --no-experimental-apple-services removes it. A VM whose current libvirt
+# definition already has them (identity=on, from before they were opt-in) keeps
+# them: the flag file is written for it on its next `omvm virt`.
 cmd_virt() {
+    local apple="" a pos=()
+    for a in "$@"; do
+        case "$a" in
+        --experimental-apple-services) apple=on ;;
+        --no-experimental-apple-services) apple=off ;;
+        *) pos+=("$a") ;;
+        esac
+    done
+    set -- "${pos[@]}"
     upstream
-    local name="${1:?usage: omvm virt NAME [IMAGE] | omvm virt rm NAME}" img
+    local name="${1:?usage: omvm virt NAME [IMAGE] [--[no-]experimental-apple-services] | omvm virt rm NAME}" img
     if [ "$name" = rm ]; then
         name="${2:?usage: omvm virt rm NAME}"; need_name "$name"
         virsh -q -c qemu:///session destroy "$name" >/dev/null 2>&1 || true
@@ -448,6 +462,14 @@ cmd_virt() {
         for f in disk.img aux.img.trimmed vm.json; do cp --reflink=auto "$img/guest/$f" "$dir/$f"; chmod u+w "$dir/$f"; done
         ok "$name: disk cloned from $(basename "$img")"
     fi
+    case "$apple" in
+    on) touch "$dir/apple_services"; warn "$name: experimental Apple services on" ;;
+    off) rm -f "$dir/apple_services" ;;
+    *) if [ ! -e "$dir/apple_services" ] && "${VIRSH[@]}" dumpxml --inactive "$name" 2>/dev/null | grep -q 'identity=on'; then
+           touch "$dir/apple_services"
+           warn "$name: kept its experimental Apple services (turn off: omvm virt $name --no-experimental-apple-services)"
+       fi ;;
+    esac
     port="$(cat "$dir/ssh_port" 2>/dev/null || python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     echo "$port" > "$dir/ssh_port"
     guest_env
@@ -977,7 +999,9 @@ virt-hook) shift
     valid_name "${1:-}" || exit 0
     # prepare/started/begin and release/end need the original XML on stdin. No libvirt
     # calls (including upstream checkout) may occur inside this hook.
-    if [ -x /usr/local/libexec/omvm-apple-helpers ]; then
+    # The experimental Apple helpers' admission gate (installed only by their own
+    # opt-in installer, docs/apple-helpers.md) applies to omvm's own VMs only.
+    if [ -x /usr/local/libexec/omvm-apple-helpers ] && [ -f "$IMAGES/vms/$1/ssh_port" ]; then
         case "${2:-}/${3:-}" in
         prepare/begin|started/begin|release/end)
             sudo -n /usr/local/libexec/omvm-apple-helpers gate "$1" "$2" "$3" ;;
