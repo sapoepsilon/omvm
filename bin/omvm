@@ -188,8 +188,13 @@ priv() { # ACTION ARGS...: run one privileged action as root
 # The only actions __priv dispatches. A function name with a slash in it would
 # run a file, so the action is checked here, not just put into "__priv_$1".
 valid_priv_action() { case "$1" in governors|usb_grant|usb_revoke) return 0 ;; *) return 1 ;; esac; }
-priv_caller_uid() { # the (non-root) user who authorized this, from pkexec or sudo
-    local u="${PKEXEC_UID:-${SUDO_UID:-}}"
+priv_caller_uid() { # the (non-root) user who authorized this, from whichever elevated us
+    # sudo stays our parent process; pkexec execs us in its own place (so our
+    # parent is whatever ran pkexec) and sets PKEXEC_UID. Each variable is
+    # trusted only from its own elevator.
+    local u parent
+    parent="$(cat "/proc/$PPID/comm" 2>/dev/null || true)"
+    if [ "$parent" = sudo ]; then u="${SUDO_UID:-}"; else u="${PKEXEC_UID:-}"; fi
     [[ $u =~ ^[0-9]{1,10}$ ]] && ((10#$u > 0)) || return 1
     echo $((10#$u))
 }
