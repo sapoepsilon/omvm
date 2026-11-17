@@ -6,6 +6,7 @@
 #
 #   omvm helpers status NAME | install-hook  Linux Apple Account helper readiness
 #   omvm doctor                 check this host
+#   omvm prepare                per-user setup without a guest: SSH key, harness, gui.env
 #   omvm kernel build|install|default|revert  (default: interim, pins a locally built kernel)
 #   omvm qemu build             build the vmapple QEMU fork
 #   omvm macos-step             stage the one-time macOS script on the ESP
@@ -71,6 +72,17 @@ OMVM_VM="${OMVM_VM:-$(cfg_env OMVM_VM)}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
 KPKG=linux-aurora-vmapple
+# The packaged stack (sapoepsilon/omarchy-mac-pkgs macos-vm: qemu-vmapple,
+# mesa-honeykrisp-vmapple) stands in for a local build; a build under
+# $UPSTREAM/build or ~/opt, OMVM_QEMU and OMVM_QEMU27 still win.
+PKG_QEMU=/usr/lib/qemu-vmapple/qemu-system-aarch64
+PKG_MESA=/usr/lib/mesa-honeykrisp-vmapple
+sb_qemu() { [ -n "${OMVM_QEMU:-}" ] && { echo "$OMVM_QEMU"; return; }
+    local q="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64"
+    if [ ! -x "$q" ] && [ -x "$PKG_QEMU" ]; then echo "$PKG_QEMU"; else echo "$q"; fi; }
+sb27_qemu() { [ -n "${OMVM_QEMU27:-}" ] && { echo "$OMVM_QEMU27"; return; }
+    local q="$UPSTREAM/build/qemu-sb-bdifw/build/qemu-system-aarch64"
+    if [ ! -x "$q" ] && [ -x "$PKG_QEMU" ]; then echo "$PKG_QEMU"; else echo "$q"; fi; }
 
 # The Vulkan driver (ICD) the paravirtual GPU renders with (icd_for KIND):
 #   sb     OMVM_VK_ICD      headless/VNC VMs and `omvm gui`
@@ -80,7 +92,7 @@ KPKG=linux-aurora-vmapple
 # docs/graphics.md puts in ~/opt, if it is there; else the packaged Mesa.
 SYS_ICD=/usr/share/vulkan/icd.d/asahi_icd.aarch64.json
 icd_for() { # sb|oop|local -> ICD path
-    local var build v legacy
+    local var build v legacy pkg
     case "$1" in
     sb) var=OMVM_VK_ICD build=mesa-honeykrisp-sb ;;
     oop) var=OMVM_OOP_VK_ICD build=mesa-honeykrisp ;;
@@ -90,7 +102,9 @@ icd_for() { # sb|oop|local -> ICD path
     v="$(cfg "$var")"
     [ -n "$v" ] && { echo "$v"; return; }
     legacy="$HOME/opt/$build/share/vulkan/icd.d/asahi_icd.aarch64.json"
-    if [ -f "$legacy" ]; then echo "$legacy"; else echo "$SYS_ICD"; fi
+    case "$1" in sb) pkg="$PKG_MESA/headless" ;; local) pkg="$PKG_MESA/wayland" ;; *) pkg=/nonexistent ;; esac
+    pkg="$pkg/share/vulkan/icd.d/asahi_icd.aarch64.json"
+    if [ -f "$legacy" ]; then echo "$legacy"; elif [ -f "$pkg" ]; then echo "$pkg"; else echo "$SYS_ICD"; fi
 }
 
 c_b=$'\e[1m'; c_g=$'\e[32m'; c_r=$'\e[31m'; c_y=$'\e[33m'; c_0=$'\e[0m'
@@ -294,7 +308,9 @@ cmd_doctor() {
     elif pacman -Q "$KPKG" >/dev/null 2>&1; then warn "$KPKG installed but not booted: reboot into it"
     else bad "macOS-guest KVM patches missing: omvm kernel build && omvm kernel install"; fails=1; fi
     local q="$UPSTREAM/build/qemu-fleet/vendor/qemu/build/qemu-system-aarch64"
-    [ -x "$q" ] && ok "QEMU fork built" || { bad "QEMU fork missing: omvm qemu build"; fails=1; }
+    if [ -x "$q" ]; then ok "QEMU fork built"
+    elif [ -x "$PKG_QEMU" ]; then ok "QEMU fork packaged ($PKG_QEMU; omvm virt and gui)"
+    else bad "QEMU fork missing: omvm qemu build (or install qemu-vmapple)"; fails=1; fi
     ls "$UPSTREAM"/artifacts/firmware/AVPBooter.vmapple2.*.bin >/dev/null 2>&1 && ok "AVPBooter present (user-supplied)" \
         || warn "no AVPBooter yet (omvm macos-step, then omvm ingest)"
     local img; img="$(latest_image)"
@@ -316,6 +332,23 @@ aurora_commit_for() {   # $1 = installed linux-aurora version, e.g. 7.2.11.auror
         fi
     done
     return 1
+}
+
+# Everything a user needs before the macOS step, without sudo and without a guest:
+# the SSH key, the pinned guest harness, gui.env, virt-manager's session URI.
+cmd_prepare() {
+    mkdir -p "$DATA" "$IMAGES" "$(dirname "$KEY")"
+    test -f "$KEY" || ssh-keygen -q -t ed25519 -N '' -C omvm -f "$KEY"
+    ok "SSH key: $KEY"
+    upstream && ok "guest harness: $UPSTREAM"
+    local var
+    for var in OMVM_UPSTREAM:"$UPSTREAM" OMVM_IMAGES:"$IMAGES" OMVM_KEY:"$KEY"; do
+        [ -n "$(cfg_env "${var%%:*}")" ] || cfg_save "${var%%:*}" "${var#*:}"
+    done
+    ok "settings: $CFG_FILE"
+    gsettings set org.virt-manager.virt-manager.connections uris "['qemu:///session']" 2>/dev/null || true
+    gsettings set org.virt-manager.virt-manager.connections autoconnect "['qemu:///session']" 2>/dev/null || true
+    ok "next: omvm macos-step (boots macOS once), then omvm ingest && omvm setup --xcode"
 }
 
 cmd_kernel() {
@@ -358,7 +391,9 @@ PY
         local pkg; pkg="$(ls "$DATA"/kernel/$KPKG-*.pkg.tar.* 2>/dev/null | tail -1)"
         test -n "$pkg" || die "build it first: omvm kernel build"
         say "pinning m1n1 device trees to the stock kernel"
-        if ! grep -q 'omvm:' /etc/default/update-m1n1 2>/dev/null; then
+        if grep -qs dtb_overlays_kernel_modules /usr/lib/omarchy-mac/boot/dtb-overlays.sh; then
+            ok "omarchy-mac-boot already takes m1n1's device trees from linux-aurora"
+        elif ! grep -q 'omvm:' /etc/default/update-m1n1 2>/dev/null; then
             sudo cp /etc/default/update-m1n1 /etc/default/update-m1n1.pre-omvm
             sudo tee -a /etc/default/update-m1n1 >/dev/null <<'EOF'
 
@@ -560,7 +595,7 @@ cmd_gui() {
     export GFX=reims; guest_env
     # Upstream reims-vgpu stack (in-process apple-gfx-mmio + interlock-patched Honeykrisp):
     # renders the desktop without artifacts. See docs/graphics.md.
-    local sb="$UPSTREAM/build/qemu-sb/build" sbicd; sbicd="$(icd_for sb)"
+    local sb sbicd; sb="$(dirname "$(sb_qemu)")"; sbicd="$(icd_for sb)"
     if [ "${OMVM_GFX_STACK:-sb}" = sb ] && [ -x "$sb/qemu-system-aarch64" ] && [ -f "$sbicd" ]; then
         # OMVM_MODE=local: reims-vgpu's own window on this screen instead of VNC (see omvm mode)
         local window=0 view="-vnc 127.0.0.1:$disp" res="${RESOLUTION:-}"
@@ -671,11 +706,11 @@ cmd_virt() {
     upstream
     command -v virsh >/dev/null || die "install libvirt and virt-manager first: omarchy pkg add libvirt virt-manager"
     img="$(resolve_image "${2:-}")"
-    local qemu="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64" dir="$IMAGES/vms/$name" port major
+    local qemu dir="$IMAGES/vms/$name" port major; qemu="$(sb_qemu)"
     # macOS 27 guests ($dir/guest_major >= 27) need the 27-patched QEMU (0005-0007) and
     # the 27-era AVPBooter; see docs/graphics.md "macOS 27 updates".
     major="$(cat "$dir/guest_major" 2>/dev/null || echo 0)"
-    [ "${major:-0}" -ge 27 ] 2>/dev/null && qemu="${OMVM_QEMU27:-$UPSTREAM/build/qemu-sb-bdifw/build/qemu-system-aarch64}"
+    [ "${major:-0}" -ge 27 ] 2>/dev/null && qemu="$(sb27_qemu)"
     [ -x "$qemu" ] || die "build the graphics stack first (docs/graphics.md): no $qemu"
     if [ ! -f "$dir/disk.img" ]; then
         # A new VM records its account now, so it never takes the legacy fallback.
@@ -1310,6 +1345,7 @@ __priv)
     valid_priv_action "$action" || die "unknown privileged action"
     "__priv_$action" "$@" ;;
 doctor) shift; cmd_doctor "$@" ;;
+prepare) shift; cmd_prepare "$@" ;;
 kernel) shift; cmd_kernel "$@" ;;
 qemu) shift; cmd_qemu "$@" ;;
 macos-step) shift; cmd_macos_step "$@" ;;

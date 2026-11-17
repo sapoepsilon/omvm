@@ -32,6 +32,9 @@ optdepends=(
   'usbutils: lsusb in omvm-gui'
   'sunshine: omvm remote (Moonlight streaming)'
   'base-devel: omvm kernel build'
+  'qemu-vmapple: the packaged vmapple QEMU (instead of omvm qemu build)'
+  'mesa-honeykrisp-vmapple: the packaged patched Honeykrisp (instead of docs/graphics.md)'
+  'linux-aurora-vmapple: the packaged side kernel (instead of omvm kernel build)'
 )
 makedepends=('git')
 provides=('omvm')
@@ -80,6 +83,7 @@ package() {
   install -Dm755 packaging/omvm-power-changed "$pkgdir/usr/lib/omvm/omvm-power-changed"
   install -Dm644 packaging/systemd/omvm-power.service "$pkgdir/usr/lib/systemd/user/omvm-power.service"
   install -Dm644 packaging/sysusers-omvm.conf "$pkgdir/usr/lib/sysusers.d/omvm.conf"
+  install -Dm644 packaging/tmpfiles/omvm-udmabuf.conf "$pkgdir/usr/lib/tmpfiles.d/omvm-udmabuf.conf"
 
   install -Dm644 -t "$pkgdir/usr/share/doc/omvm" README.md AGENTS.md LICENSING.md
   cp -r --no-preserve=ownership docs "$pkgdir/usr/share/doc/omvm/docs"

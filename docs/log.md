@@ -341,6 +341,20 @@
   - The mailbox region overlapped the `pcie-ecam` alias, so the ECAM alias stops
     one page short.
 
+
+## 2026-11-17
+
+- **omvm runs on the packaged stack** (branch `macos-vm`, on `omarchy/must-fix`; for
+  sapoepsilon/omarchy-mac-pkgs `macos-vm`): `omvm virt` and `omvm gui` take
+  `/usr/lib/qemu-vmapple/qemu-system-aarch64` when `$OMVM_UPSTREAM/build/qemu-sb{,-bdifw}`
+  is not built, and `icd_for sb|local` falls back to
+  `/usr/lib/mesa-honeykrisp-vmapple/{headless,wayland}` before the system Mesa.
+  `OMVM_QEMU`/`OMVM_QEMU27`/`OMVM_*ICD` and local builds still win. New `omvm prepare`
+  (SSH key, harness, gui.env, virt-manager URI; no sudo, no guest), run per user by
+  omarchy-macos-vm's first-login unit. `omvm kernel install` skips its update-m1n1 block
+  when omarchy-mac-boot already pins m1n1's device trees to linux-aurora. The package
+  ships the udmabuf limits as `/usr/lib/tmpfiles.d/omvm-udmabuf.conf`.
+
 ## 2026-11-09
 
 - **`macos` ssh dead (port 42541 open, no banner): the guest clock was in 2083, fixed
