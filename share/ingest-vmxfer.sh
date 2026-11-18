@@ -11,11 +11,15 @@ ENVF="${OMVM_ENVF:-$ART/vm.env}"
 MNT="${MNT:-/mnt/vmxfer}"
 
 die() { echo "error: $*" >&2; exit 1; }
-dev="$(lsblk -rno PATH,LABEL | awk '$2=="VMXFER"{print $1; exit}')"
-test -n "$dev" || die "no partition labelled VMXFER found"
-sudo mkdir -p "$MNT"
-mountpoint -q "$MNT" || sudo mount -t exfat -o ro,uid="$(id -u)",gid="$(id -g)" "$dev" "$MNT"
-trap 'cd /; sudo umount "$MNT" 2>/dev/null || true' EXIT
+# MNT may already hold VMXFER, mounted read-only by omarchy-macos-vm-vmxfer.service
+# (root, at boot): then nothing here needs sudo, and the mount is left as it was.
+if ! mountpoint -q "$MNT"; then
+    dev="$(lsblk -rno PATH,LABEL | awk '$2=="VMXFER"{print $1; exit}')"
+    test -n "$dev" || die "no partition labelled VMXFER found"
+    sudo mkdir -p "$MNT"
+    sudo mount -t exfat -o ro,uid="$(id -u)",gid="$(id -g)" "$dev" "$MNT"
+    trap 'cd /; sudo umount "$MNT" 2>/dev/null || true' EXIT
+fi
 
 echo "== host info"; cat "$MNT/host-sw_vers.txt" "$MNT/xcode-version.txt" 2>/dev/null || true
 echo "== verifying transfer checksums"
