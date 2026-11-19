@@ -3,6 +3,16 @@
 A running, dated log of changes to this setup (the omvm repo and the Omarchy
 host it runs on). Newest first. Agents: append an entry after each change.
 
+## 2026-11-19
+
+- **Fresh install: `omvm` exited silently (code 2) before running any command.**
+  `cfg_env` reads `~/.config/omvm/gui.env`, which does not exist yet; under
+  `set -o pipefail` the failing `sed` killed the script, with stderr discarded.
+  The same pattern made `omvm doctor` stop before the guest-image and tools checks
+  (`latest_image` with no images) and `omvm kernel install` exit before its
+  "build it first" message. Added `|| true` to the three pipelines, as `guest_env`
+  already does.
+
 ## 2026-11-09
 
 - **`macos` ssh dead (port 42541 open, no banner): the guest clock was in 2083, fixed
