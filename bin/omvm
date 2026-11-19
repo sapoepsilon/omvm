@@ -40,7 +40,7 @@ KEY="${OMVM_KEY:-$HOME/.ssh/omvm_ed25519}"
 # The guest account omvm logs in as. Upstream's create-account.sh names it aquarat
 # unless told otherwise; set OMVM_GUEST_USER before `omvm setup` (or after renaming
 # the account) and keep it in ~/.config/omvm/gui.env, which services also read.
-cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1; }
+cfg_env() { sed -n "s/^$1=//p" "${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env" 2>/dev/null | tail -1 || true; }
 GUEST_USER="${OMVM_GUEST_USER:-$(cfg_env OMVM_GUEST_USER)}"; GUEST_USER="${GUEST_USER:-aquarat}"
 SHARE="${OMVM_SHARE:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../share" && pwd)}"
 BUNDLE=tahoe-26.4-25E246
@@ -67,7 +67,7 @@ upstream() {
     git -C "$UPSTREAM" checkout -q "$UPSTREAM_REF"
 }
 
-latest_image() { ls -d "$IMAGES/$BUNDLE"-v* 2>/dev/null | sort -V | tail -1; }
+latest_image() { ls -d "$IMAGES/$BUNDLE"-v* 2>/dev/null | sort -V | tail -1 || true; }
 
 guest_env() {
     local booter
@@ -152,7 +152,7 @@ PY
         ls "$dir"/$KPKG-*.pkg.tar.*
         ;;
     install)
-        local pkg; pkg="$(ls "$DATA"/kernel/$KPKG-*.pkg.tar.* 2>/dev/null | tail -1)"
+        local pkg; pkg="$(ls "$DATA"/kernel/$KPKG-*.pkg.tar.* 2>/dev/null | tail -1 || true)"
         test -n "$pkg" || die "build it first: omvm kernel build"
         say "pinning m1n1 device trees to the stock kernel"
         if ! grep -q 'omvm:' /etc/default/update-m1n1 2>/dev/null; then
