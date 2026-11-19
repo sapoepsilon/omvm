@@ -290,6 +290,22 @@ guest_env() {
     export AVPBOOTER="$booter" RUNNER_KEY="$KEY" GFX="${GFX:-none}"
 }
 
+# Upstream's headless launchers (vm-run.sh -> launch-kvm.sh and check-host.sh,
+# under create-account.sh, bake-golden.sh, vm-job.sh and bake-xcode-dmg.sh)
+# look for QEMU only under $UPSTREAM/build and default the Vulkan driver to
+# lavapipe. A packaged install has neither: hand them the QEMU sb_qemu picks
+# and, without lavapipe, the Honeykrisp ICD. An upstream build, QEMU_BIN and
+# VK_DRIVER_FILES still win.
+headless_env() {
+    local q; q="$(sb_qemu)"
+    if [ -z "${QEMU_BIN:-}" ] && [ ! -x "$UPSTREAM/build/qemu-fleet/vendor/qemu/build/qemu-system-aarch64" ] && [ -x "$q" ]; then
+        export QEMU_BIN="$q"
+    fi
+    if [ -z "${VK_DRIVER_FILES:-}" ] && [ ! -f /usr/share/vulkan/icd.d/lvp_icd.aarch64.json ]; then
+        VK_DRIVER_FILES="$(icd_for sb)"; export VK_DRIVER_FILES
+    fi
+}
+
 # ---------------------------------------------------------------- doctor
 cmd_doctor() {
     local fails=0
@@ -469,7 +485,7 @@ cmd_ingest() {
 
 # ---------------------------------------------------------------- setup
 cmd_setup() {
-    need_hw; upstream; guest_env
+    need_hw; upstream; guest_env; headless_env
     test -f "$KEY" || ssh-keygen -q -t ed25519 -N '' -C omvm -f "$KEY"
     local src="$IMAGES/$BUNDLE-restore" v0="$IMAGES/$BUNDLE-v0" v1="$IMAGES/$BUNDLE-v1" v2="$IMAGES/$BUNDLE-v2"
     test -d "$src" || die "no restored bundle: run 'omvm ingest' first"
@@ -508,7 +524,7 @@ cmd_setup() {
 resolve_image() { local i="${1:-}"; [ -z "$i" ] && i="$(latest_image)"; [ -d "$i" ] || i="$IMAGES/$i"; [ -d "$i" ] || die "no such image: ${1:-<none>}"; echo "$i"; }
 
 cmd_run() {
-    upstream; guest_env
+    upstream; guest_env; headless_env
     local img=""; [ "${1:-}" != -- ] && { img="$1"; shift; }; [ "${1:-}" = -- ] && shift
     [ $# -gt 0 ] || die "usage: omvm run [IMAGE] -- COMMAND"
     img="$(resolve_image "$img")"
@@ -519,7 +535,7 @@ port_of() { need_name "$1"; cat "$UPSTREAM/artifacts/runs/$1/ssh_port" 2>/dev/nu
 
 cmd_start() {
     if [ $# = 1 ] && is_virt "$1"; then cmd_power start "$1"; return; fi
-    upstream; guest_env
+    upstream; guest_env; headless_env
     local name="${1:?usage: omvm start NAME [IMAGE]}" img; need_name "$name"; img="$(resolve_image "${2:-}")"
     need_guest_user
     local port; port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
