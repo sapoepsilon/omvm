@@ -1014,7 +1014,8 @@ mode_xml() { # local SCREEN WAYLAND | remote: domain XML on stdin -> that mode's
     fi
 }
 vm_autostart() { # NAME -> enable|disable (libvirt's flag), empty if no such domain
-    "${VIRSH[@]}" dominfo "$1" 2>/dev/null | awk -F': *' '$1 == "Autostart" { print $2 }'
+    # No such domain is not an error (a new VM): pipefail would end `omvm virt` here.
+    { "${VIRSH[@]}" dominfo "$1" 2>/dev/null || true; } | awk -F': *' '$1 == "Autostart" { print $2 }'
 }
 # libvirt autostart runs at boot, before any Wayland session: local mode turns it
 # off and leaves starting to omvm-vm@NAME (which waits for the session). Back in
