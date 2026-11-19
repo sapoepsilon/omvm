@@ -509,8 +509,9 @@ cmd_setup() {
     if ! test -d "$v1"; then
         say "headless settings + Command Line Tools (~5 min)"
         local tz; tz="$(timedatectl show -p Timezone --value 2>/dev/null || echo UTC)"
-        (cd "$UPSTREAM" && scripts/bake-golden.sh "$v0" "$v1" "headless settings, CLT, TZ $tz" \
-            "env CLT_VERSION=any GUEST_TZ=$tz bash -s" < images/10-headless-clt.sh)
+        # omvm's bake-golden.sh: upstream's logs in as aquarat, not the configured account
+        OMVM_REPO="$UPSTREAM" GUEST_USER="$GUEST_USER" bash "$SHARE/bake-golden.sh" "$v0" "$v1" "headless settings, CLT, TZ $tz" \
+            "env CLT_VERSION=any GUEST_TZ=$tz bash -s" < "$UPSTREAM/images/10-headless-clt.sh"
     fi
     if [ "${1:-}" = --xcode ] && ! test -d "$v2"; then
         test -f "$IMAGES/Xcode.dmg" || die "no Xcode.dmg (the macOS step copies your installed Xcode.app)"
