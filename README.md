@@ -146,6 +146,17 @@ The guest account is `aquarat` (upstream's default). To use another name, set
 `OMVM_GUEST_USER` before `omvm setup`, or after renaming the account in macOS,
 and save it with `omvm-gui --install` (services read `~/.config/omvm/gui.env`).
 
+The account's password is the first line of `~/.local/share/omvm/guest-password`
+(0600): put one there before `omvm setup` (Omarchy's `omarchy-macos-vm` writes the
+one chosen in its wizard), or setup generates a random one. The `-v1` layer also
+logs that account in automatically (loginwindow `autoLoginUser` and an encoded
+`/etc/kcpassword`, the way System Settings does it) and marks the post-login
+Setup Assistant panes seen, including "Update Mac Automatically", so a VM
+starts straight to the desktop; the password still works for sudo and the lock
+screen. `OMVM_AUTOLOGIN=0` (environment or gui.env) leaves the login window.
+`omvm autologin NAME` does the same in a running VM made before this, or after
+a macOS update brings Setup Assistant back.
+
 ## How it works
 
 | Piece | What it is | Where it comes from |
