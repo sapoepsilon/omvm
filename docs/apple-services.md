@@ -27,6 +27,23 @@ in, and redefine it, with:
     omvm virt NAME --experimental-apple-services      # writes $OMVM_IMAGES/vms/NAME/apple_services
     omvm virt NAME --no-experimental-apple-services   # back to a plain macOS guest
 
+An opted-in VM runs the identity-enabled QEMU at
+`/usr/lib/omvm-apple-services/qemu-system-aarch64` (`OMVM_APPLE_QEMU`;
+`qemu-vmapple` has no identity/FairPlay patches), gets the
+`apple-fairplay-pci,relay-socket=/run/omvm-fairplay-managed-NAME/relay.sock`
+device once the root helpers are installed (`OMVM_FAIRPLAY=0` leaves it out),
+and, without its own `VMDIR/identity-provider.json`, uses the host's
+`$XDG_CONFIG_HOME/omvm/apple-services/identity-provider.json`: one SEP key and
+Apple-issued chain serve every VM on the Mac, while each VM keeps its own
+FairPlay identifier (its IOPlatformUUID) and checkpoint.
+
+On a fresh Omarchy install, the per-owner prerequisites (SEP keybag and
+ref-key, certificate chain, reviewed provider/backend builds, Apple asset
+cache, AES m1n1 image, that QEMU) come from another Linux install on the same
+Mac: `omarchy-macos-vm apple-services import old-root|SRC`, then
+`omarchy-macos-vm apple-services enable` per VM (omarchy-mac-pkgs
+`omarchy-macos-vm/README.md`). They cannot ship in a package.
+
 A VM whose libvirt definition already has `identity=on` (defined before this
 was opt-in) keeps it: its next `omvm virt NAME` writes the flag file for it. The
 root admission gate of the [Linux helpers](apple-helpers.md) runs only once those

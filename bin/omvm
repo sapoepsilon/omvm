@@ -77,6 +77,7 @@ KPKG=linux-aurora-vmapple
 # mesa-honeykrisp-vmapple) stands in for a local build; a build under
 # $UPSTREAM/build or ~/opt, OMVM_QEMU and OMVM_QEMU27 still win.
 PKG_QEMU=/usr/lib/qemu-vmapple/qemu-system-aarch64
+APPLE_QEMU=/usr/lib/omvm-apple-services/qemu-system-aarch64
 PKG_MESA=/usr/lib/mesa-honeykrisp-vmapple
 sb_qemu() { [ -n "${OMVM_QEMU:-}" ] && { echo "$OMVM_QEMU"; return; }
     local q="$UPSTREAM/build/qemu-sb/build/qemu-system-aarch64"
@@ -792,6 +793,15 @@ cmd_virt() {
            warn "$name: kept its experimental Apple services (turn off: omvm virt $name --no-experimental-apple-services)"
        fi ;;
     esac
+    # The identity device and FairPlay frontend are not in qemu-vmapple: an
+    # opted-in VM runs the identity-enabled QEMU (OMVM_APPLE_QEMU, default
+    # $APPLE_QEMU, put there by `omarchy-macos-vm apple-services import`).
+    # OMVM_QEMU / OMVM_QEMU27 still win.
+    if [ -e "$dir/apple_services" ] && [ -z "${OMVM_QEMU:-}${OMVM_QEMU27:-}" ]; then
+        local aq; aq="$(cfg OMVM_APPLE_QEMU "$APPLE_QEMU")"
+        if [ -x "$aq" ]; then qemu="$aq"
+        else warn "$name: no identity-enabled QEMU at $aq; Apple sign-in will fail (omarchy-macos-vm apple-services import)"; fi
+    fi
     port="$(cat "$dir/ssh_port" 2>/dev/null || python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
     echo "$port" > "$dir/ssh_port"
     guest_env

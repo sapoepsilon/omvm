@@ -147,9 +147,23 @@ if apple:
     for _k in ("ID_BLEN64", "ID_S3", "ID_SELFDESC", "ID_NB0", "ID_BO4"):
         if os.environ.get(_k):
             env[_k] = os.environ[_k]
+    # The Linux FairPlay helper (docs/apple-helpers.md): once the root helpers
+    # are installed, the libvirt gate starts omvm-fairplay@NAME and refuses a
+    # managed domain without exactly this device. OMVM_FAIRPLAY=0 leaves it out.
+    if os.environ.get("OMVM_FAIRPLAY", "") != "0" and (
+            os.environ.get("OMVM_FAIRPLAY") == "1"
+            or os.path.exists("/usr/local/libexec/omvm-apple-helpers")):
+        args += ["-device", f"apple-fairplay-pci,relay-socket=/run/omvm-fairplay-managed-{name}/relay.sock"]
 # Experimental real-SEP identity bridge, explicitly enabled per VM. Keep this
 # beside the VM artifacts so `omvm virt` preserves the operator's provider.
+# Without one, an opted-in VM uses the host's (one SEP key and certificate
+# chain serve every VM on the machine), which `omarchy-macos-vm apple-services
+# import` writes to $XDG_CONFIG_HOME/omvm/apple-services/identity-provider.json.
 provider_file = os.path.join(vmdir, "identity-provider.json")
+host_provider = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
+                             "omvm", "apple-services", "identity-provider.json")
+if apple and not os.path.exists(provider_file) and os.path.exists(host_provider):
+    provider_file = host_provider
 if os.path.exists(provider_file) and not apple:
     sys.exit("libvirt-domain.py: VMDIR/identity-provider.json needs the experimental Apple services: "
              "omvm virt NAME --experimental-apple-services (or remove the provider file)")
@@ -165,7 +179,7 @@ if os.path.exists(provider_file):
         value = provider[key]
         if not isinstance(value, str) or not value:
             raise SystemExit("identity provider file paths must be nonempty strings")
-        path = os.path.abspath(os.path.join(vmdir, value))
+        path = os.path.abspath(os.path.join(os.path.dirname(provider_file), value))
         if not os.path.isfile(path):
             raise SystemExit("identity provider file is missing: " + key)
         env[variable] = path
